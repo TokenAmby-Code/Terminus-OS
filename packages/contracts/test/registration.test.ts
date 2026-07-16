@@ -1,0 +1,63 @@
+import { describe, expect, test } from "bun:test";
+import {
+  InstanceRegistrationRow,
+  INSTANCE_STATUSES,
+  ORIGIN_TYPES,
+  RankId,
+} from "../src/registration.ts";
+
+// Mirror of the identity/lifecycle core of the `instances` table
+// (token-api/db_schema.py :: CREATE TABLE instances + INSTANCE_COLUMNS).
+const ROW = {
+  id: "inst-abc",
+  name: "terminus-os-scaffold",
+  engine: "claude",
+  working_dir: "/Users/tokenclaw/worktrees/Terminus-OS/main",
+  device_id: "mac",
+  origin_type: "dispatch",
+  commander_type: "persona",
+  commander_id: "council:custodes",
+  status: "working",
+  created_at: "2026-07-16 21:00:00",
+  last_activity: "2026-07-16 21:05:00",
+  stopped_at: null,
+  archived_at: null,
+  persona_id: "council:custodes",
+  rank: "astartes",
+  session_doc_id: 42,
+  continuity_binding_source: null,
+  wrapper_launch_id: "wl-001",
+  automated: 0,
+  notification_mode: "verbose",
+  interaction_mode: "text",
+  is_subagent: 0,
+  hook_driven: 0,
+  stop_allowed: 1,
+} as const;
+
+describe("instance registration row (foundation)", () => {
+  test("a representative registration row parses", () => {
+    const row = InstanceRegistrationRow.parse(ROW);
+    expect(row.id).toBe("inst-abc");
+    expect(row.wrapper_launch_id).toBe("wl-001");
+  });
+
+  test("enums are enforced faithfully to the DB CHECK constraints", () => {
+    expect(ORIGIN_TYPES).toContain("perpetual");
+    expect(INSTANCE_STATUSES).toContain("victorious");
+    expect(() => InstanceRegistrationRow.parse({ ...ROW, origin_type: "telepathy" })).toThrow();
+    expect(() => InstanceRegistrationRow.parse({ ...ROW, status: "vibing" })).toThrow();
+  });
+
+  test("rank accepts the fixed ranks OR an aspirant:* label", () => {
+    expect(RankId.parse("primarch")).toBe("primarch");
+    expect(RankId.parse("aspirant:ultramarines")).toBe("aspirant:ultramarines");
+    expect(() => RankId.parse("aspirant")).toThrow();
+    expect(() => RankId.parse("chaplain")).toThrow();
+  });
+
+  test("int-bit flags are 0|1 (faithful to SQLite INTEGER, not coerced to bool)", () => {
+    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: true })).toThrow();
+    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: 2 })).toThrow();
+  });
+});

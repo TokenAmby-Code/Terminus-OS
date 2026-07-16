@@ -1,0 +1,19 @@
+{
+  "name": "@terminus-os/contracts",
+  "version": "0.0.0",
+  "description": "Typed lifecycle contracts for the Terminus system. Registration/bind/ledger foundation types; tmuxctld op envelopes consume them.",
+  "type": "module",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./registration": "./src/registration.ts",
+    "./ledger": "./src/ledger.ts",
+    "./bind": "./src/bind.ts",
+    "./envelope": "./src/envelope.ts",
+    "./tmuxctld": "./src/tmuxctld.ts"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}
