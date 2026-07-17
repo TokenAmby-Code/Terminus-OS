@@ -6,7 +6,11 @@ import {
   PERSONAL_NOTIFICATION_PROFILE,
   resolveNotificationRoute,
   WORK_NOTIFICATION_PROFILE,
-} from "../src/notification.ts";
+} from "@terminus-os/contracts";
+import {
+  NotificationIngress as SubpathNotificationIngress,
+  NOTIFICATION_CONTRACT_VERSION as SUBPATH_VERSION,
+} from "@terminus-os/contracts/notification";
 
 const agent = {
   version: "notification-origin.v1",
@@ -21,6 +25,11 @@ const agent = {
 } as const;
 
 describe("notification-origin.v1 behavioral pins", () => {
+  test("the package root and ./notification subpath expose the canonical contract", () => {
+    expect(SubpathNotificationIngress).toBe(NotificationIngress);
+    expect(SUBPATH_VERSION).toBe(NOTIFICATION_CONTRACT_VERSION);
+  });
+
   test("machine provenance derives the local identity and logical destination", () => {
     expect(resolveNotificationRoute(PERSONAL_NOTIFICATION_PROFILE, agent)).toEqual({
       version: NOTIFICATION_CONTRACT_VERSION,
