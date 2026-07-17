@@ -1,0 +1,33 @@
+# terminus-discord — the Terminus-OS Discord tenant on k12-personal. A `systemctl --user`
+# unit, matching the fleet's service convention (cf. Token-Fleet edge-proxy): runs as the
+# login user from the LOCAL checkout, credentials from a user-owned env file. Install is owned
+# by Token-Fleet's apply chain (shared/bin/apply-terminus-discord).
+[Unit]
+Description=Terminus-OS Discord tenant (k12-personal)
+Documentation=https://github.com/TokenAmby-Code/Terminus-OS
+# Reaches Discord over the network; no Token-API/tmuxctld dependency, no NAS mount dependency
+# (the old daemon's launchd ordering against those is gone).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The tenant runs from the LOCAL runtime checkout — the hot path never traverses the NAS/SMB
+# mount (recon §6). NAS stays durable coordination, not a runtime dependency.
+WorkingDirectory=%h/runtimes/Terminus-OS/live
+# Credentials are ENV-ONLY. Token-Fleet provisions this user-owned file (0600) from its secret
+# store; it is NEVER in the checkout. Every variable it must carry is enumerated in
+# deploy/env/terminus-discord.env.example. This replaces the old daemon's macOS Keychain reads.
+# No dash prefix: the tenant requires its credentials, so an absent file fails the unit loudly.
+EnvironmentFile=%h/secrets/token-os/discord.env
+ExecStart=%h/.bun/bin/bun run packages/discord/src/main.ts
+# Restart rate limiting stays at the systemd default (5 in 10s): a persistently missing
+# credential or the not-yet-installed transport adapter fails fast and stays visibly `failed`
+# rather than hot-spinning. No macOS `say`, no Keychain, no Token-API/tmuxctld coupling, no
+# name-based Inquisition self-test.
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
