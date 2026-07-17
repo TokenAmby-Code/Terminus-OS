@@ -19,6 +19,7 @@ packages/
       ledger.ts         wrapper-ledger seat occupancy (foundation)
       envelope.ts       generic ok/error loopback envelope
       tmuxctld.ts        tmuxctld op contracts — CONSUME the foundation types
+      ephemeral.ts       temporary ephemeral-channel capability policy
       index.ts
     test/
 ```
@@ -28,6 +29,19 @@ The foundation is registration / bind / ledger. The `tmuxctld` op envelopes
 registered seat; the fault that takes down a freelist scan is a ledger occupancy state. The
 ops-cockpit read-model converges into this foundation later; the seams are designed for that
 convergence but it is not built here yet.
+
+## Ephemeral channel
+
+`@terminus-os/contracts` is the authority for ephemeral-channel availability. The current
+contract is **`temporarily_disabled`**: every attempted send must return the exported exact
+fail-loud error envelope, with automatic reprompt and retry both disabled. This repository does
+not yet contain a daemon endpoint or other runtime enforcement path; the contract deliberately
+adds none.
+
+Revival requires replacing the temporary contract state **and** implementing the parked
+canonical instance-ID resolution fix in the delivery path. The temporary state is not a
+permanent prohibition and must not be bypassed with a compatibility shim, silent no-op, prompt
+hook, or retry worker.
 
 ## Develop
 

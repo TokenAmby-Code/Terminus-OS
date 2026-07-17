@@ -7,3 +7,4 @@ export * from "./registration.ts";
 export * from "./ledger.ts";
 export * from "./bind.ts";
 export * from "./tmuxctld.ts";
+export * from "./ephemeral.ts";
