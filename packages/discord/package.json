@@ -1,0 +1,20 @@
+{
+  "name": "@terminus-os/discord",
+  "version": "0.0.0",
+  "description": "Terminus-OS Discord tenant on k12-personal: capability-driven identities (Custodes + Guard), env-only credentials, voice-channel operator transport, and the text-channel notification router. Rides the contracts workspace; systemd/host application is owned by Token-Fleet.",
+  "type": "module",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./capability": "./src/capability.ts",
+    "./identity": "./src/identity.ts",
+    "./config": "./src/config.ts",
+    "./notify": "./src/notify.ts",
+    "./voice": "./src/voice.ts",
+    "./service": "./src/service.ts"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}
