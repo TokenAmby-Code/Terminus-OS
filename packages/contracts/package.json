@@ -12,7 +12,8 @@
     "./bind": "./src/bind.ts",
     "./envelope": "./src/envelope.ts",
     "./tmuxctld": "./src/tmuxctld.ts",
-    "./ephemeral": "./src/ephemeral.ts"
+    "./ephemeral": "./src/ephemeral.ts",
+    "./notification": "./src/notification.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"
