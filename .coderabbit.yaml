@@ -64,7 +64,7 @@ reviews:
     - path: "**/cli-tools/bin/**"
       instructions: |
         - Verify NAS-mount checks before NAS path access.
-        - Confirm hardcoded paths use $IMPERIUM / $TOKEN_API_URL / imperium_cfg.
+        - Confirm machine-specific values come from the typed Token-Fleet machine contract.
 
   # Tools CodeRabbit chains with on review.
   tools:
