@@ -6,9 +6,10 @@ const machineSchema = z.strictObject({
   hostnames: z.array(z.string().min(1)).min(1),
   domain: z.string().min(1),
   tailscaleIp: z.string().min(1),
-  ssh: z.strictObject({ alias: z.string().min(1), user: z.string().min(1) }),
+  ssh: z.strictObject({ alias: z.string().min(1), user: z.string().min(1).optional(), port: z.number().int().positive().optional(), rootAlias: z.boolean().optional() }),
   runtimeRoots: z.record(z.string(), z.string()),
   vaultRoots: z.record(z.string(), z.string()),
+  windowsPaths: z.record(z.string(), z.string()).optional(),
   ci: z.strictObject({ port: z.string(), base: z.string() }).optional(),
 });
 
