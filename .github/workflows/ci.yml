@@ -26,3 +26,38 @@ jobs:
 
       - name: Test
         run: bun test
+
+  # Integration lane for @terminus-os/db against a live PostgreSQL 18.
+  # CI is the one sanctioned TCP consumer; fleet machines use peer-auth
+  # unix sockets. Trust auth keeps the no-password contract intact.
+  db-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TERMINUS_DB_TEST_HOST: 127.0.0.1
+      TERMINUS_DB_TEST_PORT: "5432"
+      TERMINUS_DB_TEST_USERNAME: postgres
+      TERMINUS_DB_TEST_DATABASE: postgres
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: DB integration tests
+        run: bun test packages/db
