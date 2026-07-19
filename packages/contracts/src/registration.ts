@@ -39,10 +39,6 @@ export const InteractionMode = z.enum(INTERACTION_MODES);
 export const RankId = z.union([z.enum(FIXED_RANKS), z.string().regex(/^aspirant:.+$/)]);
 export type RankIdT = z.infer<typeof RankId>;
 
-/** SQLite stores booleans as INTEGER 0/1 — exposed faithfully, NOT coerced to a JS boolean. */
-export const Bit = z.union([z.literal(0), z.literal(1)]);
-export type BitT = z.infer<typeof Bit>;
-
 export const InstanceRegistrationRow = z
   .object({
     id: z.string(),
@@ -64,12 +60,12 @@ export const InstanceRegistrationRow = z
     continuity_binding_source: z.string().nullable(),
     // ties this registration to its wrapper-ledger occupancy row (ledger.wrapper_id).
     wrapper_launch_id: z.string().nullable(),
-    automated: Bit,
+    automated: z.boolean(),
     notification_mode: NotificationMode,
     interaction_mode: InteractionMode,
-    is_subagent: Bit,
-    hook_driven: Bit,
-    stop_allowed: Bit,
+    is_subagent: z.boolean(),
+    hook_driven: z.boolean(),
+    stop_allowed: z.boolean(),
   })
   // db_schema.py cross-column CHECK: commander_id IS NULL iff commander_type = 'emperor'.
   .refine(

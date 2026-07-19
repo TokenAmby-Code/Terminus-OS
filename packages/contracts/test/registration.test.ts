@@ -27,12 +27,12 @@ const ROW = {
   session_doc_id: 42,
   continuity_binding_source: null,
   wrapper_launch_id: "wl-001",
-  automated: 0,
+  automated: false,
   notification_mode: "verbose",
   interaction_mode: "text",
-  is_subagent: 0,
-  hook_driven: 0,
-  stop_allowed: 1,
+  is_subagent: false,
+  hook_driven: false,
+  stop_allowed: true,
 } as const;
 
 describe("instance registration row (foundation)", () => {
@@ -56,8 +56,8 @@ describe("instance registration row (foundation)", () => {
     expect(() => RankId.parse("chaplain")).toThrow();
   });
 
-  test("int-bit flags are 0|1 (faithful to SQLite INTEGER, not coerced to bool)", () => {
-    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: true })).toThrow();
-    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: 2 })).toThrow();
+  test("lifecycle flags are strict booleans (integers and strings rejected)", () => {
+    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: 1 })).toThrow();
+    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: "true" })).toThrow();
   });
 });
