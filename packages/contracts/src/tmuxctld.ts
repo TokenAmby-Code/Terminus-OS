@@ -29,7 +29,7 @@ export type FreePaneT = z.infer<typeof FreePane>;
 export const FaultedSeat = FreePane.extend({ fault_reason: z.string() });
 export type FaultedSeatT = z.infer<typeof FaultedSeat>;
 
-/** The convergent freelist shape once per-pane fault-isolation ships (Token-OS #TBD). */
+/** The convergent freelist shape once per-pane fault-isolation ships. */
 export const FreelistPool = z.object({
   free: z.array(FreePane),
   faulted: z.array(FaultedSeat),
@@ -39,7 +39,7 @@ export type FreelistPoolT = z.infer<typeof FreelistPool>;
 /**
  * Freelist result. TODAY the wire carries a BARE ARRAY of free panes; the in-flight fault-
  * isolation fix converges it to `{ free, faulted }`. The contract tolerates BOTH so it does
- * not have to break when Token-OS ships the fix.
+ * not have to break when the service ships the fix.
  */
 export const FreelistResult = z.union([z.array(FreePane), FreelistPool]);
 export type FreelistResultT = z.infer<typeof FreelistResult>;
