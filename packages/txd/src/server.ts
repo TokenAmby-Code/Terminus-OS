@@ -171,7 +171,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/tmux/read/estate'),
       label: 'GET /tmux/read/estate',
       handler: async () => {
-        const body: EstateReadResponse = { schema_version: 1, rows: daemon.estateRows() };
+        const body: EstateReadResponse = { schema_version: 1, rows: await daemon.estateRows() };
         return json(body);
       },
     },

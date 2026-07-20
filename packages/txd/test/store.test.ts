@@ -1,11 +1,17 @@
-import { expect, test } from 'bun:test';
-import { Database } from 'bun:sqlite';
-import { EventStore } from '../src/store.ts';
-import type { EventInput } from '@terminus-os/contracts';
+// Event-store tests, two lanes:
+//
+//  - MemoryEventStore runs unconditionally — the deterministic test seam
+//    (FakeTmux's sibling), pinned to the same contract shape.
+//  - PostgresEventStore runs against a live PostgreSQL 18 when the
+//    TERMINUS_DB_TEST_* env is present (fleet dev: socket dir; CI: the
+//    postgres:18 service container) — the same gating as packages/db.
+//    Absent the env, the lane skips loudly.
 
-function tmpDb() {
-  return `/tmp/txdtest-${crypto.randomUUID()}.sqlite`;
-}
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import type { SQL } from 'bun';
+import { connectDb, DbEndpoint, type DbEndpointT } from '@terminus-os/db';
+import { MemoryEventStore, PostgresEventStore } from '../src/store.ts';
+import type { EventInput } from '@terminus-os/contracts';
 
 function ev(over: Partial<EventInput> = {}): EventInput {
   return {
@@ -19,47 +25,149 @@ function ev(over: Partial<EventInput> = {}): EventInput {
   };
 }
 
-test('append assigns monotonic seq and a daemon recorded_at', () => {
+describe('MemoryEventStore', () => {
+  test('append assigns monotonic seq and a daemon recorded_at', async () => {
+    let tick = 0;
+    const store = new MemoryEventStore(() => `2026-07-12T00:00:0${tick++}.000Z`);
+    const a = await store.append(ev());
+    const b = await store.append(ev({ event_type: 'reg.bound', payload: { instance_id: 'i', persona: 'p', tint: '#111' } }));
+    expect(a.seq).toBe(1);
+    expect(b.seq).toBe(2);
+    expect(a.recorded_at).toBe('2026-07-12T00:00:00.000Z');
+    expect(b.recorded_at).toBe('2026-07-12T00:00:01.000Z');
+    expect(await store.count()).toBe(2);
+    await store.close();
+  });
+
+  test('readByEntity returns only that entity in seq order', async () => {
+    const store = new MemoryEventStore();
+    await store.append(ev({ entity_id: 'seatA' }));
+    await store.append(ev({ entity_id: 'seatB' }));
+    await store.append(ev({ entity_id: 'seatA', event_type: 'reg.seat_cleared', payload: {} }));
+    const a = await store.readByEntity('seatA');
+    expect(a.map((e) => e.event_type)).toEqual(['reg.pane_created', 'reg.seat_cleared']);
+    expect(a.every((e) => e.entity_id === 'seatA')).toBe(true);
+    await store.close();
+  });
+
+  test('provenance round-trips as structured JSON', async () => {
+    const store = new MemoryEventStore();
+    const rec = await store.append(ev());
+    const back = (await store.readAll())[0]!;
+    expect(back.provenance).toEqual({ source: 'wrapper', transport_receipt: 'edge_proxy', emitter_version: 1 });
+    expect(rec.provenance.source).toBe('wrapper');
+    await store.close();
+  });
+
+  test('appendAll validates the whole batch before committing any of it', async () => {
+    const store = new MemoryEventStore();
+    const bad = { ...ev(), entity_type: 'nonsense' } as unknown as EventInput;
+    await expect(store.appendAll([ev(), bad])).rejects.toThrow();
+    expect(await store.count()).toBe(0);
+    await store.close();
+  });
+});
+
+function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpointT | null {
+  if (env.TERMINUS_DB_TEST_SOCKET_DIR) {
+    return DbEndpoint.parse({
+      kind: 'socket',
+      socket_dir: env.TERMINUS_DB_TEST_SOCKET_DIR,
+      port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
+      database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
+      application_name: 'txd-store-integration',
+    });
+  }
+  if (env.TERMINUS_DB_TEST_HOST) {
+    return DbEndpoint.parse({
+      kind: 'tcp',
+      host: env.TERMINUS_DB_TEST_HOST,
+      port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
+      database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
+      username: env.TERMINUS_DB_TEST_USERNAME ?? 'postgres',
+      application_name: 'txd-store-integration',
+    });
+  }
+  return null;
+}
+
+const endpoint = endpointFromTestEnv(Bun.env);
+if (!endpoint) {
+  console.warn(
+    '[txd] store integration lane SKIPPED — set TERMINUS_DB_TEST_SOCKET_DIR (fleet) or TERMINUS_DB_TEST_HOST (CI) to run it',
+  );
+}
+
+describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
+  let raw: SQL;
+  let store: PostgresEventStore;
   let tick = 0;
-  const store = new EventStore(tmpDb(), () => `2026-07-12T00:00:0${tick++}.000Z`);
-  const a = store.append(ev());
-  const b = store.append(ev({ event_type: 'reg.bound', payload: { instance_id: 'i', persona: 'p', tint: '#111' } }));
-  expect(a.seq).toBe(1);
-  expect(b.seq).toBe(2);
-  expect(a.recorded_at).toBe('2026-07-12T00:00:00.000Z');
-  expect(b.recorded_at).toBe('2026-07-12T00:00:01.000Z');
-  expect(store.count()).toBe(2);
-  store.close();
-});
 
-test('events table is structurally append-only (UPDATE/DELETE raise)', () => {
-  const path = tmpDb();
-  const store = new EventStore(path);
-  store.append(ev());
-  // Reach the underlying db via a fresh handle on the same file.
-  const raw = new Database(path);
-  expect(() => raw.exec("UPDATE events SET entity_id = 'x'")).toThrow(/append-only/);
-  expect(() => raw.exec('DELETE FROM events')).toThrow(/append-only/);
-  raw.close();
-  store.close();
-});
+  beforeAll(async () => {
+    raw = await connectDb(endpoint!);
+    // Clean slate: connect() re-applies the forward-only migrations from zero.
+    await raw`drop schema if exists txd cascade`;
+    await raw`drop table if exists schema_migrations`;
+    store = await PostgresEventStore.connect(endpoint!, () => `2026-07-12T00:00:0${tick++}.000Z`);
+  });
 
-test('readByEntity returns only that entity in seq order', () => {
-  const store = new EventStore(tmpDb());
-  store.append(ev({ entity_id: 'seatA' }));
-  store.append(ev({ entity_id: 'seatB' }));
-  store.append(ev({ entity_id: 'seatA', event_type: 'reg.seat_cleared', payload: {} }));
-  const a = store.readByEntity('seatA');
-  expect(a.map((e) => e.event_type)).toEqual(['reg.pane_created', 'reg.seat_cleared']);
-  expect(a.every((e) => e.entity_id === 'seatA')).toBe(true);
-  store.close();
-});
+  afterAll(async () => {
+    await store?.close();
+    await raw?.close();
+  });
 
-test('provenance round-trips as structured JSON', () => {
-  const store = new EventStore(tmpDb());
-  const rec = store.append(ev());
-  const back = store.readAll()[0]!;
-  expect(back.provenance).toEqual({ source: 'wrapper', transport_receipt: 'edge_proxy', emitter_version: 1 });
-  expect(rec.provenance.source).toBe('wrapper');
-  store.close();
+  test('connect migrates a pristine database and append assigns monotonic seq + recorded_at', async () => {
+    const a = await store.append(ev());
+    const b = await store.append(ev({ event_type: 'reg.bound', payload: { instance_id: 'i', persona: 'p', tint: '#111' } }));
+    expect(b.seq).toBe(a.seq + 1);
+    expect(a.recorded_at).toBe('2026-07-12T00:00:00.000Z');
+    expect(b.recorded_at).toBe('2026-07-12T00:00:01.000Z');
+    expect(await store.count()).toBe(2);
+  });
+
+  test('events table is structurally append-only (UPDATE/DELETE/TRUNCATE raise)', async () => {
+    // Reach the table via a separate raw handle — the trigger must stop ANY writer.
+    // Bun.SQL tagged-template queries are lazy thenables; bun:test's `.rejects`
+    // wants a native promise and never drives them (the statement would sit
+    // unsent forever). `driven` awaits the query so it actually executes.
+    const driven = async (q: PromiseLike<unknown>) => { await q; };
+    await expect(driven(raw`update txd.events set entity_id = 'x'`)).rejects.toThrow(/append-only/);
+    await expect(driven(raw`delete from txd.events`)).rejects.toThrow(/append-only/);
+    await expect(driven(raw`truncate txd.events`)).rejects.toThrow(/append-only/);
+    expect(await store.count()).toBe(2);
+  });
+
+  test('payload and provenance round-trip as structured JSON; occurred_at is verbatim', async () => {
+    const events = await store.readAll();
+    const back = events[0]!;
+    expect(back.provenance).toEqual({ source: 'wrapper', transport_receipt: 'edge_proxy', emitter_version: 1 });
+    expect(back.payload).toEqual({ pane_state: 'live' });
+    expect(back.occurred_at).toBe('2026-07-12T00:00:00.000Z');
+  });
+
+  test('readByEntity returns only that entity in seq order', async () => {
+    await store.append(ev({ entity_id: 'seatA' }));
+    await store.append(ev({ entity_id: 'seatB' }));
+    await store.append(ev({ entity_id: 'seatA', event_type: 'reg.seat_cleared', payload: {} }));
+    const a = await store.readByEntity('seatA');
+    expect(a.map((e) => e.event_type)).toEqual(['reg.pane_created', 'reg.seat_cleared']);
+    expect(a.every((e) => e.entity_id === 'seatA')).toBe(true);
+  });
+
+  test('appendAll is transactional — an invalid event in the batch commits nothing', async () => {
+    const before = await store.count();
+    const bad = { ...ev(), entity_type: 'nonsense' } as unknown as EventInput;
+    await expect(store.appendAll([ev(), bad])).rejects.toThrow();
+    expect(await store.count()).toBe(before);
+    const ok = await store.appendAll([ev({ entity_id: 'batch:1' }), ev({ entity_id: 'batch:2' })]);
+    expect(ok.map((r) => r.entity_id)).toEqual(['batch:1', 'batch:2']);
+    expect(await store.count()).toBe(before + 2);
+  });
+
+  test('reconnect is idempotent — migrations no-op, the stream persists', async () => {
+    const before = await store.count();
+    const again = await PostgresEventStore.connect(endpoint!);
+    expect(await again.count()).toBe(before);
+    await again.close();
+  });
 });

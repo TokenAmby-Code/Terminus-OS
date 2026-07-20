@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { EventStore } from '../src/store.ts';
+import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { buildProjections } from '../src/projections.ts';
 
 function setup() {
-  const store = new EventStore(`/tmp/txdclose-${crypto.randomUUID()}.sqlite`);
+  const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   return { store, tmux, d: new Daemon(store, tmux) };
 }
@@ -22,13 +22,13 @@ test('close reaps the process, keeps the pane, returns the seat to the freelist'
   const res = await d.close({ target: 'palace:W', schema_version: 2 });
   expect(res).toMatchObject({ ok: true, closed: true, seat_id: 'palace:W', instance_id: 'i1' });
 
-  const types = store.readAll().map((e) => e.event_type);
+  const types = (await store.readAll()).map((e) => e.event_type);
   expect(types).toContain('reg.retired');
   expect(types).toContain('reg.process_reaped');
   expect(types).toContain('reg.seat_cleared');
 
   // Estate seat survives: pane still live, back on the freelist, unbound.
-  const p = buildProjections(store.readAll());
+  const p = buildProjections(await store.readAll());
   expect(p.currentBindings).toEqual([]);
   expect(p.freelist).toEqual([{ seat_id: 'palace:W', pane_state: 'live' }]);
   expect((await tmux.listSeats()).find((s) => s.seat_id === 'palace:W')!.pane).toBe('live');
@@ -46,20 +46,20 @@ test('close of a non-bound target refuses loud — no events, never a silent no-
   const res = await d.close({ target: 'palace:W', schema_version: 2 }); // never launched
   expect(res).toMatchObject({ ok: false, closed: false });
   expect(res.reason).toContain('no_binding');
-  expect(store.count()).toBe(0);
+  expect(await store.count()).toBe(0);
 });
 
 test('a failed reap refuses loud and writes NO retire chain (retire-with-live-process unspellable)', async () => {
   const { store, tmux, d } = setup();
   await d.launch({ seat_id: 'palace:N', ...FULL });
   tmux.failReapSeat('palace:N');
-  const before = store.count();
+  const before = await store.count();
   const res = await d.close({ target: 'palace:N', schema_version: 2 });
   expect(res).toMatchObject({ ok: false, closed: false });
   expect(res.reason).toContain('reap_failed');
   // Nothing appended: the binding stands, no retired/process_reaped/seat_cleared.
-  expect(store.count()).toBe(before);
-  const p = buildProjections(store.readAll());
+  expect(await store.count()).toBe(before);
+  const p = buildProjections(await store.readAll());
   expect(p.currentBindings.map((b) => b.seat_id)).toEqual(['palace:N']);
 });
 

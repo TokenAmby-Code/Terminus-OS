@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { SEND_PRESENCE_ACTIVITY_WINDOW_MS, type SendReceipt } from '@terminus-os/contracts';
-import { EventStore } from '../src/store.ts';
+import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 
@@ -9,7 +9,7 @@ import { Daemon } from '../src/core.ts';
 // drain, rung 4). No keystroke hook, no shadow model.
 
 function base() {
-  const store = new EventStore(`/tmp/txdtg-${crypto.randomUUID()}.sqlite`);
+  const store = new MemoryEventStore();
   return store;
 }
 

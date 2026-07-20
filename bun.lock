@@ -28,6 +28,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
+        "@terminus-os/db": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",

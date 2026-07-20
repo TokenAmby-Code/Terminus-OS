@@ -34,7 +34,7 @@ import {
   type SubscribeRequest,
   type SubscribeResponse,
 } from '@terminus-os/contracts';
-import { EventStore } from './store.ts';
+import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections } from './projections.ts';
 import { TXD_ESTATE } from './estate.ts';
@@ -70,8 +70,8 @@ export class Daemon {
     return { source, transport_receipt: transportReceipt, emitter_version: SCHEMA_VERSION };
   }
 
-  private projections(): Projections {
-    return buildProjections(this.store.readAll());
+  private async projections(): Promise<Projections> {
+    return buildProjections(await this.store.readAll());
   }
 
   // ── /agents/launch — reg-audit SCAFFOLD (spec §4) ─────────────────────────────────
@@ -100,7 +100,7 @@ export class Daemon {
       const existingSeat = (await this.tmux.listSeats()).some((seat) => seat.seat_id === req.seat_id);
       if (!existingSeat) {
         await this.tmux.createSeat(req.seat_id);
-        this.store.append({
+        await this.store.append({
           entity_type: 'seat',
           entity_id: req.seat_id,
           event_type: 'reg.pane_created',
@@ -125,7 +125,7 @@ export class Daemon {
       }
 
       // Atomic bind: the full tuple in ONE event.
-      this.store.append({
+      await this.store.append({
         entity_type: 'seat',
         entity_id: req.seat_id,
         event_type: 'reg.bound',
@@ -169,15 +169,15 @@ export class Daemon {
       // have torn (createSeat committed, its append did not) — the pane persists
       // but the fact was lost. Presence WITHOUT attestation is that torn state.
       const attested = new Set(
-        this.store.readAll().filter((e) => e.event_type === 'reg.pane_created').map((e) => e.entity_id),
+        (await this.store.readAll()).filter((e) => e.event_type === 'reg.pane_created').map((e) => e.entity_id),
       );
       const created: string[] = [];
       const existing: string[] = [];
       const backfilled: string[] = [];
       const failed: string[] = [];
 
-      const recordCreated = (seat: string): void => {
-        this.store.append({
+      const recordCreated = async (seat: string): Promise<void> => {
+        await this.store.append({
           entity_type: 'seat',
           entity_id: seat,
           event_type: 'reg.pane_created',
@@ -195,12 +195,12 @@ export class Daemon {
             } else {
               // Repair the torn state: backfill the lost fact. No second tmux
               // session is spawned, so idempotency and the pane both hold.
-              recordCreated(seat);
+              await recordCreated(seat);
               backfilled.push(seat);
             }
           } else {
             await this.tmux.createSeat(seat);
-            recordCreated(seat);
+            await recordCreated(seat);
             created.push(seat);
           }
         } catch (err) {
@@ -229,7 +229,7 @@ export class Daemon {
 
       // Resolve target -> canonical seat + the seq it resolved against. Prefer a
       // current binding; fall back to a bare live seat.
-      const proj = this.projections();
+      const proj = await this.projections();
       const resolution = this.resolveTarget(req.target, proj);
       if (!resolution) return this.refuse('pane_unresolved', req.target);
       // Pane must be live at admission (unresolved/dead never admitted).
@@ -240,7 +240,7 @@ export class Daemon {
       const sendId = crypto.randomUUID();
 
       // Admit: enqueue with the resolution frozen into the queue item.
-      this.store.append({
+      await this.store.append({
         entity_type: 'send',
         entity_id: sendId,
         event_type: 'act.send_enqueued',
@@ -253,8 +253,8 @@ export class Daemon {
       // client_activity — no shadow state, no keystroke hook. Emitting the gate
       // records the DECISION (carrying its window evidence); raw presence never
       // enters the stream. A gated send STAYS enqueued for a later drain.
-      const gate = (): SendReceipt => {
-        this.store.append({
+      const gate = async (): Promise<SendReceipt> => {
+        await this.store.append({
           entity_type: 'send',
           entity_id: sendId,
           event_type: 'act.send_gated',
@@ -284,7 +284,7 @@ export class Daemon {
       const result = await this.tmux.sendToSeat(resolution.seat_id, req.text);
       const verdict: DeliveryVerdict = result.verdict;
       if (verdict === 'delivered') {
-        this.store.append({
+        await this.store.append({
           entity_type: 'send',
           entity_id: sendId,
           event_type: 'act.send_delivered',
@@ -319,21 +319,21 @@ export class Daemon {
     return { ok: false, refused: true, reason, target };
   }
 
-  private receipt(
+  private async receipt(
     verdict: DeliveryVerdict,
     resolution: SendResolution,
     sendId: string,
     gate: 'typing_guard' | null,
     window: number | null,
     bytes: number | null,
-  ): SendReceipt {
+  ): Promise<SendReceipt> {
     return {
       verdict,
       resolution,
       gate_reason: gate,
       activity_window_ms: window,
       bytes_delivered: bytes,
-      send_seq: this.store.readByEntity(sendId).at(-1)?.seq ?? -1,
+      send_seq: (await this.store.readByEntity(sendId)).at(-1)?.seq ?? -1,
     };
   }
 
@@ -356,7 +356,7 @@ export class Daemon {
         };
       }
 
-      const proj = this.projections();
+      const proj = await this.projections();
       const binding = proj.currentBindings.find((b) => b.seat_id === req.target || b.instance_id === req.target);
       if (!binding) {
         // Refuse loud — closing a non-bound target is a no-op the caller must see,
@@ -406,7 +406,7 @@ export class Daemon {
     }
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { instance_id: binding.instance_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
-    this.store.appendAll(inputs);
+    await this.store.appendAll(inputs);
     return true;
   }
 
@@ -426,7 +426,7 @@ export class Daemon {
           reason: `schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`,
         };
       }
-      const proj = this.projections();
+      const proj = await this.projections();
       if (!proj.currentBindings.some((b) => b.instance_id === req.instance_id)) {
         return {
           ok: false,
@@ -436,7 +436,7 @@ export class Daemon {
           reason: 'not_bound: subscriptions are bound-keyed — an unbound/never-bound instance cannot subscribe',
         };
       }
-      this.store.append({
+      await this.store.append({
         entity_type: 'instance',
         entity_id: req.instance_id,
         event_type: 'reg.stop_subscribed',
@@ -460,7 +460,7 @@ export class Daemon {
         return this.refuseStop('schema_version_mismatch', req.instance_id);
       }
 
-      const proj = this.projections();
+      const proj = await this.projections();
       // Ghost preclusion: never bound ⇒ never existed ⇒ refuse loud.
       if (!proj.everBoundInstances.has(req.instance_id)) {
         return this.refuseStop('no_such_instance', req.instance_id);
@@ -471,7 +471,7 @@ export class Daemon {
       // Dedupe: already stopped/retired, or already closed (no longer bound) →
       // idempotent, but RECORDED as receipt_deduped (never a blind swallow).
       if (activity === 'stopped' || activity === 'retired' || !stillBound) {
-        this.store.append({
+        await this.store.append({
           entity_type: 'instance',
           entity_id: req.instance_id,
           event_type: 'act.receipt_deduped',
@@ -483,7 +483,7 @@ export class Daemon {
       }
 
       // Fresh stop for a live, bound instance → record it (activity → stopped).
-      this.store.append({
+      await this.store.append({
         entity_type: 'instance',
         entity_id: req.instance_id,
         event_type: 'act.stop_reported',
@@ -526,7 +526,7 @@ export class Daemon {
   // open contradiction is p0 — fail loud, ok=false.
   reconcile(transportReceipt: string | null = null): Promise<ReconcileResponse> {
     return this.locked(async () => {
-      const events = this.store.readAll();
+      const events = await this.store.readAll();
       const t0 = performance.now();
       const proj = buildProjections(events);
       const replay_ms = performance.now() - t0;
@@ -537,15 +537,15 @@ export class Daemon {
       const alreadyOpen = new Set(proj.openContradictions.map((c) => `${c.entity_id}:${c.kind}`));
       const newContradictions: OpenContradiction[] = [];
 
-      const flag = (
+      const flag = async (
         entity_id: string,
         kind: string,
         missing: string | null,
         detail: string,
-      ): void => {
+      ): Promise<void> => {
         if (alreadyOpen.has(`${entity_id}:${kind}`)) return; // already flagged & still open
         const occurred_at = this.now();
-        const rec = this.store.append({
+        const rec = await this.store.append({
           entity_type: 'seat',
           entity_id,
           event_type: 'reg.contradiction_flagged',
@@ -571,7 +571,7 @@ export class Daemon {
       for (const b of proj.currentBindings) {
         const pane = observedPane.get(b.seat_id);
         if (pane === 'dead' || pane === undefined) {
-          flag(
+          await flag(
             b.seat_id,
             'bound_pane_dead',
             'seat_cleared',
@@ -583,12 +583,12 @@ export class Daemon {
       for (const row of proj.activityBoard) {
         if (row.seat_id === null) continue; // board row without a seat can't be a seat-liveness contradiction
         if (row.activity === 'retired' && observedPane.get(row.seat_id) === 'live') {
-          flag(row.seat_id, 'retired_pane_live', 'process_reaped', `activity=retired but tmux pane is live`);
+          await flag(row.seat_id, 'retired_pane_live', 'process_reaped', `activity=retired but tmux pane is live`);
         }
       }
 
       // Recompute open set over the freshly-appended stream.
-      const openContradictions = buildProjections(this.store.readAll()).openContradictions;
+      const openContradictions = buildProjections(await this.store.readAll()).openContradictions;
       const p0 = openContradictions.length > 0;
 
       return {
@@ -610,12 +610,12 @@ export class Daemon {
   // public read surface. Per-entity event history is NOT served publicly:
   // the stream stays private replay/reconcile truth (biography serving is not
   // txd's job).
-  estateRows(): ActivityBoardRow[] {
-    return this.projections().activityBoard;
+  async estateRows(): Promise<ActivityBoardRow[]> {
+    return (await this.projections()).activityBoard;
   }
 
   async health(machine: string, build: { version: string; git_sha: string; bun: string }): Promise<Health> {
-    const proj = this.projections();
+    const proj = await this.projections();
     // Probe the daemon's OWN tmux socket (start-server + list-panes), not just
     // `tmux -V` — a responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
@@ -628,7 +628,7 @@ export class Daemon {
       git_sha: build.git_sha,
       bun: build.bun,
       machine,
-      events: this.store.count(),
+      events: await this.store.count(),
       open_contradictions: open,
       tmux_reachable,
     };
