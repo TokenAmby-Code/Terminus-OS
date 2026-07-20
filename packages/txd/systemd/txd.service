@@ -1,0 +1,34 @@
+# txd — Terminus-OS estate daemon (event-sourced tmux control plane).
+#
+# User-scoped unit (ruled 2026-07-20: user-tier is the fleet-wide pattern —
+# root-free CD, tmux is user-scoped so the estate daemon lives in the user
+# session's native habitat). Installed by the Token-Fleet apply leg to
+# ~/.config/systemd/user/; lingering is enabled on the boxes.
+#
+# No PrivateTmp — documented pin ([[txd-extraction-spec]] §3.3): the daemon's
+# tmux children and test fixtures share the real /tmp namespace deliberately.
+
+[Unit]
+Description=Terminus-OS txd event-sourced estate daemon (tmux control plane)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/runtimes/Terminus-OS/packages/txd
+Environment=TXD_CONFIG=%h/secrets/terminus-os/txd.json
+Environment=IMPERIUM_MACHINE=k12-personal
+# Absolute bun path (pinned 1.3.14 on the fleet).
+ExecStart=%h/.bun/bin/bun src/daemon.ts
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+# Terminate only the bun main process on stop/restart — NOT the whole cgroup.
+# The default (control-group) SIGTERMs the daemon-spawned tmux server, killing
+# the persistent estate on every `systemctl restart`. The daemon otherwise
+# spawns only short-lived tmux CLI children, so process-scope teardown is safe
+# and leaves the estate (and its seat sessions) alive for clean idempotency.
+KillMode=process
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,7 @@
+{
+  "bind": "127.0.0.1",
+  "port": 7781,
+  "machine": "k12-personal",
+  "dbPath": "/home/tokenamby/runtimes/database/txd.events.sqlite",
+  "tmuxSocket": "k12"
+}
