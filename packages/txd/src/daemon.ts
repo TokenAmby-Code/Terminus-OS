@@ -1,8 +1,9 @@
 // Entrypoint. Wires config → event store → tmux control plane → core → server.
 // Source-run under Bun, no build step. systemd user unit owns the process.
 
+import { describeEndpoint } from '@terminus-os/db';
 import { loadConfig } from './config.ts';
-import { EventStore } from './store.ts';
+import { PostgresEventStore } from './store.ts';
 import { RealTmux } from './tmux.ts';
 import { Daemon } from './core.ts';
 import { makeServer, type BuildInfo } from './server.ts';
@@ -17,7 +18,8 @@ const build: BuildInfo = {
 };
 
 const cfg = await loadConfig();
-const store = new EventStore(cfg.dbPath);
+// Connect + migrate (forward-only, shared migrations home) — fail loud at boot.
+const store = await PostgresEventStore.connect(cfg.db);
 const tmux = new RealTmux(cfg.tmuxSocket);
 const daemon = new Daemon(store, tmux);
 const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
@@ -28,7 +30,7 @@ console.log(
     event: 'listening',
     url: `http://${cfg.bind}:${cfg.port}`,
     machine: cfg.machine,
-    db: cfg.dbPath,
+    db: describeEndpoint(cfg.db),
     tmux_socket: cfg.tmuxSocket,
     build,
   }),
@@ -56,7 +58,7 @@ async function shutdown() {
   // Graceful, but bounded: let in-flight requests finish, yet never let a stuck
   // request block termination — close the store and exit after 5s regardless.
   await Promise.race([server.stop(), Bun.sleep(5_000)]);
-  store.close();
+  await store.close();
   process.exit(0);
 }
 process.on('SIGTERM', shutdown);

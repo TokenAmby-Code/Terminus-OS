@@ -16,5 +16,5 @@ export {
   describeEndpoint,
 } from "./config.ts";
 export { sqlOptions, connectDb, typedRows } from "./client.ts";
-export { planMigrations, runMigrations, type MigrationFile, type MigrationReport } from "./migrate.ts";
+export { planMigrations, runMigrations, MIGRATIONS_DIR, type MigrationFile, type MigrationReport } from "./migrate.ts";
 export { DbHealthReport, type DbHealthReportT, checkHealth } from "./health.ts";

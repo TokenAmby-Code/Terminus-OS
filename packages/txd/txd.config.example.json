@@ -2,6 +2,11 @@
   "bind": "127.0.0.1",
   "port": 7781,
   "machine": "k12-personal",
-  "dbPath": "/home/tokenamby/runtimes/database/txd.events.sqlite",
+  "db": {
+    "kind": "socket",
+    "socket_dir": "/var/run/postgresql",
+    "database": "terminus",
+    "application_name": "txd"
+  },
   "tmuxSocket": "k12"
 }

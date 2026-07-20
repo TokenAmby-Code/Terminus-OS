@@ -4,6 +4,9 @@ import { SQL } from "bun";
 
 const MIGRATION_FILENAME = /^(\d{4})_([a-z0-9_]+)\.sql$/;
 
+/** The canonical migrations home — the terminus database's forward-only schema. */
+export const MIGRATIONS_DIR = new URL("../migrations/", import.meta.url).pathname;
+
 export interface MigrationFile {
   id: number;
   name: string;

@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
 import { HOOK_TYPES } from '@terminus-os/contracts';
-import { EventStore } from '../src/store.ts';
+import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { buildRoutes, makeServer, CONSUMED_HOOK_TYPES } from '../src/server.ts';
 
 function daemon() {
-  return new Daemon(new EventStore(`/tmp/txdroute-${crypto.randomUUID()}.sqlite`), new FakeTmux());
+  return new Daemon(new MemoryEventStore(), new FakeTmux());
 }
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
@@ -25,7 +25,7 @@ const RATIFIED = [
   'GET /tmux/read/estate',
 ] as const;
 
-test('the route table is exactly the ratified planes + one endpoint per pinned vendor hook type', () => {
+test('the route table is exactly the ratified planes + one endpoint per pinned vendor hook type', async () => {
   const labels = buildRoutes(daemon(), build, 'test').map((r) => r.label);
   for (const l of RATIFIED) expect(labels).toContain(l);
   // Hook invariant: EVERY pinned vendor hook type has an endpoint.
@@ -34,7 +34,7 @@ test('the route table is exactly the ratified planes + one endpoint per pinned v
   expect(labels).toHaveLength(RATIFIED.length + (HOOK_TYPES.length - CONSUMED_HOOK_TYPES.length));
 });
 
-test('the consumed stop door is registered before the 410 tail (ordering is data)', () => {
+test('the consumed stop door is registered before the 410 tail (ordering is data)', async () => {
   const labels = buildRoutes(daemon(), build, 'test').map((r) => r.label);
   const stopIdx = labels.indexOf('POST /ingress/hooks/stop');
   const firstGone = labels.findIndex((l, i) => l.startsWith('POST /ingress/hooks/') && i !== stopIdx);
@@ -43,7 +43,7 @@ test('the consumed stop door is registered before the 410 tail (ordering is data
 });
 
 test('unused vendor hook types quick-return 410 and are side-effect-free', async () => {
-  const store = new EventStore(`/tmp/txdroute-${crypto.randomUUID()}.sqlite`);
+  const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
@@ -56,7 +56,7 @@ test('unused vendor hook types quick-return 410 and are side-effect-free', async
       expect(res.status).toBe(410);
       expect(await res.json()).toEqual({ ok: false, error: 'hook_not_consumed', hook_type: hook });
     }
-    expect(store.count()).toBe(0); // side-effect-free by construction: zero events
+    expect(await store.count()).toBe(0); // side-effect-free by construction: zero events
   } finally {
     srv.stop(true);
   }
@@ -133,7 +133,7 @@ test('adversarial: every legacy route is dead (404) — no shim, no alias', asyn
   }
 });
 
-test('adversarial: agent biography is not served — no route exposes per-entity event history', () => {
+test('adversarial: agent biography is not served — no route exposes per-entity event history', async () => {
   const routes = buildRoutes(daemon(), build, 'test');
   // No parameterized matcher resolves an event-history-shaped path, and no
   // label mentions the dead "entities" vocabulary.

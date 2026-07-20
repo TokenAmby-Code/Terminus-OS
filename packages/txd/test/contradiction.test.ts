@@ -1,11 +1,11 @@
 import { expect, test } from 'bun:test';
-import { EventStore } from '../src/store.ts';
+import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 
 function setup() {
   const tmux = new FakeTmux();
-  const store = new EventStore(`/tmp/txdcontra-${crypto.randomUUID()}.sqlite`);
+  const store = new MemoryEventStore();
   return { tmux, store, d: new Daemon(store, tmux) };
 }
 
@@ -30,7 +30,7 @@ test('out-of-band pane kill on a bound seat → contradiction_flagged, p0, healt
   expect(flagged!.missing_attestation).toBe('seat_cleared'); // names the exact missing attestation
 
   // A contradiction FLAG is written to the stream; no lifecycle event is synthesized.
-  const types = store.readByEntity('palace:W').map((e) => e.event_type);
+  const types = (await store.readByEntity('palace:W')).map((e) => e.event_type);
   expect(types).toContain('reg.contradiction_flagged');
   expect(types).not.toContain('reg.retired');
   expect(types).not.toContain('reg.seat_cleared');

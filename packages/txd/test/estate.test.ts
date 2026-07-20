@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
-import { EventStore } from '../src/store.ts';
+import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { TXD_ESTATE } from '../src/estate.ts';
 
 function setup() {
-  const store = new EventStore(`/tmp/txdestate-${crypto.randomUUID()}.sqlite`);
+  const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   return { store, tmux, d: new Daemon(store, tmux) };
 }
@@ -15,19 +15,16 @@ const BUILD = { version: '0', git_sha: 'x', bun: 'y' };
 
 // Seed a seat as present-AND-attested the way constructEstate itself would (pane
 // on tmux + a reg.pane_created fact in the stream) — the true "already done" state.
-function seedAttested(store: EventStore, tmux: FakeTmux, seat: string) {
-  return Promise.resolve()
-    .then(() => tmux.createSeat(seat))
-    .then(() =>
-      store.append({
-        entity_type: 'seat',
-        entity_id: seat,
-        event_type: 'reg.pane_created',
-        payload: { pane_state: 'live' },
-        provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
-        occurred_at: new Date().toISOString(),
-      }),
-    );
+async function seedAttested(store: MemoryEventStore, tmux: FakeTmux, seat: string) {
+  await tmux.createSeat(seat);
+  await store.append({
+    entity_type: 'seat',
+    entity_id: seat,
+    event_type: 'reg.pane_created',
+    payload: { pane_state: 'live' },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: new Date().toISOString(),
+  });
 }
 
 // Rung 2: the typed constructor stands the canonical estate declaratively and
@@ -42,11 +39,11 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(res.backfilled).toEqual([]);
   expect(res.failed).toEqual([]);
 
-  const created = store.readAll().filter((e) => e.event_type === 'reg.pane_created');
+  const created = (await store.readAll()).filter((e) => e.event_type === 'reg.pane_created');
   expect(created).toHaveLength(TXD_ESTATE.length);
 
   // Every seat surfaces as an unbound row on the activity board.
-  const board = d.estateRows();
+  const board = await d.estateRows();
   expect(board).toHaveLength(TXD_ESTATE.length);
   expect(board.map((r) => r.seat_id).sort()).toEqual([...TXD_ESTATE].sort());
   expect(board.every((r) => r.binding === 'unbound')).toBe(true);
@@ -55,21 +52,21 @@ test('stands the full estate from empty — one pane_created per seat', async ()
 test('idempotent re-run — second pass creates nothing, appends no events', async () => {
   const { store, d } = setup();
   await d.constructEstate();
-  const afterFirst = store.count();
+  const afterFirst = await store.count();
 
   const res = await d.constructEstate();
   expect(res.created).toEqual([]);
   expect(res.existing).toEqual([...TXD_ESTATE]);
   expect(res.backfilled).toEqual([]);
   expect(res.failed).toEqual([]);
-  expect(store.count()).toBe(afterFirst); // zero new events on a full, attested estate
+  expect(await store.count()).toBe(afterFirst); // zero new events on a full, attested estate
 });
 
 test('skips seats already present AND attested; creates only the rest', async () => {
   const { store, tmux, d } = setup();
   const pre = [TXD_ESTATE[0]!, TXD_ESTATE[5]!, TXD_ESTATE[10]!];
   for (const seat of pre) await seedAttested(store, tmux, seat);
-  const before = store.count();
+  const before = await store.count();
 
   const res = await d.constructEstate();
   expect(res.existing.sort()).toEqual([...pre].sort());
@@ -77,7 +74,7 @@ test('skips seats already present AND attested; creates only the rest', async ()
   expect(res.backfilled).toEqual([]);
   expect(res.failed).toEqual([]);
   // Only the absent seats appended a new event.
-  expect(store.count()).toBe(before + (TXD_ESTATE.length - pre.length));
+  expect(await store.count()).toBe(before + (TXD_ESTATE.length - pre.length));
 });
 
 test('backfills the torn state — pane present but its pane_created fact was lost', async () => {
@@ -95,10 +92,10 @@ test('backfills the torn state — pane present but its pane_created fact was lo
 
   // Repaired seats now carry their fact and appear on the board.
   const attested = new Set(
-    store.readAll().filter((e) => e.event_type === 'reg.pane_created').map((e) => e.entity_id),
+    (await store.readAll()).filter((e) => e.event_type === 'reg.pane_created').map((e) => e.entity_id),
   );
   for (const seat of torn) expect(attested.has(seat)).toBe(true);
-  expect(d.estateRows()).toHaveLength(TXD_ESTATE.length);
+  expect(await d.estateRows()).toHaveLength(TXD_ESTATE.length);
 
   // Re-run is a full idempotent skip — the backfilled seats are now attested.
   const rerun = await d.constructEstate();
@@ -118,7 +115,7 @@ test('a failing seat is isolated — lands in failed, others proceed, no throw',
   expect(res.backfilled).toEqual([]);
 
   // The failed seat has no pane and no fact — absent from the board; the rest stand.
-  const board = d.estateRows();
+  const board = await d.estateRows();
   expect(board).toHaveLength(TXD_ESTATE.length - 1);
   expect(board.some((r) => r.seat_id === bad)).toBe(false);
 
@@ -135,5 +132,5 @@ test('bare unbound seats are healthy — ok, zero contradictions', async () => {
   const h = await d.health('k12-personal', BUILD);
   expect(h.ok).toBe(true);
   expect(h.open_contradictions).toBe(0);
-  expect(d.estateRows().every((r) => r.binding === 'unbound')).toBe(true);
+  expect((await d.estateRows()).every((r) => r.binding === 'unbound')).toBe(true);
 });

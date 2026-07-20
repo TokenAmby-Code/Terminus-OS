@@ -10,9 +10,10 @@ contracts source, and the public route shape.
 
 ## What it is
 
-- **Event-sourced core.** One append-only SQLite stream is the single source of
-  truth; the three day-one read models (`current_bindings`, `freelist`,
-  `activity_board`) are pure projections rebuilt by replay — nobody writes them.
+- **Event-sourced core.** One append-only Postgres event stream (`txd.events`)
+  is the single source of truth; the three day-one read models
+  (`current_bindings`, `freelist`, `activity_board`) are pure projections
+  rebuilt by replay — nobody writes them.
 - **Canonical-id membrane.** Raw tmux `%id`s never cross upward. Every response,
   log line, and event is scrubbed (`assertNoTmuxId`); a breach fails loud.
 - **Send chokepoint.** Enqueue-by-default; typed gate/refusal reasons; the tmux
@@ -69,16 +70,42 @@ Env/config-driven — no hardcoded machine values. A JSON file pointed at by
 `TXD_CONFIG` wins; otherwise env vars; otherwise localhost-safe defaults. Keys
 (see `txd.config.example.json`):
 
-| Key          | Env                | Default                                    |
-|--------------|--------------------|--------------------------------------------|
-| `bind`       | `TXD_BIND`         | `127.0.0.1`                                |
-| `port`       | `TXD_PORT`         | `7781`                                     |
-| `machine`    | `IMPERIUM_MACHINE` | **none — fail loud** (never guess the box) |
-| `dbPath`     | `TXD_DB`           | `$HOME/runtimes/database/txd.events.sqlite`|
-| `tmuxSocket` | `TXD_TMUX_SOCKET`  | `k12`                                      |
+| Key          | Env                                     | Default                                    |
+|--------------|-----------------------------------------|--------------------------------------------|
+| `bind`       | `TXD_BIND`                              | `127.0.0.1`                                |
+| `port`       | `TXD_PORT`                              | `7781`                                     |
+| `machine`    | `IMPERIUM_MACHINE`                      | **none — fail loud** (never guess the box) |
+| `db`         | `TXD_DB_SOCKET_DIR` / `TXD_DB_DATABASE` | socket `/var/run/postgresql`, db `terminus`|
+| `tmuxSocket` | `TXD_TMUX_SOCKET`                       | `k12`                                      |
 
 `machine` has **no default**: a daemon that guesses its own box identity is a
 bug, so config load fails loud when it is unset.
+
+`db` is a `@terminus-os/db` endpoint object (strict-validated — unknown fields
+refuse loud). On fleet boxes it is the sanctioned shape: the native PostgreSQL
+18 cluster's peer-auth unix socket — no password field exists.
+
+## Persistence — PostgreSQL 18
+
+The event stream lives in the `terminus` database, schema `txd`, table
+`txd.events` — the 8 ruled columns, nothing derived:
+
+| Column        | Type     | Notes                                             |
+|---------------|----------|---------------------------------------------------|
+| `seq`         | `bigint` | identity, monotonic — assigned by the store       |
+| `entity_type` | `text`   | `seat` \| `instance` \| `send`                    |
+| `entity_id`   | `text`   | canonical id (never a raw tmux `%id`)             |
+| `event_type`  | `text`   | pinned vocabulary (`@terminus-os/contracts`)      |
+| `payload`     | `jsonb`  | dumb facts only, never derived state              |
+| `provenance`  | `jsonb`  | source + transport receipt + emitter version      |
+| `occurred_at` | `text`   | attested ISO-8601, stored verbatim                |
+| `recorded_at` | `text`   | daemon clock; skew vs `occurred_at` is visible    |
+
+Append-only is STRUCTURAL: triggers raise on `UPDATE`, `DELETE`, and
+`TRUNCATE`. The schema ships as `packages/db/migrations/0002_txd_events.sql`
+(the shared forward-only migrations home) and the daemon applies pending
+migrations at boot — a pristine database and a current one converge on the
+same shape.
 
 ### Config bootstrap — seeding `~/secrets/txd/txd.json`
 
@@ -89,8 +116,9 @@ The unit sets `TXD_CONFIG=%h/secrets/txd/txd.json` and guards it with
 ensures only the `~/secrets/txd` dir (mode 700) — the file itself is a
 one-time per-box seed.
 
-No key is a secret: every field is an operational value. On a k12 box the seed
-is the example config verbatim (adjust `machine` and `dbPath` per box):
+No key is a secret: every field is an operational value (peer auth means no
+credential exists). On a k12 box the seed is the example config verbatim
+(adjust `machine` per box):
 
 ```bash
 install -m 600 /dev/null ~/secrets/txd/txd.json
@@ -99,7 +127,12 @@ cat > ~/secrets/txd/txd.json <<'EOF'
   "bind": "127.0.0.1",
   "port": 7781,
   "machine": "k12-personal",
-  "dbPath": "/home/tokenamby/runtimes/database/txd.events.sqlite",
+  "db": {
+    "kind": "socket",
+    "socket_dir": "/var/run/postgresql",
+    "database": "terminus",
+    "application_name": "txd"
+  },
   "tmuxSocket": "k12"
 }
 EOF

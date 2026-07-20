@@ -1,136 +1,167 @@
 // Event store (spec §2) — the single source of truth.
 //
-// One SQLite file, one append-only `events` table, ONE writer. Truth is the
+// One append-only Postgres table (`txd.events`), ONE writer. Truth is the
 // stream; every displayed status is a derived view (see projections.ts).
 // Retention is keep-forever day-one; no snapshots (replay-from-zero every
 // reconcile, honestly measured). The 8 columns are exactly the ruled shape —
 // nothing derived is stored on the write side.
 //
-// Append-only is STRUCTURAL, not conventional: SQLite triggers raise on any
-// UPDATE or DELETE, so a stray writer cannot silently rewrite history.
+// Append-only is STRUCTURAL, not conventional: database triggers raise on any
+// UPDATE, DELETE, or TRUNCATE, so a stray writer cannot silently rewrite
+// history. The schema lives in the shared forward-only migrations
+// (packages/db/migrations, `0002_txd_events.sql`) and is applied at connect().
+//
+// `MemoryEventStore` is the deterministic test seam — FakeTmux's sibling
+// (tmux.ts precedent). Append-only by construction: no mutation surface exists.
 
-import { Database } from 'bun:sqlite';
+import type { SQL } from 'bun';
+import { connectDb, runMigrations, MIGRATIONS_DIR, type DbEndpointT } from '@terminus-os/db';
 import {
   EventInputSchema,
+  EventRecordSchema,
   type EventInput,
   type EventRecord,
-  type EventType,
-  type EntityType,
-  type Provenance,
 } from '@terminus-os/contracts';
-
-type Row = {
-  seq: number;
-  entity_type: string;
-  entity_id: string;
-  event_type: string;
-  payload: string;
-  provenance: string;
-  occurred_at: string;
-  recorded_at: string;
-};
-
-function rowToRecord(r: Row): EventRecord {
-  return {
-    seq: r.seq,
-    entity_type: r.entity_type as EntityType,
-    entity_id: r.entity_id,
-    event_type: r.event_type as EventType,
-    payload: JSON.parse(r.payload),
-    provenance: JSON.parse(r.provenance) as Provenance,
-    occurred_at: r.occurred_at,
-    recorded_at: r.recorded_at,
-  };
-}
 
 export type Clock = () => string;
 const systemClock: Clock = () => new Date().toISOString();
 
-export class EventStore {
-  private db: Database;
-  private now: Clock;
-
-  constructor(dbPath: string, now: Clock = systemClock) {
-    this.db = new Database(dbPath, { create: true });
-    this.now = now;
-    // WAL survives process restart durably (systemd bounce, reboot); single
-    // writer means no reader/writer contention to manage.
-    this.db.exec('PRAGMA journal_mode = WAL');
-    this.db.exec('PRAGMA synchronous = NORMAL');
-    this.db.exec('PRAGMA foreign_keys = ON');
-    this.migrate();
-  }
-
-  private migrate(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS events (
-        seq          INTEGER PRIMARY KEY AUTOINCREMENT,
-        entity_type  TEXT NOT NULL,
-        entity_id    TEXT NOT NULL,
-        event_type   TEXT NOT NULL,
-        payload      TEXT NOT NULL,
-        provenance   TEXT NOT NULL,
-        occurred_at  TEXT NOT NULL,
-        recorded_at  TEXT NOT NULL
-      );
-    `);
-    this.db.exec('CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_id, seq)');
-    // Structural append-only: history is immutable once written.
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS events_no_update
-      BEFORE UPDATE ON events
-      BEGIN SELECT RAISE(ABORT, 'events is append-only: UPDATE forbidden'); END;
-    `);
-    this.db.exec(`
-      CREATE TRIGGER IF NOT EXISTS events_no_delete
-      BEFORE DELETE ON events
-      BEGIN SELECT RAISE(ABORT, 'events is append-only: DELETE forbidden'); END;
-    `);
-  }
-
+export interface EventStore {
   /** Append one event. The store assigns seq (monotonic) and recorded_at. */
-  append(input: EventInput): EventRecord {
+  append(input: EventInput): Promise<EventRecord>;
+  /** Append many events in one transaction (single-writer batch). */
+  appendAll(inputs: EventInput[]): Promise<EventRecord[]>;
+  /** Full stream in seq order — the replay source. */
+  readAll(): Promise<EventRecord[]>;
+  readByEntity(entityId: string): Promise<EventRecord[]>;
+  count(): Promise<number>;
+  close(): Promise<void>;
+}
+
+type Row = {
+  seq: number | bigint | string;
+  entity_type: string;
+  entity_id: string;
+  event_type: string;
+  payload: unknown;
+  provenance: unknown;
+  occurred_at: string;
+  recorded_at: string;
+};
+
+// Parse-validated read boundary (the @terminus-os/db typedRows discipline):
+// seq (int8) is normalized to a number and jsonb columns are decoded before
+// the contract schema pins the record shape. Bun.SQL delivers jsonb as a
+// structured value on some protocol paths and as raw JSON text on others
+// (prepared statements in Bun 1.3.x) — the boundary decodes either honestly;
+// contract payloads/provenance are objects, so a string can only be wire text.
+const asJson = (v: unknown): unknown => (typeof v === 'string' ? JSON.parse(v) : v);
+function rowToRecord(r: Row): EventRecord {
+  return EventRecordSchema.parse({
+    ...r,
+    seq: Number(r.seq),
+    payload: asJson(r.payload),
+    provenance: asJson(r.provenance),
+  });
+}
+
+export class PostgresEventStore implements EventStore {
+  private constructor(
+    private sql: SQL,
+    private now: Clock,
+  ) {}
+
+  /**
+   * Connect to the endpoint and ensure the schema: forward-only migrations
+   * run at boot, so a pristine database and a current one converge on the
+   * same shape. Fail-loud throughout — a dead database throws here.
+   */
+  static async connect(endpoint: DbEndpointT, now: Clock = systemClock): Promise<PostgresEventStore> {
+    const sql = await connectDb(endpoint);
+    await runMigrations(sql, MIGRATIONS_DIR);
+    return new PostgresEventStore(sql, now);
+  }
+
+  private async insert(sql: SQL, input: EventInput): Promise<EventRecord> {
     const parsed = EventInputSchema.parse(input);
     const recorded_at = this.now();
-    const stmt = this.db.query(
-      `INSERT INTO events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
-       VALUES ($entity_type, $entity_id, $event_type, $payload, $provenance, $occurred_at, $recorded_at)
-       RETURNING seq`,
-    );
-    const res = stmt.get({
-      $entity_type: parsed.entity_type,
-      $entity_id: parsed.entity_id,
-      $event_type: parsed.event_type,
-      $payload: JSON.stringify(parsed.payload),
-      $provenance: JSON.stringify(parsed.provenance),
-      $occurred_at: parsed.occurred_at,
-      $recorded_at: recorded_at,
-    }) as { seq: number };
-    return { ...parsed, seq: res.seq, recorded_at };
+    const rows = (await sql`
+      INSERT INTO txd.events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
+      VALUES (${parsed.entity_type}, ${parsed.entity_id}, ${parsed.event_type},
+              ${JSON.stringify(parsed.payload)}::jsonb, ${JSON.stringify(parsed.provenance)}::jsonb,
+              ${parsed.occurred_at}, ${recorded_at})
+      RETURNING seq`) as { seq: number | bigint | string }[];
+    return { ...parsed, seq: Number(rows[0]!.seq), recorded_at };
   }
 
-  /** Append many events in one transaction (single-writer batch). */
-  appendAll(inputs: EventInput[]): EventRecord[] {
-    const tx = this.db.transaction((rows: EventInput[]) => rows.map((r) => this.append(r)));
-    return tx(inputs);
+  append(input: EventInput): Promise<EventRecord> {
+    return this.insert(this.sql, input);
   }
 
-  /** Full stream in seq order — the replay source. */
-  readAll(): EventRecord[] {
-    return (this.db.query('SELECT * FROM events ORDER BY seq').all() as Row[]).map(rowToRecord);
+  appendAll(inputs: EventInput[]): Promise<EventRecord[]> {
+    return this.sql.begin(async (tx) => {
+      const out: EventRecord[] = [];
+      for (const input of inputs) out.push(await this.insert(tx, input));
+      return out;
+    }) as Promise<EventRecord[]>;
   }
 
-  readByEntity(entityId: string): EventRecord[] {
-    return (
-      this.db.query('SELECT * FROM events WHERE entity_id = $id ORDER BY seq').all({ $id: entityId }) as Row[]
-    ).map(rowToRecord);
+  async readAll(): Promise<EventRecord[]> {
+    const rows = (await this.sql`
+      SELECT seq, entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at
+      FROM txd.events ORDER BY seq`) as Row[];
+    return rows.map(rowToRecord);
   }
 
-  count(): number {
-    return (this.db.query('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n;
+  async readByEntity(entityId: string): Promise<EventRecord[]> {
+    const rows = (await this.sql`
+      SELECT seq, entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at
+      FROM txd.events WHERE entity_id = ${entityId} ORDER BY seq`) as Row[];
+    return rows.map(rowToRecord);
   }
 
-  close(): void {
-    this.db.close();
+  async count(): Promise<number> {
+    const rows = (await this.sql`SELECT count(*)::int AS n FROM txd.events`) as { n: number }[];
+    return rows[0]!.n;
   }
+
+  async close(): Promise<void> {
+    await this.sql.close();
+  }
+}
+
+export class MemoryEventStore implements EventStore {
+  private events: EventRecord[] = [];
+
+  constructor(private now: Clock = systemClock) {}
+
+  private commit(parsed: EventInput): EventRecord {
+    const rec: EventRecord = { ...parsed, seq: this.events.length + 1, recorded_at: this.now() };
+    this.events.push(rec);
+    return rec;
+  }
+
+  async append(input: EventInput): Promise<EventRecord> {
+    return this.commit(EventInputSchema.parse(input));
+  }
+
+  async appendAll(inputs: EventInput[]): Promise<EventRecord[]> {
+    // Validate the whole batch before committing any of it (transactional).
+    const parsed = inputs.map((i) => EventInputSchema.parse(i));
+    return parsed.map((p) => this.commit(p));
+  }
+
+  async readAll(): Promise<EventRecord[]> {
+    return [...this.events];
+  }
+
+  async readByEntity(entityId: string): Promise<EventRecord[]> {
+    return this.events.filter((e) => e.entity_id === entityId);
+  }
+
+  async count(): Promise<number> {
+    return this.events.length;
+  }
+
+  async close(): Promise<void> {}
 }

@@ -58,16 +58,16 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
     await sql?.close();
   });
 
-  test("migration 0001 applies and lands its own ledger row", async () => {
+  test("the migrations apply and land their ledger rows", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
-    expect(report.applied.map(m => m.id)).toEqual([1]);
+    expect(report.applied.map(m => m.id)).toEqual([1, 2]);
     expect(report.alreadyApplied).toBe(0);
   });
 
   test("re-running the runner is a no-op (idempotence)", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
     expect(report.applied).toEqual([]);
-    expect(report.alreadyApplied).toBe(1);
+    expect(report.alreadyApplied).toBe(2);
   });
 
   test("checkHealth reports up on server_version 18.x", async () => {
@@ -83,7 +83,10 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
     const rows = await typedRows(sql, LedgerRow)`
       select id, name from schema_migrations order by id
     `;
-    expect(rows).toEqual([{ id: 1, name: "schema_migrations" }]);
+    expect(rows).toEqual([
+      { id: 1, name: "schema_migrations" },
+      { id: 2, name: "txd_events" },
+    ]);
 
     const WrongRow = z.object({ id: z.string() });
     await expect(
