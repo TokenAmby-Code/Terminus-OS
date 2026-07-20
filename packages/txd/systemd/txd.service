@@ -12,10 +12,16 @@
 Description=Terminus-OS txd event-sourced estate daemon (tmux control plane)
 After=network-online.target
 Wants=network-online.target
+# Missing config must NOT crashloop every RestartSec: skip the unit cleanly
+# with a visible condition-failed status until ~/secrets/txd/txd.json is
+# seeded (see README "Config bootstrap"). Path matches TXD_CONFIG below.
+ConditionPathExists=%h/secrets/txd/txd.json
 
 [Service]
 Type=simple
-WorkingDirectory=%h/runtimes/Terminus-OS/packages/txd
+# The k12 box layout is ~/runtimes/Terminus-OS/{live,battlefield,config,
+# Terminus-OS.git} — the checkout lives under live/.
+WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd
 Environment=TXD_CONFIG=%h/secrets/txd/txd.json
 Environment=IMPERIUM_MACHINE=k12-personal
 # Absolute bun path (pinned 1.3.14 on the fleet).
