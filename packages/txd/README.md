@@ -98,8 +98,10 @@ restarts never kill the daemon-spawned tmux estate; no `PrivateTmp`, documented
 pin). Delivery/installation is a Token-Fleet apply leg scoped to k12-personal —
 apply legs install units to `~/.config/systemd/user/` and reload, root-free —
 including the runtime write-lock cycle (unlock via scoped CI sudo → propagate →
-re-lock). Config is provisioned at `~/secrets/terminus-os/txd.json` (exact
-secrets subdir naming is the extraction spec's sole open minor, §7).
+re-lock). Config is provisioned at `~/secrets/txd/txd.json` — the `~/secrets/txd`
+subdir (mode 700) is what the Token-Fleet apply leg (`shared/bin/apply-txd`)
+ensures on the box, resolving the extraction spec's sole open minor (§3.5/§7)
+in favor of the fleet leg that actually provisions it.
 
 ```bash
 systemctl --user enable --now txd.service

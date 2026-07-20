@@ -16,7 +16,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/runtimes/Terminus-OS/packages/txd
-Environment=TXD_CONFIG=%h/secrets/terminus-os/txd.json
+Environment=TXD_CONFIG=%h/secrets/txd/txd.json
 Environment=IMPERIUM_MACHINE=k12-personal
 # Absolute bun path (pinned 1.3.14 on the fleet).
 ExecStart=%h/.bun/bin/bun src/daemon.ts
