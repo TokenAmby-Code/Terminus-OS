@@ -80,6 +80,36 @@ Env/config-driven — no hardcoded machine values. A JSON file pointed at by
 `machine` has **no default**: a daemon that guesses its own box identity is a
 bug, so config load fails loud when it is unset.
 
+### Config bootstrap — seeding `~/secrets/txd/txd.json`
+
+The unit sets `TXD_CONFIG=%h/secrets/txd/txd.json` and guards it with
+`ConditionPathExists` on the same path: while the file is absent the unit is
+**skipped cleanly** (visible condition-failed status in
+`systemctl --user status txd`), never a crashloop. The Token-Fleet apply leg
+ensures only the `~/secrets/txd` dir (mode 700) — the file itself is a
+one-time per-box seed.
+
+No key is a secret: every field is an operational value. On a k12 box the seed
+is the example config verbatim (adjust `machine` and `dbPath` per box):
+
+```bash
+install -m 600 /dev/null ~/secrets/txd/txd.json
+cat > ~/secrets/txd/txd.json <<'EOF'
+{
+  "bind": "127.0.0.1",
+  "port": 7781,
+  "machine": "k12-personal",
+  "dbPath": "/home/tokenamby/runtimes/database/txd.events.sqlite",
+  "tmuxSocket": "k12"
+}
+EOF
+systemctl --user restart txd
+```
+
+The unit's directive lines (WorkingDirectory under the box's `live/` checkout,
+the condition guard, KillMode, ExecStart, the PrivateTmp absence) are pinned
+byte-exactly in `test/systemd-unit.test.ts`.
+
 ## Develop
 
 Bun-native — TypeScript source runs directly, no build step. From the repo root:
