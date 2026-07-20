@@ -1,0 +1,109 @@
+# txd — `@terminus-os/txd`
+
+The estate daemon for k12 boxes: the authoritative, event-sourced tmux control
+plane (Bun/TypeScript). tmuxctld successor, extracted out of the deprecated
+Token-OS checkout per the ruled `txd-extraction-spec` (namespace LOCKED:
+**txd** primary; **tx** is its single rote auxiliary client — "tx pings txd;
+txd does the thing"). The daemon's design is the ruled `k12-daemon-spec`
+(§1–§12); behavior did not change in the move, only the home, the name, the
+contracts source, and the public route shape.
+
+## What it is
+
+- **Event-sourced core.** One append-only SQLite stream is the single source of
+  truth; the three day-one read models (`current_bindings`, `freelist`,
+  `activity_board`) are pure projections rebuilt by replay — nobody writes them.
+- **Canonical-id membrane.** Raw tmux `%id`s never cross upward. Every response,
+  log line, and event is scrubbed (`assertNoTmuxId`); a breach fails loud.
+- **Send chokepoint.** Enqueue-by-default; typed gate/refusal reasons; the tmux
+  client-activity (typing) guard is read at the decision point at BOTH admission
+  and drain — no keystroke hooks. Each receipt carries the send's own resolution.
+- **Reconcile = replay.** Out-of-band pane death surfaces as a
+  `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
+  silently synthesized lifecycle.
+- **Boot-time estate constructor.** `constructEstate()` stands the canonical
+  persistent estate idempotently on tmux socket `k12` at boot — txd is the
+  constructor; tx never constructs.
+
+## HTTP surface — the RATIFIED planes
+
+Bound to loopback only; ingress is via the per-box edge proxy ONLY, under the
+`/txd` route prefix. Routes are grouped by caller/trust plane; behavior under
+each route is the ruled daemon behavior, unchanged.
+
+| Method | Path                    | Purpose                                          |
+|--------|-------------------------|--------------------------------------------------|
+| GET    | `/ctl/health`           | Honest liveness + build + tmux reachability      |
+| POST   | `/ctl/reconcile`        | Replay-driven reconcile; p0 on contradiction     |
+| POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
+| POST   | `/agents/send`          | Send chokepoint (enqueue-by-default)             |
+| POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
+| POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
+| POST   | `/ingress/hooks/stop`   | Stop-hook door: record / dedupe / refuse-ghost; fires auto-close |
+| POST   | `/ingress/hooks/<type>` | Every other pinned vendor hook type → 410 Gone (side-effect-free) |
+| GET    | `/tmux/read/estate`     | Estate observation: seats, panes, occupancy incl. bindings |
+
+- `/agents/*` is the **deliberate-action plane**: every route directly under it
+  is a deliberate action, one-for-one.
+- `/ingress/hooks/*` is the **cross-service hook invariant**: a service that
+  accepts hooks must expose an endpoint for EVERY vendor hook type; unused ones
+  quick-return 410. The proxy broadcasts every inbound hook to all hook
+  consumers and ignores 410s. The hook-type enumeration is pinned in
+  `@terminus-os/contracts/hooks` from the actual claude-code and codex hook
+  contracts.
+- `/tmux/read/*` is txd's ONLY public read surface — side-effect-free by
+  construction. "entities" is dead as public API vocabulary, and the old
+  per-entity event-history endpoint is REMOVED: agent-biography serving is not
+  txd's job. The internal event stream stays the private replay/reconcile truth.
+
+## Contracts
+
+The lifecycle vocabulary (`schema_version`, the seed event types, axes,
+send/stop/close/subscribe shapes) lives in `@terminus-os/contracts` (`./txd`
+module) — the daemon pins `SCHEMA_VERSION` exactly. No `file:` links, no
+token-api dependency, no compat layer.
+
+## Config
+
+Env/config-driven — no hardcoded machine values. A JSON file pointed at by
+`TXD_CONFIG` wins; otherwise env vars; otherwise localhost-safe defaults. Keys
+(see `txd.config.example.json`):
+
+| Key          | Env                | Default                                    |
+|--------------|--------------------|--------------------------------------------|
+| `bind`       | `TXD_BIND`         | `127.0.0.1`                                |
+| `port`       | `TXD_PORT`         | `7781`                                     |
+| `machine`    | `IMPERIUM_MACHINE` | **none — fail loud** (never guess the box) |
+| `dbPath`     | `TXD_DB`           | `$HOME/runtimes/database/txd.events.sqlite`|
+| `tmuxSocket` | `TXD_TMUX_SOCKET`  | `k12`                                      |
+
+`machine` has **no default**: a daemon that guesses its own box identity is a
+bug, so config load fails loud when it is unset.
+
+## Develop
+
+Bun-native — TypeScript source runs directly, no build step. From the repo root:
+
+```bash
+bun install --frozen-lockfile
+bun run typecheck
+bun test packages/txd
+bun packages/txd/src/daemon.ts   # run (needs IMPERIUM_MACHINE or TXD_CONFIG)
+```
+
+## Deploy — systemd `--user` via the Token-Fleet apply leg
+
+`systemd/txd.service` is the unit (user-scoped, `KillMode=process` so daemon
+restarts never kill the daemon-spawned tmux estate; no `PrivateTmp`, documented
+pin). Delivery/installation is a Token-Fleet apply leg scoped to k12-personal —
+apply legs install units to `~/.config/systemd/user/` and reload, root-free —
+including the runtime write-lock cycle (unlock via scoped CI sudo → propagate →
+re-lock). Config is provisioned at `~/secrets/txd/txd.json` — the `~/secrets/txd`
+subdir (mode 700) is what the Token-Fleet apply leg (`shared/bin/apply-txd`)
+ensures on the box, resolving the extraction spec's sole open minor (§3.5/§7)
+in favor of the fleet leg that actually provisions it.
+
+```bash
+systemctl --user enable --now txd.service
+tx probes it by name: systemctl --user start txd; GET /ctl/health; POST /ctl/reconcile
+```

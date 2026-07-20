@@ -14,7 +14,9 @@
     "./tmuxctld": "./src/tmuxctld.ts",
     "./ephemeral": "./src/ephemeral.ts",
     "./notification": "./src/notification.ts",
-    "./machine-config": "./src/machine-config.ts"
+    "./machine-config": "./src/machine-config.ts",
+    "./txd": "./src/txd.ts",
+    "./hooks": "./src/hooks.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"

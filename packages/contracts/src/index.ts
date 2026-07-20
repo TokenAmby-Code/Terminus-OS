@@ -10,3 +10,5 @@ export * from "./tmuxctld.ts";
 export * from "./ephemeral.ts";
 export * from "./notification.ts";
 export * from "./machine-config.ts";
+export * from "./txd.ts";
+export * from "./hooks.ts";
