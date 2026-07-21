@@ -150,11 +150,11 @@ export type DeliveryVerdict = (typeof DELIVERY_VERDICTS)[number];
 export const DeliveryVerdictSchema = z.enum(DELIVERY_VERDICTS);
 
 // Operator-presence activity window (spec §5). NAMED constant, echoed in every
-// send_gated payload — no buried magic numbers. `client_activity` is bumped by
-// ANY input from an attached client; a client counts as "present" on the target
-// pane only if its last activity is within this window at the decision point.
-// Tunable; the accepted tradeoff (spec §6 rider) is that scrolling also bumps
-// client_activity and can gate a send.
+// send_gated payload — no buried magic numbers. This guard applies only to
+// unbound panes where operator composition is possible; a ledger-bound agent
+// seat bypasses it so agent output can never masquerade as operator typing.
+// For an unbound target, `client_activity` is read at each decision point and a
+// hold is released after the named window expires without further activity.
 export const SEND_PRESENCE_ACTIVITY_WINDOW_MS = 10_000;
 
 // ── Provenance (spec §2) — three real emitters, hooks REAL but UNTRUSTED ──────

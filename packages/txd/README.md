@@ -16,9 +16,11 @@ contracts source, and the public route shape.
   rebuilt by replay — nobody writes them.
 - **Canonical-id membrane.** Raw tmux `%id`s never cross upward. Every response,
   log line, and event is scrubbed (`assertNoTmuxId`); a breach fails loud.
-- **Send chokepoint.** Enqueue-by-default; typed gate/refusal reasons; the tmux
-  client-activity (typing) guard is read at the decision point at BOTH admission
-  and drain — no keystroke hooks. Each receipt carries the send's own resolution.
+- **Send chokepoint.** Enqueue-by-default; typed gate/refusal reasons; a
+  ledger-bound agent seat bypasses the operator typing guard, while an unbound
+  pane reads tmux client activity at admission and drain. Held sends recheck on
+  guard expiry and release with an observable reason. Each receipt carries the
+  send's own resolution.
 - **Reconcile = replay.** Out-of-band pane death surfaces as a
   `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
   silently synthesized lifecycle.
