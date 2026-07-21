@@ -313,6 +313,16 @@ export class Daemon {
     releaseReason: 'agent_seat_exempt' | 'operator_idle' | 'typing_guard_expired',
   ): Promise<SendReceipt> {
     const result = await this.tmux.sendToSeat(resolution.seat_id, text);
+    for (const observation of result.trace ?? []) {
+      await this.store.append({
+        entity_type: 'send',
+        entity_id: sendId,
+        event_type: 'act.send_submit_observed',
+        payload: { target: resolution.seat_id, ...observation, resolved_seq: resolution.bound_seq },
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: this.now(),
+      });
+    }
     const verdict: DeliveryVerdict = result.verdict;
     if (verdict === 'delivered') {
       await this.store.append({

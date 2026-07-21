@@ -13,7 +13,7 @@ function setup() {
 
 test('missing attestation refuses handover — seat created, NO bound event', async () => {
   const { store, d } = setup();
-  const res = await d.launch({ seat_id: 'somnium:NE', schema_version: 2, identity: 'i1', persona: 'p' }); // tint missing
+  const res = await d.launch({ seat_id: 'somnium:NE', schema_version: 3, identity: 'i1', persona: 'p' }); // tint missing
   expect(res.handover).toBe(false);
   expect(res.missing_attestations).toEqual(['tint']);
   const types = (await store.readAll()).map((e) => e.event_type);
@@ -23,7 +23,7 @@ test('missing attestation refuses handover — seat created, NO bound event', as
 
 test('full attestation tuple hands over with ONE atomic bound event', async () => {
   const { store, d } = setup();
-  const res = await d.launch({ seat_id: 'palace:W', schema_version: 2, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  const res = await d.launch({ seat_id: 'palace:W', schema_version: 3, identity: 'i1', persona: 'salamander', tint: '#302800' });
   expect(res.handover).toBe(true);
   expect(res.missing_attestations).toEqual([]);
   const bound = (await store.readAll()).filter((e) => e.event_type === 'reg.bound');
@@ -37,7 +37,7 @@ test('binds an existing estate seat without attempting a duplicate pane creation
   const before = (await store.readAll()).filter((e) => e.entity_id === 'council:custodes' && e.event_type === 'reg.pane_created');
   const res = await d.launch({
     seat_id: 'council:custodes',
-    schema_version: 2,
+    schema_version: 3,
     identity: 'k12p:redub-custodes',
     persona: 'custodes',
     rank: 'overseer',

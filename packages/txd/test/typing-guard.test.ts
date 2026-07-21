@@ -18,7 +18,7 @@ const SEAT = 'somnium:NE';
 async function boundSeat(d: Daemon) {
   await d.launch({
     seat_id: SEAT,
-    schema_version: 2,
+    schema_version: 3,
     identity: 'agent-instance',
     persona: 'astartes',
     tint: '#302800',
@@ -44,9 +44,9 @@ test('present WITHIN window → gated; window echoed in the decision', async () 
   const store = base();
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux);
-  await d.launch({ seat_id: SEAT, schema_version: 2 });
+  await d.launch({ seat_id: SEAT, schema_version: 3 });
   tmux.setPresence(SEAT, Date.now());
-  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 2 })) as SendReceipt;
+  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 3 })) as SendReceipt;
   expect(res.verdict).toBe('enqueued_gated');
   expect(res.activity_window_ms).toBe(SEND_PRESENCE_ACTIVITY_WINDOW_MS);
 });
@@ -55,9 +55,9 @@ test('last activity OUTSIDE window → delivers (scrolling long ago does not gat
   const store = base();
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux);
-  await d.launch({ seat_id: SEAT, schema_version: 2 });
+  await d.launch({ seat_id: SEAT, schema_version: 3 });
   tmux.setPresence(SEAT, Date.now() - SEND_PRESENCE_ACTIVITY_WINDOW_MS - 5_000);
-  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 2 })) as SendReceipt;
+  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 3 })) as SendReceipt;
   expect(res.verdict).toBe('delivered');
 });
 
@@ -65,8 +65,8 @@ test('present at ADMISSION → gated (defer this pass), even if idle by drain', 
   const store = base();
   const tmux = new SequencedTmux([true, false]); // admission present, drain idle
   const d = new Daemon(store, tmux);
-  await d.launch({ seat_id: SEAT, schema_version: 2 });
-  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 2 })) as SendReceipt;
+  await d.launch({ seat_id: SEAT, schema_version: 3 });
+  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 3 })) as SendReceipt;
   expect(res.verdict).toBe('enqueued_gated'); // the admission read gated it
   expect(tmux.calls).toBe(1); // gated at admission → send returns without the drain read
 });
@@ -75,8 +75,8 @@ test('idle at admission but present at DRAIN → gated (drain read is consulted)
   const store = base();
   const tmux = new SequencedTmux([false, true]); // admission idle, became active by drain
   const d = new Daemon(store, tmux);
-  await d.launch({ seat_id: SEAT, schema_version: 2 });
-  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 2 })) as SendReceipt;
+  await d.launch({ seat_id: SEAT, schema_version: 3 });
+  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 3 })) as SendReceipt;
   expect(res.verdict).toBe('enqueued_gated'); // the drain read gated it
   expect(tmux.calls).toBe(2); // presence was read at admission AND drain
 });
@@ -85,8 +85,8 @@ test('idle at BOTH admission and drain → delivered (both decision points read)
   const store = base();
   const tmux = new SequencedTmux([false, false]);
   const d = new Daemon(store, tmux);
-  await d.launch({ seat_id: SEAT, schema_version: 2 });
-  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 2 })) as SendReceipt;
+  await d.launch({ seat_id: SEAT, schema_version: 3 });
+  const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 3 })) as SendReceipt;
   expect(res.verdict).toBe('delivered');
   expect(tmux.calls).toBe(2); // read at admission AND drain before delivering
 });
@@ -97,7 +97,7 @@ test('continuously active bound agent pane delivers immediately', async () => {
   const d = new Daemon(store, tmux);
   await boundSeat(d);
 
-  const res = (await d.send({ target: SEAT, text: 'report', schema_version: 2 })) as SendReceipt;
+  const res = (await d.send({ target: SEAT, text: 'report', schema_version: 3 })) as SendReceipt;
 
   expect(res.verdict).toBe('delivered');
   expect(tmux.calls).toBe(0);
@@ -118,10 +118,10 @@ test('recent operator input on an unbound pane holds, then releases on guard exp
     },
     () => nowMs,
   );
-  await d.launch({ seat_id: SEAT, schema_version: 2 });
+  await d.launch({ seat_id: SEAT, schema_version: 3 });
   tmux.setPresence(SEAT, nowMs);
 
-  const res = (await d.send({ target: SEAT, text: 'held', schema_version: 2 })) as SendReceipt;
+  const res = (await d.send({ target: SEAT, text: 'held', schema_version: 3 })) as SendReceipt;
   expect(res.verdict).toBe('enqueued_gated');
   expect(release).toBeDefined();
 
@@ -132,7 +132,15 @@ test('recent operator input on an unbound pane holds, then releases on guard exp
   expect(sendEvents.map((event) => event.event_type)).toEqual([
     'act.send_enqueued',
     'act.send_gated',
+    'act.send_submit_observed',
+    'act.send_submit_observed',
+    'act.send_submit_observed',
     'act.send_delivered',
+  ]);
+  expect(sendEvents.filter((event) => event.event_type === 'act.send_submit_observed').map((event) => event.payload.kind)).toEqual([
+    'literal_insert',
+    'submit_enter',
+    'submit_verify',
   ]);
   expect(sendEvents.at(-1)?.payload).toMatchObject({ release_reason: 'typing_guard_expired' });
 });
