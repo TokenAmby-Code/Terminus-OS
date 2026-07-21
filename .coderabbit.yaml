@@ -4,9 +4,10 @@
 # `coderabbit-sync` (cli-tools/bin/coderabbit-sync). Edit this file in the
 # vault, then run sync against the target repo.
 #
-# Profile baseline is `assertive`: this file governs the CodeRabbit GitHub
-# App on PRs (Tier 2, blocking). The push-side workflow (Tier 1, advisory)
-# overrides via `cr` CLI flags or a sibling .coderabbit-cli.yaml.
+# Profile baseline is `chill` and reviews are NON-BLOCKING (Colby ruling,
+# 2026-07-20, Dog Food Nexus session): CodeRabbit is advisory. A rate-limited
+# or pending CodeRabbit review never blocks a merge — CI checks gate, the
+# rabbit comments. On-sight with a CR rate limit, admin merge is authorized.
 #
 # Reference: https://docs.coderabbit.ai/reference/yaml-template
 
@@ -15,8 +16,8 @@ early_access: false
 enable_free_tier: true
 
 reviews:
-  profile: assertive
-  request_changes_workflow: true
+  profile: chill
+  request_changes_workflow: false
   high_level_summary: true
   poem: false
   review_status: true
@@ -28,9 +29,8 @@ reviews:
     base_branches:
       - main
 
-  # Block merge if assertive review flags issues. Branch protection on main
-  # also requires the `coderabbit` check to pass.
-  abort_on_close: true
+  # Advisory-only: never hold a merge for review state (2026-07-20 ruling).
+  abort_on_close: false
 
   path_instructions:
     - path: "**/*.py"
