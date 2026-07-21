@@ -292,19 +292,25 @@ export class RealTmux implements TmuxControlPlane {
     if (created.code !== 0) {
       throw new Error(`txd tmux createSeat failed for ${seatId}: ${this.stderrCategory(created)}`);
     }
-    const paneR = await this.command('resolve_created_seat', seatId, ['list-panes', '-t', safe, '-F', '#{pane_id}']);
-    const paneId = paneR.stdout.trim().split('\n')[0];
-    // A seat without its canonical-id tag is a broken seat. Tear the just-created
-    // session back down (no orphan) before failing loud, rather than leave an
-    // untagged pane the membrane can never resolve.
-    if (!paneId) {
+    try {
+      const paneR = await this.command('resolve_created_seat', seatId, ['list-panes', '-t', safe, '-F', '#{pane_id}']);
+      const paneId = paneR.stdout.trim().split('\n')[0];
+      if (paneR.code !== 0 || !paneId) {
+        throw new Error(`txd tmux createSeat: no pane for ${seatId}`);
+      }
+      const tag = await this.command('tag_seat', seatId, ['set-option', '-p', '-t', paneId, CANON_OPT, seatId]);
+      if (tag.code !== 0) throw new Error(`txd tmux tag_seat failed for ${seatId}: ${this.stderrCategory(tag)}`);
+      const tagged = await this.command('verify_seat_tag', seatId, ['list-panes', '-t', safe, '-F', `#{pane_id}\t#{${CANON_OPT}}`]);
+      const rows = tagged.stdout.trim().split('\n').filter(Boolean);
+      if (tagged.code !== 0 || rows.length !== 1 || rows[0] !== `${paneId}\t${seatId}`) {
+        throw new Error(`txd tmux canonical tag verification failed for ${seatId}`);
+      }
+    } catch (error) {
+      // Compensation is deliberately scoped to the session created above. No
+      // canonical lookup can find an untagged pane, and no existing estate seat
+      // is eligible for removal here.
       await this.command('rollback_seat', seatId, ['kill-session', '-t', safe]);
-      throw new Error(`txd tmux createSeat: no pane for ${seatId} (session ${safe})`);
-    }
-    const tagged = await this.command('tag_seat', seatId, ['set-option', '-p', '-t', paneId, CANON_OPT, seatId]);
-    if (tagged.code !== 0) {
-      await this.command('rollback_seat', seatId, ['kill-session', '-t', safe]);
-      throw new Error(`txd tmux tag_seat failed for ${seatId}: ${this.stderrCategory(tagged)}`);
+      throw error;
     }
   }
 
