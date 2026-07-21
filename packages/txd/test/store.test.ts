@@ -66,6 +66,19 @@ describe('MemoryEventStore', () => {
     expect(await store.count()).toBe(0);
     await store.close();
   });
+
+  test('persistence membrane rejects raw tmux ids in entities, payload keys and values, and provenance', async () => {
+    const store = new MemoryEventStore();
+    const attacks = [
+      ev({ entity_id: 'seat %1' }),
+      ev({ payload: { nested: { pane: '@2' } } }),
+      ev({ payload: { '$3': 'value' } }),
+      ev({ provenance: { source: 'wrapper', transport_receipt: 'pane %4', emitter_version: 3 } }),
+    ];
+    for (const attack of attacks) await expect(store.append(attack)).rejects.toThrow(/canonical-id breach/);
+    await expect(store.appendAll([ev(), attacks[0]!])).rejects.toThrow(/canonical-id breach/);
+    expect(await store.count()).toBe(0);
+  });
 });
 
 function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpointT | null {

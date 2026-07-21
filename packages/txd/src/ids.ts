@@ -8,9 +8,10 @@
 // and `assertNoTmuxId` fails loud if anything leaks upward.
 
 // tmux id sigils followed by digits: `%5` (pane), `@5` (window), `$5` (session).
-// Anchored to the sigil+digits shape so canonical ids (`somnium:NE`, `palace:W`)
-// and ordinary text never false-positive.
-const TMUX_ID_PATTERN = /(?:^|[^A-Za-z0-9_])([%@$]\d+)\b/;
+// Match the sigil+digits shape anywhere in a string. Canonical ids
+// (`somnium:NE`, `palace:W`) do not use these below-membrane sigils.
+const TMUX_ID_PATTERN = /([%@$]\d+)\b/;
+const TMUX_ID_PATTERN_GLOBAL = /[%@$]\d+\b/g;
 
 export function findTmuxId(text: string): string | null {
   const m = TMUX_ID_PATTERN.exec(text);
@@ -36,13 +37,18 @@ export function findTmuxIdDeep(value: unknown, path = '$'): string | null {
   if (value && typeof value === 'object') {
     for (const [k, v] of Object.entries(value)) {
       // Keys can leak too (e.g. an object keyed by pane id).
-      if (findTmuxId(k)) return `${path}.${k} (key)`;
+      if (findTmuxId(k)) return `${path}.* (key)`;
       const hit = findTmuxIdDeep(v, `${path}.${k}`);
       if (hit) return hit;
     }
     return null;
   }
   return null;
+}
+
+/** Redact below-membrane identifiers before an error reaches structured logs. */
+export function sanitizeTmuxIds(text: string): string {
+  return text.replace(TMUX_ID_PATTERN_GLOBAL, '[tmux-id]');
 }
 
 export function assertNoTmuxId(value: unknown, where: string): void {

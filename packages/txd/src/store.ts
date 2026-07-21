@@ -22,6 +22,7 @@ import {
   type EventInput,
   type EventRecord,
 } from '@terminus-os/contracts';
+import { assertNoTmuxId } from './ids.ts';
 
 export type Clock = () => string;
 const systemClock: Clock = () => new Date().toISOString();
@@ -83,6 +84,7 @@ export class PostgresEventStore implements EventStore {
   }
 
   private async insert(sql: SQL, input: EventInput): Promise<EventRecord> {
+    assertNoTmuxId(input, 'event_input');
     const parsed = EventInputSchema.parse(input);
     const recorded_at = this.now();
     const rows = (await sql`
@@ -99,6 +101,7 @@ export class PostgresEventStore implements EventStore {
   }
 
   appendAll(inputs: EventInput[]): Promise<EventRecord[]> {
+    for (const input of inputs) assertNoTmuxId(input, 'event_input');
     return this.sql.begin(async (tx) => {
       const out: EventRecord[] = [];
       for (const input of inputs) out.push(await this.insert(tx, input));
@@ -142,11 +145,13 @@ export class MemoryEventStore implements EventStore {
   }
 
   async append(input: EventInput): Promise<EventRecord> {
+    assertNoTmuxId(input, 'event_input');
     return this.commit(EventInputSchema.parse(input));
   }
 
   async appendAll(inputs: EventInput[]): Promise<EventRecord[]> {
     // Validate the whole batch before committing any of it (transactional).
+    for (const input of inputs) assertNoTmuxId(input, 'event_input');
     const parsed = inputs.map((i) => EventInputSchema.parse(i));
     return parsed.map((p) => this.commit(p));
   }
