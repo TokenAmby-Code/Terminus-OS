@@ -64,11 +64,10 @@ export class RealTmux implements TmuxControlPlane {
   constructor(private socket: string) {}
 
   async reachable(): Promise<boolean> {
-    await run(this.socket, ['start-server']);
-    const r = await run(this.socket, ['list-panes', '-a', '-F', '#{pane_id}']);
-    // Exit 0, or an empty server with "no current session" — both mean the
-    // server answered. A missing binary / dead socket is unreachable.
-    return r.code === 0 || /no (server|current|sessions?)/i.test(r.stderr);
+    // Observation only: starting the server here would make it a child of the
+    // sandboxed txd.service and propagate NoNewPrivileges to every estate pane.
+    const r = await run(this.socket, ['show-options', '-g', 'exit-empty']);
+    return r.code === 0;
   }
 
   async version(): Promise<string | null> {
@@ -132,6 +131,9 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   async ensureEstate(): Promise<'created' | 'existing'> {
+    if (!(await this.reachable())) {
+      throw new Error('txd tmux server is not externally owned; txd-tmux.service must start it before txd');
+    }
     const rows = await this.estateRows();
     if (rows.length > 0) {
       if (this.isCanonicalEstate(rows)) return 'existing';
@@ -180,6 +182,9 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   async createSeat(seatId: string): Promise<void> {
+    if (!(await this.reachable())) {
+      throw new Error('txd tmux server is not externally owned; refusing to spawn it inside txd');
+    }
     // Sanitized tmux session name (canonical id may contain `:`); the true id
     // lives in the pane option only.
     const safe = `seat_${seatId.replace(/[^A-Za-z0-9_]/g, '_')}`;

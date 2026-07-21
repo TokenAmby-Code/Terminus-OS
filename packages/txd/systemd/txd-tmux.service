@@ -1,0 +1,21 @@
+# Dedicated owner for txd's persistent tmux server. This unit is deliberately
+# outside txd.service's NoNewPrivileges sandbox: tmux panes inherit the server's
+# process attributes, so starting the server from txd would make sudo,
+# snap-confine, and container runtimes unusable estate-wide.
+
+[Unit]
+Description=Terminus-OS persistent tmux estate server
+Before=txd.service
+
+[Service]
+Type=oneshot
+Environment=TXD_TMUX_SOCKET=k12
+ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} start-server \; set-option -g exit-empty off
+RemainAfterExit=yes
+NoNewPrivileges=false
+# The server is the durable estate owner. Stopping/restarting txd.service must
+# not signal it; lifecycle of this unit is an explicit fleet operation.
+KillMode=process
+
+[Install]
+WantedBy=default.target
