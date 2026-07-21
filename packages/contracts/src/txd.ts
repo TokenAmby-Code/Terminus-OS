@@ -30,6 +30,11 @@ import { CommanderType, OriginType, commanderIdConsistent, commanderIdConsistenc
 // without a schema_version bump").
 // v3: additive — adds `act.send_submit_observed`; each literal insert, Enter,
 // retry, and pane-readback result is durable evidence for the send verdict.
+// v4: additive — adds `act.send_cancelled` and the `cancelled` delivery verdict.
+// A frozen seat generation that changes before delivery terminates without a
+// tmux call, with `binding_changed` recorded as the cancellation reason.
+// v5: additive — closes delivery unless registration, readiness, placement,
+// and routing are all attested for the current binding generation.
 export const SCHEMA_VERSION = 5;
 
 // ── Entities ────────────────────────────────────────────────────────────────
@@ -81,6 +86,7 @@ export const ACT_EVENT_NAMES = [
   'send_gated',
   'send_submit_observed',
   'send_delivered',
+  'send_cancelled',
   'receipt_deduped',
 ] as const;
 
@@ -110,6 +116,7 @@ export const EVENT_TYPES = [
   'act.send_gated',
   'act.send_submit_observed',
   'act.send_delivered',
+  'act.send_cancelled',
   'act.receipt_deduped',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -174,12 +181,16 @@ export const SendRefusalReasonSchema = z.enum(SEND_REFUSAL_REASONS);
 export const DELIVERY_VERDICTS = [
   'delivered',
   'enqueued_gated',
+  'cancelled',
   'failed_none_delivered',
   'partial_delivered',
 ] as const;
 export type DeliveryVerdict = (typeof DELIVERY_VERDICTS)[number];
 export const DeliveryVerdictSchema = z.enum(DELIVERY_VERDICTS);
 
+export const SEND_CANCELLATION_REASONS = ['binding_changed'] as const;
+export type SendCancellationReason = (typeof SEND_CANCELLATION_REASONS)[number];
+export const SendCancellationReasonSchema = z.enum(SEND_CANCELLATION_REASONS);
 // ── Provenance (spec §2) — three real emitters, hooks REAL but UNTRUSTED ──────
 export const PROVENANCE_SOURCES = ['hook', 'wrapper', 'observer'] as const;
 export type ProvenanceSource = (typeof PROVENANCE_SOURCES)[number];
@@ -391,14 +402,22 @@ export const SendReceiptBaseSchema = z.object({
   verdict: DeliveryVerdictSchema,
   resolution: SendResolutionSchema, // the SAME resolution the send used
   gate_reason: SendGateReasonSchema.nullable(),
+  cancellation_reason: SendCancellationReasonSchema.nullable(),
   activity_window_ms: z.number().int().nonnegative().nullable(), // echoed when gated
   bytes_delivered: z.number().int().nonnegative().nullable(), // required non-null for partial_delivered
   send_seq: z.number().int().nonnegative(), // seq is 1-based and monotonic
 });
-export const SendReceiptSchema = SendReceiptBaseSchema.refine(
-  (r) => r.verdict !== 'partial_delivered' || r.bytes_delivered !== null,
-  { message: 'partial_delivered must carry non-null bytes_delivered', path: ['bytes_delivered'] },
-);
+export const SendReceiptSchema = SendReceiptBaseSchema.superRefine((receipt, ctx) => {
+  if (receipt.verdict === 'partial_delivered' && receipt.bytes_delivered === null) {
+    ctx.addIssue({ code: 'custom', message: 'partial_delivered must carry non-null bytes_delivered', path: ['bytes_delivered'] });
+  }
+  if (receipt.verdict === 'cancelled' && receipt.cancellation_reason !== 'binding_changed') {
+    ctx.addIssue({ code: 'custom', message: 'cancelled must carry binding_changed', path: ['cancellation_reason'] });
+  }
+  if (receipt.verdict !== 'cancelled' && receipt.cancellation_reason !== null) {
+    ctx.addIssue({ code: 'custom', message: 'only cancelled may carry a cancellation reason', path: ['cancellation_reason'] });
+  }
+});
 export type SendReceipt = z.infer<typeof SendReceiptSchema>;
 
 // Admission refusal (fail-loud; nothing admitted to the queue).

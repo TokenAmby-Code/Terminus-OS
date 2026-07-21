@@ -12,7 +12,7 @@
 //   act.stop_reported  (instance) activity → 'stopped'
 //   reg.retired        (instance) activity → 'retired'
 //   act.send_enqueued  (send)     payload.target = seat canonical id → queue_depth +1
-//   act.send_delivered (send)     payload.target → queue_depth -1   (gated is a no-op: still enqueued)
+//   act.send_delivered/cancelled (send) payload.target → queue_depth -1
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
 import { CommanderType, OriginType, PANE_STATES } from '@terminus-os/contracts';
@@ -162,7 +162,8 @@ export function buildProjections(events: EventRecord[]): Projections {
         if (t) queueByTarget.set(t, (queueByTarget.get(t) ?? 0) + 1);
         break;
       }
-      case 'act.send_delivered': {
+      case 'act.send_delivered':
+      case 'act.send_cancelled': {
         const t = str(e.payload.target);
         if (t) queueByTarget.set(t, Math.max(0, (queueByTarget.get(t) ?? 0) - 1));
         break;
