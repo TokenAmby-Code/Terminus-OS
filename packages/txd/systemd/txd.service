@@ -10,7 +10,7 @@
 
 [Unit]
 Description=Terminus-OS txd event-sourced estate daemon (tmux control plane)
-Requires=tx-estate.service
+BindsTo=tx-estate.service
 After=network-online.target tx-estate.service
 Wants=network-online.target
 # Missing config must NOT crashloop every RestartSec: skip the unit cleanly
@@ -32,7 +32,7 @@ RestartSec=2
 NoNewPrivileges=true
 # Never start tmux here. NoNewPrivileges is inherited across fork/exec and
 # would propagate from txd to the tmux server and every estate pane. The
-# required tx-estate.service owns the server outside this sandbox.
+# lifecycle-bound tx-estate.service owns the server outside this sandbox.
 # Terminate only the bun main process on stop/restart — NOT the whole cgroup.
 # The persistent tmux server lives in tx-estate.service; txd spawns only
 # short-lived tmux clients. Process-scope teardown leaves those completed

@@ -6,15 +6,23 @@
 [Unit]
 Description=Terminus-OS persistent tmux estate server
 Before=txd.service
+# While the supervised server is live, keep the control plane live. If the
+# server exits, txd's BindsTo stops the old generation; after systemd restarts
+# this unit, Upholds starts txd and its boot constructor rebuilds the estate.
+Upholds=txd.service
 
 [Service]
-Type=oneshot
+Type=simple
 Environment=TXD_TMUX_SOCKET=k12
-ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf start-server \; set-option -g exit-empty off
-RemainAfterExit=yes
+# -D keeps the actual tmux server in the foreground and disables exit-empty.
+# systemd therefore supervises server liveness instead of a completed launcher.
+ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf
+ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server
+Restart=always
+RestartSec=2
 NoNewPrivileges=false
-# The server is the durable estate owner. Stopping/restarting txd.service must
-# not signal it; lifecycle of this unit is an explicit fleet operation.
+# The server is the durable estate owner. Stopping/restarting txd.service does
+# not signal it; an estate-server exit is the event that rotates both services.
 KillMode=process
 
 [Install]
