@@ -37,7 +37,7 @@ console.log(
 );
 
 // Stand the canonical persistent estate declaratively (rung 2). The dedicated
-// unsandboxed txd-tmux.service must already own the server; missing ownership or
+// unsandboxed tx-estate.service must already own the server; missing ownership or
 // a non-canonical existing shape fails boot loudly before event mutation.
 const est = await daemon.constructEstate();
 // Structured logs go to stderr here as elsewhere in the daemon (core.ts).

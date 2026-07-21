@@ -151,7 +151,7 @@ systemctl --user restart txd
 must not be its child. Linux carries `NoNewPrivileges` across fork and exec; a
 server started by txd therefore passes `NoNewPrivs=1` to every pane, making
 setuid/capability-dependent tools such as `sudo`, `snap-confine`, and `lxc`
-unusable estate-wide. `txd-tmux.service` is the dedicated unsandboxed server
+unusable estate-wide. `tx-estate.service` is the dedicated unsandboxed server
 owner. txd only connects to its socket and refuses loudly if that external
 server is absent; it never falls back to starting the server itself.
 
@@ -170,7 +170,7 @@ must clear the socket and reconstruct it out-of-band, in this order:
 
 ```bash
 tmux -L k12 kill-server
-systemctl --user restart txd-tmux.service
+systemctl --user restart tx-estate.service
 systemctl --user restart txd.service
 ```
 
@@ -190,7 +190,7 @@ bun packages/txd/src/daemon.ts   # run (needs IMPERIUM_MACHINE or TXD_CONFIG)
 
 ## Deploy — systemd `--user` via the Token-Fleet apply leg
 
-`systemd/txd-tmux.service` owns the unsandboxed persistent tmux server;
+`systemd/tx-estate.service` owns the unsandboxed persistent tmux server;
 `systemd/txd.service` requires it and owns only the sandboxed daemon. Both are
 user-scoped. Delivery/installation is a Token-Fleet apply leg scoped to k12-personal —
 apply legs install units to `~/.config/systemd/user/` and reload, root-free —
@@ -201,6 +201,6 @@ ensures on the box, resolving the extraction spec's sole open minor (§3.5/§7)
 in favor of the fleet leg that actually provisions it.
 
 ```bash
-systemctl --user enable --now txd-tmux.service txd.service
+systemctl --user enable --now tx-estate.service txd.service
 tx probes it by name: systemctl --user start txd; GET /ctl/health; POST /ctl/reconcile
 ```

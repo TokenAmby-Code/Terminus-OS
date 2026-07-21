@@ -10,7 +10,7 @@ Before=txd.service
 [Service]
 Type=oneshot
 Environment=TXD_TMUX_SOCKET=k12
-ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/k12.conf start-server \; set-option -g exit-empty off
+ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf start-server \; set-option -g exit-empty off
 RemainAfterExit=yes
 NoNewPrivileges=false
 # The server is the durable estate owner. Stopping/restarting txd.service must

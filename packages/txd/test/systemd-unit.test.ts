@@ -12,7 +12,7 @@
 // - ConditionPathExists on TXD_CONFIG's path: a missing config must skip the
 //   unit cleanly with a visible condition-failed status, not crashloop every
 //   RestartSec (Defect B). The guard path must match the TXD_CONFIG env line.
-// - txd-tmux.service owns the server outside txd's NoNewPrivileges sandbox;
+// - tx-estate.service owns the server outside txd's NoNewPrivileges sandbox;
 //   txd requires it and must never self-spawn the server.
 // - No PrivateTmp: documented pin (txd-extraction-spec §3.3) — tmux children
 //   and test fixtures deliberately share the real /tmp namespace.
@@ -22,7 +22,7 @@ import { describe, expect, test } from 'bun:test';
 const unitPath = new URL('../systemd/txd.service', import.meta.url).pathname;
 const unit = await Bun.file(unitPath).text();
 const lines = unit.split('\n');
-const tmuxUnitPath = new URL('../systemd/txd-tmux.service', import.meta.url).pathname;
+const tmuxUnitPath = new URL('../systemd/tx-estate.service', import.meta.url).pathname;
 const tmuxUnit = await Bun.file(tmuxUnitPath).text();
 const tmuxLines = tmuxUnit.split('\n');
 const tmuxSource = await Bun.file(new URL('../src/tmux.ts', import.meta.url)).text();
@@ -56,8 +56,8 @@ describe('systemd/txd.service pins', () => {
   });
 
   test('sandboxed txd orders after and requires the unsandboxed tmux server owner', () => {
-    pin('Requires=txd-tmux.service');
-    pin('After=network-online.target txd-tmux.service');
+    pin('Requires=tx-estate.service');
+    pin('After=network-online.target tx-estate.service');
     pin('NoNewPrivileges=true');
   });
 
@@ -75,11 +75,11 @@ describe('systemd/txd.service pins', () => {
   });
 });
 
-describe('systemd/txd-tmux.service boundary', () => {
+describe('systemd/tx-estate.service boundary', () => {
   test('tmux server is explicitly outside the txd NoNewPrivileges sandbox', () => {
     expect(tmuxLines).toContain('NoNewPrivileges=false');
     expect(tmuxLines).toContain('Environment=TXD_TMUX_SOCKET=k12');
-    expect(tmuxLines).toContain('ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/k12.conf start-server \\; set-option -g exit-empty off');
+    expect(tmuxLines).toContain('ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf start-server \\; set-option -g exit-empty off');
   });
 
   test('txd never starts a missing tmux server inside its own sandbox', () => {
