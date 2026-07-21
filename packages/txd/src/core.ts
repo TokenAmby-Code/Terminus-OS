@@ -46,6 +46,13 @@ import type { TmuxControlPlane } from './tmux.ts';
 export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as const;
 
 type Now = () => string;
+type ScheduledCallback = () => void | Promise<void>;
+type Schedule = (callback: ScheduledCallback, delayMs: number) => void;
+
+const scheduleGuardRelease: Schedule = (callback, delayMs) => {
+  const timer = setTimeout(() => void callback(), delayMs);
+  timer.unref?.();
+};
 
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
@@ -54,6 +61,8 @@ export class Daemon {
     private store: EventStore,
     private tmux: TmuxControlPlane,
     private now: Now = () => new Date().toISOString(),
+    private schedule: Schedule = scheduleGuardRelease,
+    private nowMs: () => number = Date.now,
   ) {}
 
   /** Serialize a mutating op — the single-writer discipline. */
@@ -248,47 +257,92 @@ export class Daemon {
           provenance: this.prov('observer', transportReceipt),
           occurred_at: this.now(),
         });
+        this.schedule(
+          () => this.releaseGuardedSend(sendId, resolution, req.text, transportReceipt),
+          SEND_PRESENCE_ACTIVITY_WINDOW_MS,
+        );
         return this.receipt('enqueued_gated', resolution, sendId, 'typing_guard', SEND_PRESENCE_ACTIVITY_WINDOW_MS, null);
       };
 
+      // A current binding is the ledger's positive proof that this pane is an
+      // agent seat. Agent output is never operator composition territory, so
+      // daemon-to-agent delivery bypasses the client-activity guard entirely.
+      if (resolution.bound_seq > 0) {
+        return this.deliverSend(sendId, resolution, req.text, transportReceipt, 'agent_seat_exempt');
+      }
+
       // Presence read at ADMISSION (the enqueue-time snapshot, spec §5 rung 4):
       // operator active ⇒ defer this pass (gate now, deliver on a later drain).
-      const presentAtAdmission = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS);
+      const presentAtAdmission = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
       if (presentAtAdmission.has(resolution.seat_id)) return gate();
 
       // Presence read at DRAIN (the delivery instant): re-read fresh — the
       // operator may have become active between admission and drain.
-      const presentAtDrain = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS);
+      const presentAtDrain = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
       if (presentAtDrain.has(resolution.seat_id)) return gate();
 
       // Operator idle at BOTH decision points → deliver (canonical in, %id internal).
-      const result = await this.tmux.sendToSeat(resolution.seat_id, req.text);
-      for (const observation of result.trace ?? []) {
-        await this.store.append({
-          entity_type: 'send',
-          entity_id: sendId,
-          event_type: 'act.send_submit_observed',
-          payload: { target: resolution.seat_id, ...observation, resolved_seq: resolution.bound_seq },
-          provenance: this.prov('observer', transportReceipt),
-          occurred_at: this.now(),
-        });
-      }
-      const verdict: DeliveryVerdict = result.verdict;
-      if (verdict === 'delivered') {
-        await this.store.append({
-          entity_type: 'send',
-          entity_id: sendId,
-          event_type: 'act.send_delivered',
-          payload: { target: resolution.seat_id, bytes: result.bytes, resolved_seq: resolution.bound_seq },
-          provenance: this.prov('observer', transportReceipt),
-          occurred_at: this.now(),
-        });
-      }
-      // partial_delivered = text inserted but not submitted → stays enqueued (like a
-      // gate); the receipt still carries the partial verdict + its byte evidence
-      // (contract requires non-null bytes for partial). Only a full delivery dequeues.
-      return this.receipt(verdict, resolution, sendId, null, null, verdict === 'failed_none_delivered' ? 0 : result.bytes);
+      return this.deliverSend(sendId, resolution, req.text, transportReceipt, 'operator_idle');
     });
+  }
+
+  private releaseGuardedSend(
+    sendId: string,
+    resolution: SendResolution,
+    text: string,
+    transportReceipt: string | null,
+  ): Promise<void> {
+    return this.locked(async () => {
+      const present = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
+      if (present.has(resolution.seat_id)) {
+        this.schedule(
+          () => this.releaseGuardedSend(sendId, resolution, text, transportReceipt),
+          SEND_PRESENCE_ACTIVITY_WINDOW_MS,
+        );
+        return;
+      }
+      await this.deliverSend(sendId, resolution, text, transportReceipt, 'typing_guard_expired');
+    });
+  }
+
+  private async deliverSend(
+    sendId: string,
+    resolution: SendResolution,
+    text: string,
+    transportReceipt: string | null,
+    releaseReason: 'agent_seat_exempt' | 'operator_idle' | 'typing_guard_expired',
+  ): Promise<SendReceipt> {
+    const result = await this.tmux.sendToSeat(resolution.seat_id, text);
+    for (const observation of result.trace ?? []) {
+      await this.store.append({
+        entity_type: 'send',
+        entity_id: sendId,
+        event_type: 'act.send_submit_observed',
+        payload: { target: resolution.seat_id, ...observation, resolved_seq: resolution.bound_seq },
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: this.now(),
+      });
+    }
+    const verdict: DeliveryVerdict = result.verdict;
+    if (verdict === 'delivered') {
+      await this.store.append({
+        entity_type: 'send',
+        entity_id: sendId,
+        event_type: 'act.send_delivered',
+        payload: {
+          target: resolution.seat_id,
+          bytes: result.bytes,
+          resolved_seq: resolution.bound_seq,
+          release_reason: releaseReason,
+        },
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: this.now(),
+      });
+    }
+    // partial_delivered = text inserted but not submitted → stays enqueued (like a
+    // gate); the receipt still carries the partial verdict + its byte evidence
+    // (contract requires non-null bytes for partial). Only a full delivery dequeues.
+    return this.receipt(verdict, resolution, sendId, null, null, verdict === 'failed_none_delivered' ? 0 : result.bytes);
   }
 
   private resolveTarget(target: string, proj: Projections): SendResolution | null {
