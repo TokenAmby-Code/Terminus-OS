@@ -64,12 +64,12 @@ test('unused vendor hook types quick-return 410 and are side-effect-free', async
 
 test('the stop-hook door serves at /ingress/hooks/stop with the ruled stop behavior', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'palace:W', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 4, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/stop`, {
       method: 'POST',
-      body: JSON.stringify({ instance_id: 'i1', schema_version: 3 }),
+      body: JSON.stringify({ instance_id: 'i1', schema_version: 4 }),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, recorded: true, activity: 'stopped' });
@@ -80,7 +80,7 @@ test('the stop-hook door serves at /ingress/hooks/stop with the ruled stop behav
 
 test('GET /tmux/read/estate serves the estate view including who is bound', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 3, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 4, identity: 'i1', persona: 'salamander', tint: '#302800' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`);
@@ -118,13 +118,13 @@ const LEGACY = [
 
 test('adversarial: every legacy route is dead (404) — no shim, no alias', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 4, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     for (const [method, path] of LEGACY) {
       const res = await fetch(`http://127.0.0.1:${srv.port}${encodeURI(path)}`, {
         method,
-        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 3 }) } : {}),
+        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 4 }) } : {}),
       });
       expect(res.status).toBe(404);
     }

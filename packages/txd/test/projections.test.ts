@@ -44,7 +44,7 @@ test('activity axis folds prompt/stop/retire independently of pane & binding', a
   await s.close();
 });
 
-test('queue_depth is a projection column: enqueued +1, delivered -1, gated no-op', async () => {
+test('queue_depth is a projection column: enqueued +1, delivered/cancelled -1, gated no-op', async () => {
   const s = new MemoryEventStore();
   await s.append(e({ entity_id: 'seatQ', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
   await s.append(e({ entity_type: 'send', entity_id: 's1', event_type: 'act.send_enqueued', payload: { target: 'seatQ' } }));
@@ -55,6 +55,9 @@ test('queue_depth is a projection column: enqueued +1, delivered -1, gated no-op
   await s.append(e({ entity_type: 'send', entity_id: 's1', event_type: 'act.send_delivered', payload: { target: 'seatQ', bytes: 3 } }));
   p = buildProjections(await s.readAll());
   expect(p.activityBoard.find((r) => r.seat_id === 'seatQ')!.queue_depth).toBe(1);
+  await s.append(e({ entity_type: 'send', entity_id: 's2', event_type: 'act.send_cancelled', payload: { target: 'seatQ', reason: 'binding_changed' } }));
+  p = buildProjections(await s.readAll());
+  expect(p.activityBoard.find((r) => r.seat_id === 'seatQ')!.queue_depth).toBe(0);
   await s.close();
 });
 
