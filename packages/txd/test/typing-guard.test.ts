@@ -15,6 +15,16 @@ function base() {
 
 const SEAT = 'somnium:NE';
 
+async function boundSeat(d: Daemon) {
+  await d.launch({
+    seat_id: SEAT,
+    schema_version: 2,
+    identity: 'agent-instance',
+    persona: 'astartes',
+    tint: '#302800',
+  });
+}
+
 // A tmux fake whose presence answer is scripted PER CALL, so a test can prove
 // the daemon reads presence at admission AND again at drain (and which read
 // drove the gate). Extends FakeTmux to keep createSeat/sendToSeat behaviour.
@@ -79,4 +89,50 @@ test('idle at BOTH admission and drain → delivered (both decision points read)
   const res = (await d.send({ target: SEAT, text: 'hi', schema_version: 2 })) as SendReceipt;
   expect(res.verdict).toBe('delivered');
   expect(tmux.calls).toBe(2); // read at admission AND drain before delivering
+});
+
+test('continuously active bound agent pane delivers immediately', async () => {
+  const store = base();
+  const tmux = new SequencedTmux([true, true]);
+  const d = new Daemon(store, tmux);
+  await boundSeat(d);
+
+  const res = (await d.send({ target: SEAT, text: 'report', schema_version: 2 })) as SendReceipt;
+
+  expect(res.verdict).toBe('delivered');
+  expect(tmux.calls).toBe(0);
+});
+
+test('recent operator input on an unbound pane holds, then releases on guard expiry', async () => {
+  const store = base();
+  const tmux = new FakeTmux();
+  let nowMs = 1_000_000;
+  let release: (() => void | Promise<void>) | undefined;
+  const d = new Daemon(
+    store,
+    tmux,
+    () => new Date(nowMs).toISOString(),
+    (callback, delayMs) => {
+      expect(delayMs).toBe(SEND_PRESENCE_ACTIVITY_WINDOW_MS);
+      release = callback;
+    },
+    () => nowMs,
+  );
+  await d.launch({ seat_id: SEAT, schema_version: 2 });
+  tmux.setPresence(SEAT, nowMs);
+
+  const res = (await d.send({ target: SEAT, text: 'held', schema_version: 2 })) as SendReceipt;
+  expect(res.verdict).toBe('enqueued_gated');
+  expect(release).toBeDefined();
+
+  nowMs += SEND_PRESENCE_ACTIVITY_WINDOW_MS + 1;
+  await release!();
+
+  const sendEvents = (await store.readAll()).filter((event) => event.entity_type === 'send');
+  expect(sendEvents.map((event) => event.event_type)).toEqual([
+    'act.send_enqueued',
+    'act.send_gated',
+    'act.send_delivered',
+  ]);
+  expect(sendEvents.at(-1)?.payload).toMatchObject({ release_reason: 'typing_guard_expired' });
 });
