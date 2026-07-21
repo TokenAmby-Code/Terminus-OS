@@ -745,8 +745,8 @@ export class Daemon {
 
   async health(machine: string, build: { version: string; git_sha: string; bun: string }): Promise<Health> {
     const proj = await this.projections();
-    // Probe the daemon's OWN tmux socket (start-server + list-panes), not just
-    // `tmux -V` — a responding binary over a dead socket must not read healthy.
+    // Probe the externally supervised estate socket, not just `tmux -V` — a
+    // responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
     const open = proj.openContradictions.length;
     return {
