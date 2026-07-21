@@ -14,13 +14,19 @@ import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS } from './estate.ts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 
+export type SendTraceEvent = {
+  kind: 'literal_insert' | 'submit_enter' | 'submit_verify';
+  attempt: number;
+  ok: boolean;
+};
+
 // Below-membrane delivery outcome (discriminated by verdict). `partial_delivered`
 // = the literal text reached the pane but the submit (Enter) did not — first-class,
 // never collapsed to failure. A total failure carries zero bytes by construction.
 export type SendOutcome =
-  | { verdict: 'delivered'; bytes: number }
-  | { verdict: 'partial_delivered'; bytes: number }
-  | { verdict: 'failed_none_delivered'; bytes: 0 };
+  | { verdict: 'delivered'; bytes: number; trace: SendTraceEvent[] }
+  | { verdict: 'partial_delivered'; bytes: number; trace: SendTraceEvent[] }
+  | { verdict: 'failed_none_delivered'; bytes: 0; trace: SendTraceEvent[] };
 
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
@@ -53,7 +59,11 @@ export interface TmuxControlPlane {
 
 const CANON_OPT = '@canonical_id';
 
-async function run(socket: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+export type TmuxCommandResult = { code: number; stdout: string; stderr: string };
+type TmuxRunner = (socket: string, args: string[]) => Promise<TmuxCommandResult>;
+type Sleep = (ms: number) => Promise<void>;
+
+async function run(socket: string, args: string[]): Promise<TmuxCommandResult> {
   const proc = Bun.spawn(['tmux', '-L', socket, ...args], { stdout: 'pipe', stderr: 'pipe' });
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
   const code = await proc.exited;
@@ -61,23 +71,36 @@ async function run(socket: string, args: string[]): Promise<{ code: number; stdo
 }
 
 export class RealTmux implements TmuxControlPlane {
-  constructor(private socket: string) {}
+  private runner: TmuxRunner;
+  private sleep: Sleep;
+  private enterDelayMs: number;
+
+  constructor(
+    private socket: string,
+    options: { run?: TmuxRunner; sleep?: Sleep; enterDelayMs?: number } = {},
+  ) {
+    this.runner = options.run ?? run;
+    this.sleep = options.sleep ?? ((ms) => Bun.sleep(ms));
+    const configured = Number(process.env.TXD_SEND_ENTER_DELAY_MS);
+    this.enterDelayMs = options.enterDelayMs
+      ?? (Number.isFinite(configured) && configured >= 0 ? configured : 200);
+  }
 
   async reachable(): Promise<boolean> {
     // Observation only: starting the server here would make it a child of the
     // sandboxed txd.service and propagate NoNewPrivileges to every estate pane.
-    const r = await run(this.socket, ['show-options', '-g', 'exit-empty']);
+    const r = await this.runner(this.socket, ['show-options', '-g', 'exit-empty']);
     return r.code === 0;
   }
 
   async version(): Promise<string | null> {
-    const r = await run(this.socket, ['-V']);
+    const r = await this.runner(this.socket, ['-V']);
     return r.code === 0 ? r.stdout.trim() : null;
   }
 
   /** Resolve canonical id -> internal %id (membrane; return value stays inside). */
   private async resolvePane(seatId: string): Promise<string | null> {
-    const r = await run(this.socket, ['list-panes', '-a', '-F', `#{pane_id}\t#{${CANON_OPT}}`]);
+    const r = await this.runner(this.socket, ['list-panes', '-a', '-F', `#{pane_id}\t#{${CANON_OPT}}`]);
     if (r.code !== 0) return null;
     for (const line of r.stdout.split('\n')) {
       const [paneId, canon] = line.split('\t');
@@ -87,7 +110,7 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   async listSeats(): Promise<SeatObservation[]> {
-    const r = await run(this.socket, ['list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_dead}`]);
+    const r = await this.runner(this.socket, ['list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_dead}`]);
     if (r.code !== 0) return [];
     const out: SeatObservation[] = [];
     for (const line of r.stdout.split('\n')) {
@@ -100,7 +123,7 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   private async checked(args: string[], operation: string): Promise<string> {
-    const result = await run(this.socket, args);
+    const result = await this.runner(this.socket, args);
     if (result.code !== 0) {
       throw new Error(`txd tmux ${operation} failed: ${result.stderr.trim() || `exit ${result.code}`}`);
     }
@@ -108,7 +131,7 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   private async estateRows(): Promise<Array<{ session: string; window: string; seat: string }>> {
-    const result = await run(this.socket, [
+    const result = await this.runner(this.socket, [
       'list-panes', '-a', '-F', `#{session_name}\t#{window_name}\t#{${CANON_OPT}}`,
     ]);
     if (result.code !== 0) return [];
@@ -176,7 +199,7 @@ export class RealTmux implements TmuxControlPlane {
       if (!this.isCanonicalEstate(await this.estateRows())) throw new Error('txd canonical estate postcondition failed');
       return 'created';
     } catch (error) {
-      if (sessionCreated) await run(this.socket, ['kill-session', '-t', TXD_SESSION]);
+      if (sessionCreated) await this.runner(this.socket, ['kill-session', '-t', TXD_SESSION]);
       throw error;
     }
   }
@@ -188,27 +211,27 @@ export class RealTmux implements TmuxControlPlane {
     // Sanitized tmux session name (canonical id may contain `:`); the true id
     // lives in the pane option only.
     const safe = `seat_${seatId.replace(/[^A-Za-z0-9_]/g, '_')}`;
-    const created = await run(this.socket, ['new-session', '-d', '-s', safe, '-x', '200', '-y', '50']);
+    const created = await this.runner(this.socket, ['new-session', '-d', '-s', safe, '-x', '200', '-y', '50']);
     // Fail loud: if the session didn't come up, do NOT go on to list/retag some
     // other pane and record a seat that was never really created.
     if (created.code !== 0) {
       throw new Error(`txd tmux createSeat failed for ${seatId}: ${created.stderr.trim() || `exit ${created.code}`}`);
     }
-    const paneR = await run(this.socket, ['list-panes', '-t', safe, '-F', '#{pane_id}']);
+    const paneR = await this.runner(this.socket, ['list-panes', '-t', safe, '-F', '#{pane_id}']);
     const paneId = paneR.stdout.trim().split('\n')[0];
     // A seat without its canonical-id tag is a broken seat. Tear the just-created
     // session back down (no orphan) before failing loud, rather than leave an
     // untagged pane the membrane can never resolve.
     if (!paneId) {
-      await run(this.socket, ['kill-session', '-t', safe]);
+      await this.runner(this.socket, ['kill-session', '-t', safe]);
       throw new Error(`txd tmux createSeat: no pane for ${seatId} (session ${safe})`);
     }
-    await run(this.socket, ['set-option', '-p', '-t', paneId, CANON_OPT, seatId]);
+    await this.runner(this.socket, ['set-option', '-p', '-t', paneId, CANON_OPT, seatId]);
   }
 
   async killSeat(seatId: string): Promise<void> {
     const paneId = await this.resolvePane(seatId);
-    if (paneId) await run(this.socket, ['kill-pane', '-t', paneId]);
+    if (paneId) await this.runner(this.socket, ['kill-pane', '-t', paneId]);
   }
 
   async reapSeat(seatId: string): Promise<boolean> {
@@ -216,13 +239,13 @@ export class RealTmux implements TmuxControlPlane {
     if (!paneId) return false;
     // -k kills the pane's current command; the pane (and its @canonical_id option)
     // is REUSED and a fresh default shell is started — the estate seat persists.
-    const r = await run(this.socket, ['respawn-pane', '-k', '-t', paneId]);
+    const r = await this.runner(this.socket, ['respawn-pane', '-k', '-t', paneId]);
     return r.code === 0;
   }
 
   async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
     // Active pane (canonical) per session.
-    const panes = await run(this.socket, [
+    const panes = await this.runner(this.socket, [
       'list-panes',
       '-a',
       '-F',
@@ -234,7 +257,7 @@ export class RealTmux implements TmuxControlPlane {
       if (winActive === '1' && paneActive === '1' && session && canon) activeCanonBySession.set(session, canon);
     }
     // Attached clients + last activity (epoch seconds).
-    const clients = await run(this.socket, ['list-clients', '-F', '#{client_session}\t#{client_activity}']);
+    const clients = await this.runner(this.socket, ['list-clients', '-F', '#{client_session}\t#{client_activity}']);
     const present = new Set<string>();
     const nowSec = Math.floor(nowMs / 1000);
     for (const line of clients.stdout.split('\n')) {
@@ -249,14 +272,40 @@ export class RealTmux implements TmuxControlPlane {
 
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const paneId = await this.resolvePane(seatId);
-    if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered' };
-    const literal = await run(this.socket, ['send-keys', '-t', paneId, '-l', text]);
-    if (literal.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered' };
-    // Literal insert succeeded → the text is in the pane. If the separate Enter
-    // fails, it's inserted-but-not-submitted = partial, not pure failure.
+    if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered', trace: [] };
+    const trace: SendTraceEvent[] = [];
+    const literal = await this.runner(this.socket, ['send-keys', '-t', paneId, '-l', text]);
+    trace.push({ kind: 'literal_insert', attempt: 1, ok: literal.code === 0 });
+    if (literal.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered', trace };
     const bytes = Buffer.byteLength(text, 'utf8');
-    const enter = await run(this.socket, ['send-keys', '-t', paneId, 'Enter']);
-    return enter.code === 0 ? { bytes, verdict: 'delivered' } : { bytes, verdict: 'partial_delivered' };
+
+    // The cursor's logical line is the cross-composer editable surface: shell,
+    // Codex and Claude all leave swallowed input there. Once submitted, the
+    // cursor moves to output or a fresh composer and this line no longer holds
+    // the final non-empty line of the sent text.
+    const verificationNeedle = text.split(/\r?\n/).filter(Boolean).at(-1)?.trim() ?? '';
+    const verify = async (attempt: number): Promise<boolean> => {
+      const cursor = await this.runner(this.socket, ['display-message', '-p', '-t', paneId, '#{cursor_y}']);
+      let ok = false;
+      if (cursor.code === 0 && /^\d+$/.test(cursor.stdout.trim())) {
+        const row = cursor.stdout.trim();
+        const captured = await this.runner(this.socket, ['capture-pane', '-p', '-J', '-t', paneId, '-S', row, '-E', row]);
+        ok = captured.code === 0 && verificationNeedle.length > 0 && !captured.stdout.includes(verificationNeedle);
+      }
+      trace.push({ kind: 'submit_verify', attempt, ok });
+      return ok;
+    };
+
+    // One initial submit plus two bounded retries. Every Enter is separated
+    // from the literal paste (and from prior retries) by a tunable backoff.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await this.sleep(this.enterDelayMs * attempt);
+      const enter = await this.runner(this.socket, ['send-keys', '-t', paneId, 'Enter']);
+      trace.push({ kind: 'submit_enter', attempt, ok: enter.code === 0 });
+      if (enter.code === 0 && await verify(attempt)) return { bytes, verdict: 'delivered', trace };
+      if (enter.code !== 0) trace.push({ kind: 'submit_verify', attempt, ok: false });
+    }
+    return { bytes, verdict: 'partial_delivered', trace };
   }
 }
 
@@ -342,7 +391,15 @@ export class FakeTmux implements TmuxControlPlane {
   }
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const s = this.seats.get(seatId);
-    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
-    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'delivered' };
+    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered', trace: [] };
+    return {
+      bytes: Buffer.byteLength(text, 'utf8'),
+      verdict: 'delivered',
+      trace: [
+        { kind: 'literal_insert', attempt: 1, ok: true },
+        { kind: 'submit_enter', attempt: 1, ok: true },
+        { kind: 'submit_verify', attempt: 1, ok: true },
+      ],
+    };
   }
 }
