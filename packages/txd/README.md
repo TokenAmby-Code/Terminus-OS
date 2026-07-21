@@ -25,9 +25,9 @@ contracts source, and the public route shape.
   `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
   silently synthesized lifecycle.
 - **Boot-time estate constructor.** `constructEstate()` stands one persistent
-  tmux session (`main`) at boot: `palace` (W/N/S/E), `somnium`
-  (W/N/S/NE/SE), five `council:*` singleton windows, and two `mechanicus:*`
-  singleton windows. Every pane is resolved only through `@canonical_id`.
+  tmux session (`main`) at boot: `reservists` (W/N/S/E), `palace` (W/N/S/E),
+  `somnium` (W/N/S/NE/SE), one five-pane `council` window, and one two-pane
+  `mechanicus` window. Every pane is resolved only through `@canonical_id`.
   Construction is idempotent; an existing non-canonical estate is refused
   loudly and must be cleared out-of-band before a later boot. txd is the
   constructor; tx never constructs.
@@ -161,6 +161,21 @@ is deployed, use `systemd-run --user --pipe --wait <cmd>`.
 The units' boundary and directive lines (WorkingDirectory under the box's
 `live/` checkout, ordering, condition guard, NoNewPrivileges split, KillMode,
 ExecStart, and PrivateTmp absence) are pinned in `test/systemd-unit.test.ts`.
+
+### Migrating an existing estate
+
+The previous decomposed estate is intentionally non-canonical and txd refuses
+to reshape it in place. During an approved maintenance window, the operator
+must clear the socket and reconstruct it out-of-band, in this order:
+
+```bash
+tmux -L k12 kill-server
+systemctl --user restart txd-tmux.service
+systemctl --user restart txd.service
+```
+
+This destroys every process on that tmux socket. Never run it as part of normal
+daemon startup or against an estate that has not been cleared for maintenance.
 
 ## Develop
 

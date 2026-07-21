@@ -79,7 +79,7 @@ describe('systemd/txd-tmux.service boundary', () => {
   test('tmux server is explicitly outside the txd NoNewPrivileges sandbox', () => {
     expect(tmuxLines).toContain('NoNewPrivileges=false');
     expect(tmuxLines).toContain('Environment=TXD_TMUX_SOCKET=k12');
-    expect(tmuxLines).toContain('ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} start-server \\; set-option -g exit-empty off');
+    expect(tmuxLines).toContain('ExecStart=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/k12.conf start-server \\; set-option -g exit-empty off');
   });
 
   test('txd never starts a missing tmux server inside its own sandbox', () => {

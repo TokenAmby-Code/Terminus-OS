@@ -165,11 +165,23 @@ export class RealTmux implements TmuxControlPlane {
 
     let sessionCreated = false;
     try {
-      const palaceW = await this.checked(
-        ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', TXD_SESSION, '-n', 'palace', '-x', '200', '-y', '60'],
+      const reservistsW = await this.checked(
+        ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', TXD_SESSION, '-n', 'reservists', '-x', '200', '-y', '60'],
         'create canonical session',
       );
       sessionCreated = true;
+      const reservistsN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', reservistsW, '-p', '70'], 'split reservists center');
+      const reservistsE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', reservistsN, '-p', '43'], 'split reservists east');
+      const reservistsS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-t', reservistsN, '-p', '50'], 'split reservists south');
+      await Promise.all([
+        this.tag(reservistsW, 'reservists:W'), this.tag(reservistsN, 'reservists:N'),
+        this.tag(reservistsS, 'reservists:S'), this.tag(reservistsE, 'reservists:E'),
+      ]);
+
+      const palaceW = await this.checked(
+        ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'palace'],
+        'create palace window',
+      );
       const palaceN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', palaceW, '-p', '70'], 'split palace center');
       const palaceE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', palaceN, '-p', '43'], 'split palace east');
       const palaceS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-t', palaceN, '-p', '50'], 'split palace south');
@@ -188,13 +200,31 @@ export class RealTmux implements TmuxControlPlane {
         this.tag(somniumS, 'somnium:S'), this.tag(somniumNE, 'somnium:NE'), this.tag(somniumSE, 'somnium:SE'),
       ]);
 
-      for (const [window, seats] of Object.entries(TXD_WINDOWS).slice(2)) {
-        const paneId = await this.checked(
-          ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', window],
-          `create ${window} window`,
-        );
-        await this.tag(paneId, seats[0]!);
+      const council = await this.checked(
+        ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'council'],
+        'create council window',
+      );
+      const councilPanes = [council];
+      for (let index = 1; index < TXD_WINDOWS.council.length; index += 1) {
+        councilPanes.push(await this.checked(
+          ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', council],
+          `split council seat ${index}`,
+        ));
       }
+      await Promise.all(TXD_WINDOWS.council.map((seat, index) => this.tag(councilPanes[index]!, seat)));
+
+      const mechanicus = await this.checked(
+        ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'mechanicus'],
+        'create mechanicus window',
+      );
+      const orchestrator = await this.checked(
+        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', mechanicus],
+        'split mechanicus orchestrator',
+      );
+      await Promise.all([
+        this.tag(mechanicus, TXD_WINDOWS.mechanicus[0]),
+        this.tag(orchestrator, TXD_WINDOWS.mechanicus[1]),
+      ]);
 
       if (!this.isCanonicalEstate(await this.estateRows())) throw new Error('txd canonical estate postcondition failed');
       return 'created';
@@ -347,6 +377,25 @@ export class FakeTmux implements TmuxControlPlane {
   seedNonCanonicalEstate(): void {
     this.shape = { sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } };
     this.seats.set('palace:W', { pane: 'live' });
+  }
+  seedLegacyEstate(): void {
+    this.shape = {
+      sessions: [TXD_SESSION],
+      windows: {
+        palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
+        somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
+        'council:custodes': ['council:custodes'],
+        'council:pax': ['council:pax'],
+        'council:malcador': ['council:malcador'],
+        'council:true-terminal': ['council:true-terminal'],
+        'council:administratum': ['council:administratum'],
+        'mechanicus:fabricator-general': ['mechanicus:fabricator-general'],
+        'mechanicus:orchestrator': ['mechanicus:orchestrator'],
+      },
+    };
+    for (const seats of Object.values(this.shape.windows)) {
+      for (const seat of seats) this.seats.set(seat, { pane: 'live' });
+    }
   }
   async createSeat(seatId: string): Promise<void> {
     // Test control: a configured seat throws (simulates a below-membrane tmux

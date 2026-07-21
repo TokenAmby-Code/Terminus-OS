@@ -10,19 +10,20 @@
 export const TXD_SESSION = 'main';
 
 export const TXD_WINDOWS = {
+  reservists: ['reservists:W', 'reservists:N', 'reservists:S', 'reservists:E'],
   palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
   somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
-  'council:custodes': ['council:custodes'],
-  'council:pax': ['council:pax'],
-  'council:malcador': ['council:malcador'],
-  'council:true-terminal': ['council:true-terminal'],
-  'council:administratum': ['council:administratum'],
-  'mechanicus:fabricator-general': ['mechanicus:fabricator-general'],
-  'mechanicus:orchestrator': ['mechanicus:orchestrator'],
+  council: ['council:custodes', 'council:pax', 'council:malcador', 'council:true-terminal', 'council:administratum'],
+  mechanicus: ['mechanicus:fabricator-general', 'mechanicus:orchestrator'],
 } as const;
 
 export const TXD_ESTATE: readonly string[] = [
   // ── Workspace grids (build_workspace stack panes) ──────────────────────────
+  // reservists: the reserve 4-pane stack (W/N/S/E), deliberately at window 0.
+  'reservists:W',
+  'reservists:N',
+  'reservists:S',
+  'reservists:E',
   // palace: the primary 4-pane orchestration stack (W/N/S/E).
   'palace:W',
   'palace:N',

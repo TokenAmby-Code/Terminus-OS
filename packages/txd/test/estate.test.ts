@@ -5,6 +5,15 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { TXD_ESTATE } from '../src/estate.ts';
 
+const STABLE_SEAT_IDS = [
+  'reservists:W', 'reservists:N', 'reservists:S', 'reservists:E',
+  'palace:W', 'palace:N', 'palace:S', 'palace:E',
+  'somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE',
+  'council:custodes', 'council:pax', 'council:malcador',
+  'council:true-terminal', 'council:administratum',
+  'mechanicus:fabricator-general', 'mechanicus:orchestrator',
+] as const;
+
 function setup() {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
@@ -44,15 +53,11 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(tmux.estateShape()).toEqual({
     sessions: ['main'],
     windows: {
+      reservists: ['reservists:W', 'reservists:N', 'reservists:S', 'reservists:E'],
       palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
       somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
-      'council:custodes': ['council:custodes'],
-      'council:pax': ['council:pax'],
-      'council:malcador': ['council:malcador'],
-      'council:true-terminal': ['council:true-terminal'],
-      'council:administratum': ['council:administratum'],
-      'mechanicus:fabricator-general': ['mechanicus:fabricator-general'],
-      'mechanicus:orchestrator': ['mechanicus:orchestrator'],
+      council: ['council:custodes', 'council:pax', 'council:malcador', 'council:true-terminal', 'council:administratum'],
+      mechanicus: ['mechanicus:fabricator-general', 'mechanicus:orchestrator'],
     },
   });
 
@@ -61,6 +66,10 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(board).toHaveLength(TXD_ESTATE.length);
   expect(board.map((r) => r.seat_id).sort()).toEqual([...TXD_ESTATE].sort());
   expect(board.every((r) => r.binding === 'unbound')).toBe(true);
+});
+
+test('canonical seat ids remain stable across the window reshape', () => {
+  expect(TXD_ESTATE).toEqual(STABLE_SEAT_IDS);
 });
 
 test('idempotent re-run — second pass creates nothing, appends no events', async () => {
@@ -92,6 +101,16 @@ test('refuses a non-canonical existing estate without mutation or events', async
   await expect(d.constructEstate()).rejects.toThrow('non-canonical existing tmux estate');
   expect(await store.count()).toBe(0);
   expect(tmux.estateShape()).toEqual({ sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } });
+});
+
+test('refuses the legacy decomposed estate without mutation or events', async () => {
+  const { store, tmux, d } = setup();
+  tmux.seedLegacyEstate();
+
+  await expect(d.constructEstate()).rejects.toThrow('non-canonical existing tmux estate');
+  expect(await store.count()).toBe(0);
+  expect(tmux.estateShape().windows).toHaveProperty('council:custodes');
+  expect(tmux.estateShape().windows).not.toHaveProperty('reservists');
 });
 
 test('keeps attested seats and backfills missing facts for an existing canonical estate', async () => {
