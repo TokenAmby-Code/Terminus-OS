@@ -36,9 +36,9 @@ test('no tmux id appears in any /agents/*, /ingress/hooks/stop, /tmux/read, or /
   try {
     const post = (p: string, body: unknown) => fetch(`http://127.0.0.1:${srv.port}${p}`, { method: 'POST', body: JSON.stringify(body) });
     const bodies: unknown[] = [];
-    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 2, identity: 'i1', persona: 'p', tint: '#1' })).json());
-    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 2 })).json());
-    bodies.push(await (await post('/ingress/hooks/stop', { instance_id: 'i1', schema_version: 2 })).json());
+    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' })).json());
+    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 3 })).json());
+    bodies.push(await (await post('/ingress/hooks/stop', { instance_id: 'i1', schema_version: 3 })).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`)).json());
     bodies.push(await (await post('/ctl/reconcile', {})).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/ctl/health`)).json());
@@ -51,8 +51,8 @@ test('no tmux id appears in any /agents/*, /ingress/hooks/stop, /tmux/read, or /
 test('no tmux id lands in any persisted event payload', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
-  await d.launch({ seat_id: 'palace:W', schema_version: 2, identity: 'i1', persona: 'p', tint: '#1' });
-  await d.send({ target: 'palace:W', text: 'hi', schema_version: 2 });
+  await d.launch({ seat_id: 'palace:W', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.send({ target: 'palace:W', text: 'hi', schema_version: 3 });
   await d.reconcile();
   for (const e of await store.readAll()) {
     expect(findTmuxIdDeep(e.payload)).toBeNull();

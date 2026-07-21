@@ -27,7 +27,9 @@ import { z } from 'zod';
 // subscription that composes `final message → auto-close`). Old v1 events replay
 // unchanged; the seed set grew by one WITH this bump, per spec §3 ("no additions
 // without a schema_version bump").
-export const SCHEMA_VERSION = 2;
+// v3: additive — adds `act.send_submit_observed`; each literal insert, Enter,
+// retry, and pane-readback result is durable evidence for the send verdict.
+export const SCHEMA_VERSION = 3;
 
 // ── Entities ────────────────────────────────────────────────────────────────
 // The four entity kinds the daemon tracks. `send` is a first-class entity: a
@@ -70,13 +72,13 @@ export const ACT_EVENT_NAMES = [
   'stop_reported',
   'send_enqueued',
   'send_gated',
+  'send_submit_observed',
   'send_delivered',
   'receipt_deduped',
 ] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
-// the type stays a narrow literal union and stays greppable. 11 reg + 6 act = 17
-// (v2: +reg.stop_subscribed).
+// the type stays a narrow literal union and stays greppable. 11 reg + 7 act = 18.
 export const EVENT_TYPES = [
   'reg.dispatch_requested',
   'reg.pane_created',
@@ -93,6 +95,7 @@ export const EVENT_TYPES = [
   'act.stop_reported',
   'act.send_enqueued',
   'act.send_gated',
+  'act.send_submit_observed',
   'act.send_delivered',
   'act.receipt_deduped',
 ] as const;
