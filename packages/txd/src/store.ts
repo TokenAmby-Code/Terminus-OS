@@ -32,6 +32,8 @@ export interface EventStore {
   append(input: EventInput): Promise<EventRecord>;
   /** Append many events in one transaction (single-writer batch). */
   appendAll(inputs: EventInput[]): Promise<EventRecord[]>;
+  /** Atomically append a prefix, then events derived from its persisted records. */
+  appendDerived(inputs: EventInput[], derive: (written: EventRecord[]) => EventInput[]): Promise<EventRecord[]>;
   /** Full stream in seq order — the replay source. */
   readAll(): Promise<EventRecord[]>;
   readByEntity(entityId: string): Promise<EventRecord[]>;
@@ -109,6 +111,18 @@ export class PostgresEventStore implements EventStore {
     }) as Promise<EventRecord[]>;
   }
 
+  appendDerived(inputs: EventInput[], derive: (written: EventRecord[]) => EventInput[]): Promise<EventRecord[]> {
+    for (const input of inputs) assertNoTmuxId(input, 'event_input');
+    return this.sql.begin(async (tx) => {
+      const prefix: EventRecord[] = [];
+      for (const input of inputs) prefix.push(await this.insert(tx, input));
+      const suffixInputs = derive(prefix);
+      const suffix: EventRecord[] = [];
+      for (const input of suffixInputs) suffix.push(await this.insert(tx, input));
+      return [...prefix, ...suffix];
+    }) as Promise<EventRecord[]>;
+  }
+
   async readAll(): Promise<EventRecord[]> {
     const rows = (await this.sql`
       SELECT seq, entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at
@@ -154,6 +168,23 @@ export class MemoryEventStore implements EventStore {
     for (const input of inputs) assertNoTmuxId(input, 'event_input');
     const parsed = inputs.map((i) => EventInputSchema.parse(i));
     return parsed.map((p) => this.commit(p));
+  }
+
+  async appendDerived(inputs: EventInput[], derive: (written: EventRecord[]) => EventInput[]): Promise<EventRecord[]> {
+    for (const input of inputs) assertNoTmuxId(input, 'event_input');
+    const parsedPrefix = inputs.map((input) => EventInputSchema.parse(input));
+    const base = this.events.length;
+    const prefix = parsedPrefix.map((input, index): EventRecord => ({
+      ...input, seq: base + index + 1, recorded_at: this.now(),
+    }));
+    const suffixInputs = derive(prefix);
+    for (const input of suffixInputs) assertNoTmuxId(input, 'event_input');
+    const parsedSuffix = suffixInputs.map((input) => EventInputSchema.parse(input));
+    const suffix = parsedSuffix.map((input, index): EventRecord => ({
+      ...input, seq: base + prefix.length + index + 1, recorded_at: this.now(),
+    }));
+    this.events.push(...prefix, ...suffix);
+    return [...prefix, ...suffix];
   }
 
   async readAll(): Promise<EventRecord[]> {

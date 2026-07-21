@@ -15,7 +15,7 @@
 //   act.send_delivered (send)     payload.target → queue_depth -1   (gated is a no-op: still enqueued)
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
-import { PANE_STATES } from '@terminus-os/contracts';
+import { CommanderType, OriginType, PANE_STATES } from '@terminus-os/contracts';
 import type {
   ActivityBoardRow,
   ActivityState,
@@ -45,6 +45,16 @@ export type Projections = {
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function commanderType(v: unknown): ReturnType<typeof CommanderType.parse> | null {
+  const parsed = CommanderType.safeParse(v);
+  return parsed.success ? parsed.data : null;
+}
+
+function originType(v: unknown): ReturnType<typeof OriginType.parse> | null {
+  const parsed = OriginType.safeParse(v);
+  return parsed.success ? parsed.data : null;
 }
 
 // Only accept a declared PaneState; an unexpected/typo'd payload string must not
@@ -94,21 +104,21 @@ export function buildProjections(events: EventRecord[]): Projections {
           rank: str(e.payload.rank),
           commander: str(e.payload.commander),
           engine: str(e.payload.engine),
-          commander_type: str(e.payload.commander_type),
+          commander_type: commanderType(e.payload.commander_type),
           commander_id: str(e.payload.commander_id),
           singleton_authority: typeof e.payload.singleton_authority === 'boolean' ? e.payload.singleton_authority : null,
           dispatch_authority: str(e.payload.dispatch_authority),
           session_doc_id: typeof e.payload.session_doc_id === 'number' ? e.payload.session_doc_id : null,
           device_id: str(e.payload.device_id),
           working_dir: str(e.payload.working_dir),
-          origin_type: str(e.payload.origin_type),
+          origin_type: originType(e.payload.origin_type),
           execution_placement: str(e.payload.execution_placement),
           tint: str(e.payload.tint),
           registration: 'registered',
           readiness: 'unready',
           routing: 'inactive',
-          placement: str(e.payload.device_id) && str(e.payload.working_dir) && str(e.payload.origin_type) && str(e.payload.execution_placement) ? {
-            device_id: str(e.payload.device_id)!, working_dir: str(e.payload.working_dir)!, origin_type: str(e.payload.origin_type)!, execution_placement: str(e.payload.execution_placement)!,
+          placement: str(e.payload.device_id) && str(e.payload.working_dir) && originType(e.payload.origin_type) && str(e.payload.execution_placement) ? {
+            device_id: str(e.payload.device_id)!, working_dir: str(e.payload.working_dir)!, origin_type: originType(e.payload.origin_type)!, execution_placement: str(e.payload.execution_placement)!,
           } : null,
           route_closed_reason: 'readiness_not_attested',
           binding_generation: e.seq,

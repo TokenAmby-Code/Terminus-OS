@@ -67,6 +67,14 @@ describe('MemoryEventStore', () => {
     await store.close();
   });
 
+  test('appendDerived commits neither prefix nor derived events when derivation is invalid', async () => {
+    const store = new MemoryEventStore();
+    await expect(store.appendDerived([ev()], () => [
+      { ...ev(), event_type: 'invalid.derived' } as unknown as EventInput,
+    ])).rejects.toThrow();
+    expect(await store.count()).toBe(0);
+  });
+
   test('persistence membrane rejects raw tmux ids in entities, payload keys and values, and provenance', async () => {
     const store = new MemoryEventStore();
     const attacks = [
@@ -175,6 +183,14 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     const ok = await store.appendAll([ev({ entity_id: 'batch:1' }), ev({ entity_id: 'batch:2' })]);
     expect(ok.map((r) => r.entity_id)).toEqual(['batch:1', 'batch:2']);
     expect(await store.count()).toBe(before + 2);
+  });
+
+  test('appendDerived rolls back the persisted prefix when a derived write fails', async () => {
+    const before = await store.count();
+    await expect(store.appendDerived([ev({ entity_id: 'derived-prefix' })], () => [
+      { ...ev(), event_type: 'invalid.derived' } as unknown as EventInput,
+    ])).rejects.toThrow();
+    expect(await store.count()).toBe(before);
   });
 
   test('reconnect is idempotent — migrations no-op, the stream persists', async () => {

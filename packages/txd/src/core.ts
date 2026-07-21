@@ -7,7 +7,6 @@
 
 import {
   SCHEMA_VERSION,
-  SEND_PRESENCE_ACTIVITY_WINDOW_MS,
   type ActivityBoardRow,
   type CloseRequest,
   type CloseResponse,
@@ -63,14 +62,6 @@ const noExternalLaunchChain: LaunchChain = {
 };
 
 type Now = () => string;
-type ScheduledCallback = () => void | Promise<void>;
-type Schedule = (callback: ScheduledCallback, delayMs: number) => void;
-
-const scheduleGuardRelease: Schedule = (callback, delayMs) => {
-  const timer = setTimeout(() => void callback(), delayMs);
-  timer.unref?.();
-};
-
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
 
@@ -78,8 +69,6 @@ export class Daemon {
     private store: EventStore,
     private tmux: TmuxControlPlane,
     private now: Now = () => new Date().toISOString(),
-    private schedule: Schedule = scheduleGuardRelease,
-    private nowMs: () => number = Date.now,
     private launchChain: LaunchChain = noExternalLaunchChain,
   ) {}
 
@@ -202,25 +191,34 @@ export class Daemon {
       try {
         await this.launchChain.startWrapper(req); wrapperStarted = true;
         await this.launchChain.startEngineSession(req); sessionStarted = true;
+      } catch (error) {
+        if (sessionStarted) await this.launchChain.stopEngineSession(req).catch(() => undefined);
+        if (wrapperStarted) await this.launchChain.stopWrapper(req).catch(() => undefined);
+        return { ok: false, seat_id: req.seat_id, handover: false, missing_attestations: [], reason: `launch_chain_failed: ${String(error)}`, binding_generation: null };
+      }
+
+      try {
         const common = { ...req } as Record<string, unknown>;
         delete common.schema_version; delete common.seat_id;
-        const written = await this.store.appendAll([
+        const written = await this.store.appendDerived([
           { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.dispatch_requested', payload: { seat_id: req.seat_id, dispatch_authority: req.dispatch_authority }, provenance: prov, occurred_at },
           { entity_type: 'seat', entity_id: req.seat_id, event_type: 'reg.pane_observed', payload: { pane_state: 'live' }, provenance: this.prov('observer', transportReceipt), occurred_at },
           { entity_type: 'wrapper', entity_id: req.wrapper_id, event_type: 'reg.wrapper_started', payload: { instance_id: req.instance_id }, provenance: prov, occurred_at },
           { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.session_started', payload: { wrapper_id: req.wrapper_id, engine: req.engine }, provenance: prov, occurred_at },
           { entity_type: 'seat', entity_id: req.seat_id, event_type: 'reg.bound', payload: common, provenance: prov, occurred_at },
-        ]);
-        const generation = written.at(-1)!.seq;
-        await this.store.appendAll([
-          { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.readiness_attested', payload: { binding_generation: generation, execution_placement: req.execution_placement }, provenance: prov, occurred_at },
-          { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.route_activated', payload: { binding_generation: generation }, provenance: prov, occurred_at },
-        ]);
+        ], (prefix) => {
+          const generation = prefix.at(-1)!.seq;
+          return [
+            { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.readiness_attested', payload: { binding_generation: generation, execution_placement: req.execution_placement }, provenance: prov, occurred_at },
+            { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.route_activated', payload: { binding_generation: generation }, provenance: prov, occurred_at },
+          ];
+        });
+        const generation = written.find((event) => event.event_type === 'reg.bound')!.seq;
         return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null, binding_generation: generation };
       } catch (error) {
         if (sessionStarted) await this.launchChain.stopEngineSession(req).catch(() => undefined);
         if (wrapperStarted) await this.launchChain.stopWrapper(req).catch(() => undefined);
-        return { ok: false, seat_id: req.seat_id, handover: false, missing_attestations: [], reason: `launch_chain_failed: ${String(error)}`, binding_generation: null };
+        return { ok: false, seat_id: req.seat_id, handover: false, missing_attestations: [], reason: `registration_persistence_failed: ${String(error)}`, binding_generation: null };
       }
     });
   }
@@ -293,9 +291,9 @@ export class Daemon {
       const proj = await this.projections();
       const resolution = this.resolveTarget(req.target, proj);
       if (!resolution) return this.refuse('pane_unresolved', req.target);
-      // Pane must be live at admission (unresolved/dead never admitted).
+      // Pane must be live at admission (dead and physically absent never enter the queue).
       const board = proj.activityBoard.find((r) => r.seat_id === resolution.seat_id);
-      if (board && board.pane === 'dead') return this.refuse('pane_dead', req.target);
+      if (board && (board.pane === 'dead' || board.pane === 'absent')) return this.refuse('pane_dead', req.target);
       if (!board || board.registration !== 'registered') return this.refuse('unregistered', req.target);
       if (board.activity === 'stopped') return this.refuse('instance_stopped', req.target);
       if (board.activity === 'retired') return this.refuse('instance_retired', req.target);
@@ -319,69 +317,7 @@ export class Daemon {
         occurred_at,
       });
 
-      // Typed-cause gate. Presence is a point-in-time READ of server-maintained
-      // client_activity — no shadow state, no keystroke hook. Emitting the gate
-      // records the DECISION (carrying its window evidence); raw presence never
-      // enters the stream. A gated send STAYS enqueued for a later drain.
-      const gate = async (): Promise<SendReceipt> => {
-        await this.store.append({
-          entity_type: 'send',
-          entity_id: sendId,
-          event_type: 'act.send_gated',
-          payload: {
-            target: resolution.seat_id,
-            reason: 'typing_guard',
-            activity_window_ms: SEND_PRESENCE_ACTIVITY_WINDOW_MS,
-            resolved_seq: resolution.bound_seq,
-          },
-          provenance: this.prov('observer', transportReceipt),
-          occurred_at: this.now(),
-        });
-        this.schedule(
-          () => this.releaseGuardedSend(sendId, resolution, req.text, transportReceipt),
-          SEND_PRESENCE_ACTIVITY_WINDOW_MS,
-        );
-        return this.receipt('enqueued_gated', resolution, sendId, 'typing_guard', SEND_PRESENCE_ACTIVITY_WINDOW_MS, null);
-      };
-
-      // A current binding is the ledger's positive proof that this pane is an
-      // agent seat. Agent output is never operator composition territory, so
-      // daemon-to-agent delivery bypasses the client-activity guard entirely.
-      if (resolution.bound_seq > 0) {
-        return this.deliverSend(sendId, resolution, req.text, transportReceipt, 'agent_seat_exempt');
-      }
-
-      // Presence read at ADMISSION (the enqueue-time snapshot, spec §5 rung 4):
-      // operator active ⇒ defer this pass (gate now, deliver on a later drain).
-      const presentAtAdmission = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
-      if (presentAtAdmission.has(resolution.seat_id)) return gate();
-
-      // Presence read at DRAIN (the delivery instant): re-read fresh — the
-      // operator may have become active between admission and drain.
-      const presentAtDrain = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
-      if (presentAtDrain.has(resolution.seat_id)) return gate();
-
-      // Operator idle at BOTH decision points → deliver (canonical in, %id internal).
-      return this.deliverSend(sendId, resolution, req.text, transportReceipt, 'operator_idle');
-    });
-  }
-
-  private releaseGuardedSend(
-    sendId: string,
-    resolution: SendResolution,
-    text: string,
-    transportReceipt: string | null,
-  ): Promise<void> {
-    return this.locked(async () => {
-      const present = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
-      if (present.has(resolution.seat_id)) {
-        this.schedule(
-          () => this.releaseGuardedSend(sendId, resolution, text, transportReceipt),
-          SEND_PRESENCE_ACTIVITY_WINDOW_MS,
-        );
-        return;
-      }
-      await this.deliverSend(sendId, resolution, text, transportReceipt, 'typing_guard_expired');
+      return this.deliverSend(sendId, resolution, req.text, transportReceipt);
     });
   }
 
@@ -390,7 +326,6 @@ export class Daemon {
     resolution: SendResolution,
     text: string,
     transportReceipt: string | null,
-    releaseReason: 'agent_seat_exempt' | 'operator_idle' | 'typing_guard_expired',
   ): Promise<SendReceipt> {
     // Frozen-generation guard remains the final check immediately before the
     // side effect. Readiness is necessary, never a substitute for this guard.
@@ -421,7 +356,7 @@ export class Daemon {
           target: resolution.seat_id,
           bytes: result.bytes,
           resolved_seq: resolution.bound_seq,
-          release_reason: releaseReason,
+          release_reason: 'registered_route',
         },
         provenance: this.prov('observer', transportReceipt),
         occurred_at: this.now(),

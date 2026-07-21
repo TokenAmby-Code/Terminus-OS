@@ -31,6 +31,12 @@ const FIXED_RANKS = ["astartes", "overseer", "primarch", "retired"] as const;
 
 export const OriginType = z.enum(ORIGIN_TYPES);
 export const CommanderType = z.enum(COMMANDER_TYPES);
+export const commanderIdConsistent = (row: { commander_type: z.infer<typeof CommanderType>; commander_id: string | null }) =>
+  row.commander_type === "emperor" ? row.commander_id === null : row.commander_id !== null;
+export const commanderIdConsistencyIssue = {
+  message: "commander_id must be null iff commander_type is 'emperor'",
+  path: ["commander_id"],
+};
 export const InstanceStatus = z.enum(INSTANCE_STATUSES);
 export const NotificationMode = z.enum(NOTIFICATION_MODES);
 export const InteractionMode = z.enum(INTERACTION_MODES);
@@ -69,7 +75,7 @@ export const InstanceRegistrationRow = z
   })
   // db_schema.py cross-column CHECK: commander_id IS NULL iff commander_type = 'emperor'.
   .refine(
-    (r) => (r.commander_type === "emperor" ? r.commander_id === null : r.commander_id !== null),
-    { message: "commander_id must be null iff commander_type is 'emperor'", path: ["commander_id"] },
+    commanderIdConsistent,
+    commanderIdConsistencyIssue,
   );
 export type InstanceRegistrationRowT = z.infer<typeof InstanceRegistrationRow>;

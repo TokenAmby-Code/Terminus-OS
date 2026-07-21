@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { LaunchRequestSchema } from '@terminus-os/contracts';
+import { LaunchRequestSchema, type EventInput, type EventRecord } from '@terminus-os/contracts';
 import { Daemon, type LaunchChain } from '../src/core.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
@@ -43,8 +43,36 @@ test('launch chain failure compensates in reverse and never activates a route', 
     async stopEngineSession() { calls.push('session:stop'); },
     async stopWrapper() { calls.push('wrapper:stop'); },
   };
-  const store = new MemoryEventStore(); const d = new Daemon(store, new FakeTmux(), undefined, undefined, undefined, chain);
+  const store = new MemoryEventStore(); const d = new Daemon(store, new FakeTmux(), undefined, chain);
   expect((await d.launch(registration('palace:W'))).ok).toBe(false);
   expect(calls).toEqual(['wrapper:start', 'session:start', 'wrapper:stop']);
   expect((await store.readAll()).some((e) => e.event_type === 'reg.route_activated')).toBe(false);
+});
+
+class DerivedFailureStore extends MemoryEventStore {
+  override appendDerived(inputs: EventInput[], derive: (written: EventRecord[]) => EventInput[]): Promise<EventRecord[]> {
+    return super.appendDerived(inputs, (written) => [
+      ...derive(written),
+      { ...inputs[0]!, event_type: 'invalid.derived' } as unknown as EventInput,
+    ]);
+  }
+}
+
+test('registration persistence failure is distinct, compensates, and leaves no generation events', async () => {
+  const calls: string[] = [];
+  const chain: LaunchChain = {
+    async startWrapper() { calls.push('wrapper:start'); },
+    async startEngineSession() { calls.push('session:start'); },
+    async stopEngineSession() { calls.push('session:stop'); },
+    async stopWrapper() { calls.push('wrapper:stop'); },
+  };
+  const store = new DerivedFailureStore();
+  const d = new Daemon(store, new FakeTmux(), undefined, chain);
+  const result = await d.launch(registration('palace:W'));
+  expect(result.reason).toContain('registration_persistence_failed');
+  expect(calls).toEqual(['wrapper:start', 'session:start', 'session:stop', 'wrapper:stop']);
+  const generationTypes = (await store.readAll()).map((event) => event.event_type).filter((type) =>
+    ['reg.dispatch_requested', 'reg.pane_observed', 'reg.wrapper_started', 'reg.session_started', 'reg.bound',
+      'reg.readiness_attested', 'reg.route_activated'].includes(type));
+  expect(generationTypes).toEqual([]);
 });

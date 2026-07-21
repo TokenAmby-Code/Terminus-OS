@@ -19,7 +19,8 @@ contracts source, and the public route shape.
 - **Send chokepoint.** Delivery is closed unless the current binding generation
   has a complete registration, attested placement and readiness, and an active
   route. Every drain repeats the frozen-generation check immediately before
-  tmux delivery.
+  tmux delivery. Bare/operator-seat sends are not routable in schema v5;
+  historical `act.send_gated` events remain replayable stream vocabulary only.
 - **Reconcile = replay + observation.** Physical absence is an explicit pane
   state. Projection/tmux disagreements surface as p0 contradiction facts and
   close only through sequence-and-kind keyed resolution events.

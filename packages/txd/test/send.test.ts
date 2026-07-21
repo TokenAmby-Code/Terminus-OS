@@ -39,9 +39,8 @@ test('unresolved target REFUSED at admission — never gated, never enqueued', a
 });
 
 test('unregistered operator pane is refused before typing guard', async () => {
-  const { tmux, d } = setup();
+  const { d } = setup();
   await bareSeat(d, 'somnium:NE');
-  tmux.setPresence('somnium:NE', Date.now()); // active within the window
   const res = await d.send({ target: 'somnium:NE', text: 'hello', schema_version: 5 });
   expect(res).toMatchObject({ refused: true, reason: 'unregistered' });
 });
@@ -75,6 +74,26 @@ class PartialTmux extends FakeTmux {
     };
   }
 }
+
+class CountingTmux extends FakeTmux {
+  sends = 0;
+  override async sendToSeat(seatId: string, text: string) {
+    this.sends += 1;
+    return super.sendToSeat(seatId, text);
+  }
+}
+
+test('absent bound pane is refused as pane_dead before enqueue or tmux delivery', async () => {
+  const store = new MemoryEventStore(); const tmux = new CountingTmux(); const d = new Daemon(store, tmux);
+  await boundSeat(d, 'palace:W', 'absent-instance');
+  tmux.removeOutOfBand('palace:W');
+  await d.reconcile();
+  const beforeSendEvents = (await store.readAll()).filter((event) => event.entity_type === 'send').length;
+  const result = await d.send({ target: 'palace:W', text: 'hello', schema_version: 5 });
+  expect(result).toMatchObject({ refused: true, reason: 'pane_dead' });
+  expect((await store.readAll()).filter((event) => event.entity_type === 'send')).toHaveLength(beforeSendEvents);
+  expect(tmux.sends).toBe(0);
+});
 
 test('partial delivery (inserted, not submitted) → partial_delivered carries bytes, stays enqueued', async () => {
   const store = new MemoryEventStore();

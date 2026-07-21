@@ -47,12 +47,6 @@ export interface TmuxControlPlane {
    * (caller must NOT attest process_reaped/seat_cleared on a failed reap).
    */
   reapSeat(seatId: string): Promise<boolean>;
-  /**
-   * Canonical ids of seats an attached client is actively on within windowMs —
-   * a point-in-time READ of the server-maintained client_activity + active
-   * pane. No shadow state, no keystroke hook.
-   */
-  presentSeats(windowMs: number, nowMs?: number): Promise<Set<string>>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
 }
@@ -328,33 +322,6 @@ export class RealTmux implements TmuxControlPlane {
     return r.code === 0;
   }
 
-  async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
-    // Active pane (canonical) per session.
-    const panes = await this.command('observe_active_seats', 'estate', [
-      'list-panes',
-      '-a',
-      '-F',
-      `#{session_name}\t#{window_active}\t#{pane_active}\t#{${CANON_OPT}}`,
-    ]);
-    const activeCanonBySession = new Map<string, string>();
-    for (const line of panes.stdout.split('\n')) {
-      const [session, winActive, paneActive, canon] = line.split('\t');
-      if (winActive === '1' && paneActive === '1' && session && canon) activeCanonBySession.set(session, canon);
-    }
-    // Attached clients + last activity (epoch seconds).
-    const clients = await this.command('observe_clients', 'estate', ['list-clients', '-F', '#{client_session}\t#{client_activity}']);
-    const present = new Set<string>();
-    const nowSec = Math.floor(nowMs / 1000);
-    for (const line of clients.stdout.split('\n')) {
-      const [session, activity] = line.split('\t');
-      if (!session) continue;
-      const canon = activeCanonBySession.get(session);
-      const activitySec = Number(activity);
-      if (canon && Number.isFinite(activitySec) && (nowSec - activitySec) * 1000 <= windowMs) present.add(canon);
-    }
-    return present;
-  }
-
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered', trace: [] };
@@ -397,7 +364,6 @@ export class RealTmux implements TmuxControlPlane {
 // In-memory fake for tests — same membrane contract, no tmux dependency.
 export class FakeTmux implements TmuxControlPlane {
   private seats = new Map<string, { pane: 'live' | 'dead' }>();
-  private present = new Map<string, number>(); // seat -> last activity epoch ms
   private failCreate = new Set<string>(); // seats whose createSeat is forced to throw
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
   reachableFlag = true;
@@ -487,15 +453,6 @@ export class FakeTmux implements TmuxControlPlane {
   /** Test control: remove physical pane evidence entirely. */
   removeOutOfBand(seatId: string): void {
     this.seats.delete(seatId);
-  }
-  /** Test control: mark an operator active on a seat as of nowMs. */
-  setPresence(seatId: string, atMs: number): void {
-    this.present.set(seatId, atMs);
-  }
-  async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
-    const out = new Set<string>();
-    for (const [seat, at] of this.present) if (nowMs - at <= windowMs) out.add(seat);
-    return out;
   }
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const s = this.seats.get(seatId);

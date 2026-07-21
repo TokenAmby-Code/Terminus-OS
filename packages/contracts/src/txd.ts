@@ -18,6 +18,7 @@
 // This is a TS-source package: consumers compile it directly, no build step.
 
 import { z } from 'zod';
+import { CommanderType, OriginType, commanderIdConsistent, commanderIdConsistencyIssue } from './registration.ts';
 
 // The daemon pins this exact integer. Additive vocabulary = minor bump (cockpit
 // conforms lazily); breaking changes land daemon+cockpit in ONE PR. Old events
@@ -179,14 +180,6 @@ export const DELIVERY_VERDICTS = [
 export type DeliveryVerdict = (typeof DELIVERY_VERDICTS)[number];
 export const DeliveryVerdictSchema = z.enum(DELIVERY_VERDICTS);
 
-// Operator-presence activity window (spec §5). NAMED constant, echoed in every
-// send_gated payload — no buried magic numbers. This guard applies only to
-// unbound panes where operator composition is possible; a ledger-bound agent
-// seat bypasses it so agent output can never masquerade as operator typing.
-// For an unbound target, `client_activity` is read at each decision point and a
-// hold is released after the named window expires without further activity.
-export const SEND_PRESENCE_ACTIVITY_WINDOW_MS = 10_000;
-
 // ── Provenance (spec §2) — three real emitters, hooks REAL but UNTRUSTED ──────
 export const PROVENANCE_SOURCES = ['hook', 'wrapper', 'observer'] as const;
 export type ProvenanceSource = (typeof PROVENANCE_SOURCES)[number];
@@ -228,14 +221,14 @@ export const CurrentBindingSchema = z.object({
   rank: z.string().nullable(),
   commander: z.string().nullable(),
   engine: z.string().nullable(),
-  commander_type: z.string().nullable(),
+  commander_type: CommanderType.nullable(),
   commander_id: z.string().nullable(),
   singleton_authority: z.boolean().nullable(),
   dispatch_authority: z.string().nullable(),
   session_doc_id: z.number().int().nullable(),
   device_id: z.string().nullable(),
   working_dir: z.string().nullable(),
-  origin_type: z.string().nullable(),
+  origin_type: OriginType.nullable(),
   execution_placement: z.string().nullable(),
   tint: z.string().nullable(),
   registration: RegistrationStateSchema,
@@ -244,7 +237,7 @@ export const CurrentBindingSchema = z.object({
   placement: z.object({
     device_id: z.string(),
     working_dir: z.string(),
-    origin_type: z.string(),
+    origin_type: OriginType,
     execution_placement: z.string(),
   }).nullable(),
   route_closed_reason: z.string().nullable(),
@@ -277,7 +270,7 @@ export const ActivityBoardRowSchema = z.object({
   readiness: ReadinessStateSchema,
   routing: RoutingStateSchema,
   placement: z.object({
-    device_id: z.string(), working_dir: z.string(), origin_type: z.string(), execution_placement: z.string(),
+    device_id: z.string(), working_dir: z.string(), origin_type: OriginType, execution_placement: z.string(),
   }).nullable(),
   route_closed_reason: z.string().nullable(),
   binding_generation: z.number().int().nullable(),
@@ -318,19 +311,19 @@ const REGISTRATION_TUPLE_SHAPE = {
   engine: z.string().min(1),
   persona_id: z.string().min(1),
   rank: z.string().min(1),
-  commander_type: z.enum(['emperor', 'persona', 'chapter']),
+  commander_type: CommanderType,
   commander_id: z.string().min(1).nullable(),
   singleton_authority: z.boolean(),
   dispatch_authority: z.string().min(1),
   session_doc_id: z.number().int().positive(),
   device_id: z.string().min(1),
   working_dir: z.string().min(1),
-  origin_type: z.enum(['local', 'ssh', 'cron', 'dispatch', 'api', 'perpetual']),
+  origin_type: OriginType,
   execution_placement: z.string().min(1),
 } as const;
 export const RegistrationTupleSchema = z.object(REGISTRATION_TUPLE_SHAPE).refine(
-  (r) => (r.commander_type === 'emperor' ? r.commander_id === null : r.commander_id !== null),
-  { message: "commander_id must be null iff commander_type is 'emperor'", path: ['commander_id'] },
+  commanderIdConsistent,
+  commanderIdConsistencyIssue,
 );
 export type RegistrationTuple = z.infer<typeof RegistrationTupleSchema>;
 
@@ -339,8 +332,8 @@ export const LaunchRequestSchema = z.object({
   seat_id: z.string().min(1),
   schema_version: z.number().int(),
 }).refine(
-  (r) => (r.commander_type === 'emperor' ? r.commander_id === null : r.commander_id !== null),
-  { message: "commander_id must be null iff commander_type is 'emperor'", path: ['commander_id'] },
+  commanderIdConsistent,
+  commanderIdConsistencyIssue,
 );
 export type LaunchRequest = z.infer<typeof LaunchRequestSchema>;
 

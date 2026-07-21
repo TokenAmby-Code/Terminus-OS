@@ -4,10 +4,9 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { registration } from './registration-fixture.ts';
 
-test('ready registered agent delivery is not delayed by operator presence', async () => {
+test('ready registered agent delivery uses the active registered route', async () => {
   const store = new MemoryEventStore(); const tmux = new FakeTmux(); const d = new Daemon(store, tmux);
   await d.launch(registration('somnium:NE'));
-  tmux.setPresence('somnium:NE', Date.now());
   const result = await d.send({ schema_version: 5, target: 'somnium:NE', text: 'hello' });
   expect(result).toMatchObject({ verdict: 'delivered', gate_reason: null });
 });
