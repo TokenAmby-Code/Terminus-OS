@@ -38,7 +38,7 @@ import {
   type HookType,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
-import { assertNoTmuxId } from './ids.ts';
+import { assertNoTmuxId, findTmuxIdDeep, sanitizeTmuxIds } from './ids.ts';
 
 export type BuildInfo = { version: string; git_sha: string; bun: string };
 
@@ -77,6 +77,33 @@ function receipt(req: Request): string | null {
   return req.headers.get('x-edge-proxy');
 }
 
+function issuePath(path: PropertyKey[]): string {
+  return path.reduce<string>((out, part) => typeof part === 'number' ? `${out}[${part}]` : `${out}.${String(part)}`, '$');
+}
+
+type MutationSchema<T> = {
+  safeParse(input: unknown):
+    | { success: true; data: T }
+    | { success: false; error: { issues: Array<{ path: PropertyKey[] }> } };
+};
+
+async function parseMutation<T>(req: Request, schema: MutationSchema<T>, error: string): Promise<T | Response> {
+  const body = await readJson(req);
+  const rawIdPath = findTmuxIdDeep(body);
+  if (rawIdPath) return json({ ok: false, error, field: rawIdPath }, 422);
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    return json({ ok: false, error, field: issuePath(parsed.error.issues[0]?.path ?? []) }, 422);
+  }
+  return parsed.data;
+}
+
+async function rejectRawMutation(req: Request, error: string): Promise<Response | null> {
+  const body = await readJson(req);
+  const rawIdPath = findTmuxIdDeep(body);
+  return rawIdPath ? json({ ok: false, error, field: rawIdPath }, 422) : null;
+}
+
 // Ordered route table — the ordering is data so committed route tests can
 // assert it. The consumed hook door is registered before the 410 tail.
 export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): Route[] {
@@ -96,6 +123,8 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/ctl/reconcile'),
       label: 'POST /ctl/reconcile',
       handler: async (req) => {
+        const rejected = await rejectRawMutation(req, 'invalid_reconcile_request');
+        if (rejected) return rejected;
         const res = await daemon.reconcile(receipt(req));
         // Bring-up mode: p0 contradiction ⇒ fail loud with a non-2xx.
         return json(res, res.p0 ? 409 : 200);
@@ -107,9 +136,9 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/agents/launch'),
       label: 'POST /agents/launch',
       handler: async (req) => {
-        const parsed = LaunchRequestSchema.safeParse(await readJson(req));
-        if (!parsed.success) return json({ ok: false, error: 'invalid_launch_request', detail: parsed.error.issues }, 422);
-        const res = await daemon.launch(parsed.data, receipt(req));
+        const parsed = await parseMutation(req, LaunchRequestSchema, 'invalid_launch_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.launch(parsed, receipt(req));
         return json(res, res.handover ? 200 : 409);
       },
     },
@@ -118,9 +147,9 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/agents/send'),
       label: 'POST /agents/send',
       handler: async (req) => {
-        const parsed = SendRequestSchema.safeParse(await readJson(req));
-        if (!parsed.success) return json({ ok: false, error: 'invalid_send_request', detail: parsed.error.issues }, 422);
-        const res = await daemon.send(parsed.data, receipt(req));
+        const parsed = await parseMutation(req, SendRequestSchema, 'invalid_send_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.send(parsed, receipt(req));
         // Admission refusal fails loud (not admitted); gated/delivered are 200.
         if ('refused' in res) return json(res, 422);
         return json(res, 200);
@@ -131,9 +160,9 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/agents/close'),
       label: 'POST /agents/close',
       handler: async (req) => {
-        const parsed = CloseRequestSchema.safeParse(await readJson(req));
-        if (!parsed.success) return json({ ok: false, error: 'invalid_close_request', detail: parsed.error.issues }, 422);
-        const res = await daemon.close(parsed.data, receipt(req));
+        const parsed = await parseMutation(req, CloseRequestSchema, 'invalid_close_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.close(parsed, receipt(req));
         // A refused/failed close (no binding, reap failed, schema mismatch) is loud:
         // non-2xx so a caller can never read a no-op as success.
         return json(res, res.closed ? 200 : 409);
@@ -144,9 +173,9 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/agents/subscribe'),
       label: 'POST /agents/subscribe',
       handler: async (req) => {
-        const parsed = SubscribeRequestSchema.safeParse(await readJson(req));
-        if (!parsed.success) return json({ ok: false, error: 'invalid_subscribe_request', detail: parsed.error.issues }, 422);
-        const res = await daemon.subscribe(parsed.data, receipt(req));
+        const parsed = await parseMutation(req, SubscribeRequestSchema, 'invalid_subscribe_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.subscribe(parsed, receipt(req));
         // A refused subscribe (not bound / schema mismatch) is loud: non-2xx.
         return json(res, res.subscribed ? 200 : 409);
       },
@@ -157,9 +186,9 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/ingress/hooks/stop'),
       label: 'POST /ingress/hooks/stop',
       handler: async (req) => {
-        const parsed = StopRequestSchema.safeParse(await readJson(req));
-        if (!parsed.success) return json({ ok: false, error: 'invalid_stop_request', detail: parsed.error.issues }, 422);
-        const res = await daemon.stop(parsed.data, receipt(req));
+        const parsed = await parseMutation(req, StopRequestSchema, 'invalid_stop_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.stop(parsed, receipt(req));
         // Ghost/schema refusal fails loud (nothing recorded); recorded/deduped are 200.
         if ('refused' in res) return json(res, 422);
         return json(res, 200);
@@ -186,7 +215,9 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       method: 'POST',
       match: exact(`/ingress/hooks/${hook}`),
       label: `POST /ingress/hooks/${hook}`,
-      handler: async () => {
+      handler: async (req) => {
+        const rejected = await rejectRawMutation(req, `invalid_${hook}_request`);
+        if (rejected) return rejected;
         const body: HookNotConsumed = { ok: false, error: 'hook_not_consumed', hook_type: hook };
         return json(body, 410);
       },
@@ -210,7 +241,7 @@ export function makeServer(opts: { bind: string; port: number; daemon: Daemon; b
         try {
           return await route.handler(req, params);
         } catch (err) {
-          console.error(JSON.stringify({ level: 'error', event: 'handler_error', route: route.label, error: String(err) }));
+          console.error(JSON.stringify({ level: 'error', event: 'handler_error', route: route.label, error: sanitizeTmuxIds(String(err)) }));
           // Generic body: the full error stays in the server log only. Serializing
           // String(err) could echo a raw %id back through the membrane (assertNoTmuxId).
           return json({ ok: false, error: 'internal_error' }, 500);
