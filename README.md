@@ -1,12 +1,10 @@
 # Terminus-OS
 
-The typed-contracts lifecycle-manager that begins the supplanting of the Token-OS Python
-monolith. Contracts are authored here as TypeScript + [Zod](https://zod.dev) types; Token-OS
-validates against them at its boundary. New surfaces are built nexus-side. No Python is ported.
+The typed-contracts lifecycle manager for Terminus services. Contracts are
+authored here as TypeScript + [Zod](https://zod.dev) types and consumed over
+language-neutral service boundaries.
 
-> Naming: this repo is **Terminus-OS**. Its packages are namespaced **`@terminus-os/*`** — never
-> `@token-os/*`. The deprecated Python monolith keeps its name; nothing new here carries a
-> relative name to it.
+> Naming: this repo is **Terminus-OS**. Its packages are namespaced **`@terminus-os/*`**.
 
 ## Layout
 

@@ -11,8 +11,7 @@ import {
   eventDomain,
 } from "../src/txd.ts";
 
-// txd lifecycle vocabulary — re-homed from the corpse token-api contracts by
-// the txd extraction. The vocabulary is CLOSED: these pins are the drift alarm.
+// The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
   test("schema_version pins at 4 (v4 = frozen-send cancellation)", () => {

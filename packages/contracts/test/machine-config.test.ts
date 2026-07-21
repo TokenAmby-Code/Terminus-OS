@@ -10,7 +10,7 @@ afterEach(() => { while (dirs.length) rmSync(dirs.pop()!, { recursive: true }); 
 function fixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "terminus-machine-registry-")); dirs.push(dir);
   const path = join(dir, "registry.json");
-  writeFileSync(path, JSON.stringify({ schemaVersion: 1, serviceAuthorities: { "token-api": "hub" }, machines: { hub: { role: "authority", hostnames: ["Hub"], domain: "personal", tailscaleIp: "100.64.0.1", ssh: { alias: "hub", user: "token" }, runtimeRoots: {}, vaultRoots: {} } }, sshTargets: ["hub"], services: { "token-api": { port: 7777, scheme: "http" } } }));
+  writeFileSync(path, JSON.stringify({ schemaVersion: 1, serviceAuthorities: { "terminus-api": "hub" }, machines: { hub: { role: "authority", hostnames: ["Hub"], domain: "personal", tailscaleIp: "100.64.0.1", ssh: { alias: "hub", user: "token" }, runtimeRoots: {}, vaultRoots: {} } }, sshTargets: ["hub"], services: { "terminus-api": { port: 7777, scheme: "http" } } }));
   return path;
 }
 
