@@ -15,7 +15,7 @@
 //   act.send_delivered/cancelled (send) payload.target → queue_depth -1
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
-import { PANE_STATES } from '@terminus-os/contracts';
+import { CommanderType, OriginType, PANE_STATES } from '@terminus-os/contracts';
 import type {
   ActivityBoardRow,
   ActivityState,
@@ -47,6 +47,16 @@ function str(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
 }
 
+function commanderType(v: unknown): ReturnType<typeof CommanderType.parse> | null {
+  const parsed = CommanderType.safeParse(v);
+  return parsed.success ? parsed.data : null;
+}
+
+function originType(v: unknown): ReturnType<typeof OriginType.parse> | null {
+  const parsed = OriginType.safeParse(v);
+  return parsed.success ? parsed.data : null;
+}
+
 // Only accept a declared PaneState; an unexpected/typo'd payload string must not
 // slip through as a bogus state and corrupt the freelist/board reads.
 function paneState(v: unknown): PaneState {
@@ -62,17 +72,17 @@ export function buildProjections(events: EventRecord[]): Projections {
   const subscribeSeqByInstance = new Map<string, number>(); // last reg.stop_subscribed seq
   const lastStopSeqByInstance = new Map<string, number>(); // last act.stop_reported seq
   const queueByTarget = new Map<string, number>();
-  // (entity_type, entity_id) -> highest seq seen, to supersede stale contradiction
-  // flags. Composite so a later event on a different entity type sharing an id can
-  // never suppress the wrong entity's open contradiction.
-  const lastSeqByEntity = new Map<string, number>();
-  const entityKey = (type: string, id: string): string => `${type}\x00${id}`;
   const contradictions: OpenContradiction[] = [];
+  const resolvedContradictions = new Set<string>();
+  const readinessByInstance = new Map<string, number>();
+  const routeByInstance = new Map<string, { state: 'active' | 'suspended' | 'retired'; generation: number; reason: string | null }>();
 
   for (const e of events) {
-    lastSeqByEntity.set(entityKey(e.entity_type, e.entity_id), e.seq);
     switch (e.event_type) {
       case 'reg.pane_created':
+        paneBySeat.set(e.entity_id, paneState(e.payload.pane_state));
+        break;
+      case 'reg.pane_observed':
         paneBySeat.set(e.entity_id, paneState(e.payload.pane_state));
         break;
       case 'reg.teardown_started':
@@ -90,10 +100,28 @@ export function buildProjections(events: EventRecord[]): Projections {
           seat_id: e.entity_id,
           wrapper_id: str(e.payload.wrapper_id),
           instance_id: str(e.payload.instance_id),
-          persona: str(e.payload.persona),
+          persona: str(e.payload.persona_id) ?? str(e.payload.persona),
           rank: str(e.payload.rank),
           commander: str(e.payload.commander),
+          engine: str(e.payload.engine),
+          commander_type: commanderType(e.payload.commander_type),
+          commander_id: str(e.payload.commander_id),
+          singleton_authority: typeof e.payload.singleton_authority === 'boolean' ? e.payload.singleton_authority : null,
+          dispatch_authority: str(e.payload.dispatch_authority),
+          session_doc_id: typeof e.payload.session_doc_id === 'number' ? e.payload.session_doc_id : null,
+          device_id: str(e.payload.device_id),
+          working_dir: str(e.payload.working_dir),
+          origin_type: originType(e.payload.origin_type),
+          execution_placement: str(e.payload.execution_placement),
           tint: str(e.payload.tint),
+          registration: 'registered',
+          readiness: 'unready',
+          routing: 'inactive',
+          placement: str(e.payload.device_id) && str(e.payload.working_dir) && originType(e.payload.origin_type) && str(e.payload.execution_placement) ? {
+            device_id: str(e.payload.device_id)!, working_dir: str(e.payload.working_dir)!, origin_type: originType(e.payload.origin_type)!, execution_placement: str(e.payload.execution_placement)!,
+          } : null,
+          route_closed_reason: 'readiness_not_attested',
+          binding_generation: e.seq,
           bound_seq: e.seq,
         });
         break;
@@ -113,6 +141,22 @@ export function buildProjections(events: EventRecord[]): Projections {
       case 'reg.retired':
         activityByInstance.set(e.entity_id, 'retired');
         break;
+      case 'reg.readiness_attested': {
+        const generation = Number(e.payload.binding_generation);
+        if (Number.isInteger(generation)) readinessByInstance.set(e.entity_id, generation);
+        break;
+      }
+      case 'reg.route_activated':
+      case 'reg.route_suspended':
+      case 'reg.route_retired': {
+        const generation = Number(e.payload.binding_generation);
+        if (Number.isInteger(generation)) routeByInstance.set(e.entity_id, {
+          state: e.event_type === 'reg.route_activated' ? 'active' : e.event_type === 'reg.route_retired' ? 'retired' : 'suspended',
+          generation,
+          reason: str(e.payload.reason),
+        });
+        break;
+      }
       case 'act.send_enqueued': {
         const t = str(e.payload.target);
         if (t) queueByTarget.set(t, (queueByTarget.get(t) ?? 0) + 1);
@@ -135,12 +179,28 @@ export function buildProjections(events: EventRecord[]): Projections {
           occurred_at: e.occurred_at,
         });
         break;
+      case 'reg.contradiction_resolved': {
+        const contradictionSeq = Number(e.payload.contradiction_seq);
+        const kind = str(e.payload.kind);
+        if (Number.isInteger(contradictionSeq) && kind) resolvedContradictions.add(`${contradictionSeq}:${kind}`);
+        break;
+      }
       default:
         break; // launch-chain rungs, sends' gated, dedupe — no projection effect here
     }
   }
 
   const currentBindings = [...bindingBySeat.values()];
+  for (const binding of currentBindings) {
+    if (!binding.instance_id) continue;
+    const readyGeneration = readinessByInstance.get(binding.instance_id);
+    binding.readiness = readyGeneration === binding.bound_seq ? 'ready' : 'unready';
+    const route = routeByInstance.get(binding.instance_id);
+    binding.routing = route?.generation === binding.bound_seq ? route.state : 'inactive';
+    binding.route_closed_reason = binding.routing === 'active' ? null
+      : route?.generation !== undefined && route.generation !== binding.bound_seq ? 'binding_generation_changed'
+      : route?.reason ?? (binding.readiness === 'ready' ? 'route_not_activated' : 'readiness_not_attested');
+  }
 
   const freelist: FreelistEntry[] = [];
   for (const [seat, pane] of paneBySeat) {
@@ -167,14 +227,18 @@ export function buildProjections(events: EventRecord[]): Projections {
       rank: binding?.rank ?? null,
       commander: binding?.commander ?? null,
       tint: binding?.tint ?? null,
+      registration: binding ? 'registered' : 'unregistered',
+      readiness: binding?.readiness ?? 'unready',
+      routing: binding?.routing ?? 'inactive',
+      placement: binding?.placement ?? null,
+      route_closed_reason: binding?.route_closed_reason ?? 'unregistered',
+      binding_generation: binding?.bound_seq ?? null,
     });
   }
 
   // A contradiction is OPEN unless a later event moved its entity (re-observe to
   // re-flag). Pure stream filter — no resolve event, no fourth table.
-  const openContradictions = contradictions.filter(
-    (c) => (lastSeqByEntity.get(entityKey(c.entity_type, c.entity_id)) ?? c.seq) <= c.seq,
-  );
+  const openContradictions = contradictions.filter((c) => !resolvedContradictions.has(`${c.seq}:${c.kind}`));
 
   // A close-on-stop subscription is OPEN until the FIRST stop_reported after it —
   // satiated-once. Derived, no fire/satiate event (the same fold pattern as every

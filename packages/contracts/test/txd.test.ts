@@ -15,13 +15,13 @@ import {
 // the txd extraction. The vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 4 (v4 = frozen-send cancellation)", () => {
-    expect(SCHEMA_VERSION).toBe(4);
+  test("schema_version pins at 5 (registration/readiness/routing closure)", () => {
+    expect(SCHEMA_VERSION).toBe(5);
   });
 
-  test("the qualified event-type union is exactly the ruled 19 (11 reg + 8 act)", () => {
-    expect(EVENT_TYPES).toHaveLength(19);
-    expect(REG_EVENT_NAMES).toHaveLength(11);
+  test("the qualified event-type union is exactly the ruled v5 vocabulary", () => {
+    expect(EVENT_TYPES).toHaveLength(25);
+    expect(REG_EVENT_NAMES).toHaveLength(17);
     expect(ACT_EVENT_NAMES).toHaveLength(8);
     for (const t of EVENT_TYPES) {
       const domain = eventDomain(t);

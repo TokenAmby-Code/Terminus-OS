@@ -3,6 +3,7 @@ import { HOOK_TYPES } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { registration } from './registration-fixture.ts';
 import { buildRoutes, makeServer, CONSUMED_HOOK_TYPES } from '../src/server.ts';
 
 function daemon() {
@@ -19,6 +20,10 @@ const RATIFIED = [
   'POST /ctl/reconcile',
   'POST /agents/launch',
   'POST /agents/send',
+  'POST /agents/readiness',
+  'POST /agents/routes/activate',
+  'POST /agents/routes/suspend',
+  'POST /agents/routes/retire',
   'POST /agents/close',
   'POST /agents/subscribe',
   'POST /ingress/hooks/stop',
@@ -64,12 +69,12 @@ test('unused vendor hook types quick-return 410 and are side-effect-free', async
 
 test('the stop-hook door serves at /ingress/hooks/stop with the ruled stop behavior', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'palace:W', schema_version: 4, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch(registration('palace:W', 'i1', 'p'));
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/stop`, {
       method: 'POST',
-      body: JSON.stringify({ instance_id: 'i1', schema_version: 4 }),
+      body: JSON.stringify({ instance_id: 'i1', schema_version: 5 }),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, recorded: true, activity: 'stopped' });
@@ -80,7 +85,7 @@ test('the stop-hook door serves at /ingress/hooks/stop with the ruled stop behav
 
 test('GET /tmux/read/estate serves the estate view including who is bound', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 4, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch(registration('somnium:NE'));
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`);
@@ -91,7 +96,7 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
       seat_id: 'somnium:NE',
       binding: 'bound',
       persona: 'salamander',
-      tint: '#302800',
+      registration: 'registered', readiness: 'ready', routing: 'active',
     });
   } finally {
     srv.stop(true);
@@ -118,13 +123,13 @@ const LEGACY = [
 
 test('adversarial: every legacy route is dead (404) — no shim, no alias', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 4, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch(registration('somnium:NE', 'i1', 'p'));
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     for (const [method, path] of LEGACY) {
       const res = await fetch(`http://127.0.0.1:${srv.port}${encodeURI(path)}`, {
         method,
-        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 4 }) } : {}),
+        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 5 }) } : {}),
       });
       expect(res.status).toBe(404);
     }

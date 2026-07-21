@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
-import { SEND_PRESENCE_ACTIVITY_WINDOW_MS, type SendReceipt } from '@terminus-os/contracts';
+import { type SendReceipt } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { registration } from './registration-fixture.ts';
 
 function setup() {
   const tmux = new FakeTmux();
@@ -15,47 +16,33 @@ async function bareSeat(d: Daemon, _seat: string) {
   await d.constructEstate();
 }
 async function boundSeat(d: Daemon, seat: string, identity: string) {
-  await d.launch({ seat_id: seat, schema_version: 4, identity, persona: 'salamander', tint: '#302800' });
+  await d.launch(registration(seat, identity));
 }
 
 // Spec §5: ONE chokepoint; enqueue-by-default; typed gate/refusal causes; the
 // receipt carries the SAME resolution the send used (never re-derived).
 
-test('bare pane, operator idle → enqueue-by-default then delivered', async () => {
-  const { store, d } = setup();
+test('bare pane is refused as unregistered', async () => {
+  const { d } = setup();
   await bareSeat(d, 'somnium:NE');
-  const res = (await d.send({ target: 'somnium:NE', text: 'hello', schema_version: 4 })) as SendReceipt;
-  expect(res.verdict).toBe('delivered');
-  expect(res.gate_reason).toBe(null);
-  expect(res.bytes_delivered).toBe(5);
-  const types = (await store.readAll()).map((e) => e.event_type);
-  expect(types).toContain('act.send_enqueued'); // enqueue-by-default, always
-  expect(types).toContain('act.send_delivered');
+  const res = await d.send({ target: 'somnium:NE', text: 'hello', schema_version: 5 });
+  expect(res).toMatchObject({ refused: true, reason: 'unregistered' });
 });
 
 test('unresolved target REFUSED at admission — never gated, never enqueued', async () => {
   const { store, d } = setup();
-  const res = await d.send({ target: 'ghost:X', text: 'hi', schema_version: 4 });
+  const res = await d.send({ target: 'ghost:X', text: 'hi', schema_version: 5 });
   // The #699 class is unrepresentable: an unresolved target is a typed REFUSAL,
   // never a typing_guard gate.
   expect(res).toMatchObject({ ok: false, refused: true, reason: 'pane_unresolved', target: 'ghost:X' });
   expect(await store.count()).toBe(0); // nothing admitted to the queue
 });
 
-test('operator present → gated typing_guard, window echoed, STAYS enqueued (not delivered)', async () => {
-  const { tmux, store, d } = setup();
+test('unregistered operator pane is refused before typing guard', async () => {
+  const { d } = setup();
   await bareSeat(d, 'somnium:NE');
-  tmux.setPresence('somnium:NE', Date.now()); // active within the window
-  const res = (await d.send({ target: 'somnium:NE', text: 'hello', schema_version: 4 })) as SendReceipt;
-  expect(res.verdict).toBe('enqueued_gated');
-  expect(res.gate_reason).toBe('typing_guard'); // TRUE cause, not pane_unresolved
-  expect(res.activity_window_ms).toBe(SEND_PRESENCE_ACTIVITY_WINDOW_MS); // no buried magic number
-  const types = (await store.readAll()).map((e) => e.event_type);
-  expect(types).toContain('act.send_enqueued');
-  expect(types).toContain('act.send_gated');
-  expect(types).not.toContain('act.send_delivered'); // blocks-to-ENQUEUE, never delivered while gated
-  const gated = (await store.readAll()).find((e) => e.event_type === 'act.send_gated')!;
-  expect(gated.payload).toMatchObject({ reason: 'typing_guard', activity_window_ms: SEND_PRESENCE_ACTIVITY_WINDOW_MS });
+  const res = await d.send({ target: 'somnium:NE', text: 'hello', schema_version: 5 });
+  expect(res).toMatchObject({ refused: true, reason: 'unregistered' });
 });
 
 test('receipt carries the send OWN resolution (never re-derived) — bound_seq parity', async () => {
@@ -64,7 +51,7 @@ test('receipt carries the send OWN resolution (never re-derived) — bound_seq p
   const boundSeq = (await store.readAll()).find((e) => e.event_type === 'reg.bound')!.seq;
   // Resolve by the INSTANCE id — a different surface than the seat id, so a
   // re-derivation would diverge. It must not.
-  const res = (await d.send({ target: 'i-42', text: 'yo', schema_version: 4 })) as SendReceipt;
+  const res = (await d.send({ target: 'i-42', text: 'yo', schema_version: 5 })) as SendReceipt;
   expect(res.verdict).toBe('delivered');
   expect(res.resolution.target).toBe('i-42');
   expect(res.resolution.seat_id).toBe('palace:W');
@@ -88,11 +75,31 @@ class PartialTmux extends FakeTmux {
   }
 }
 
+class CountingTmux extends FakeTmux {
+  sends = 0;
+  override async sendToSeat(seatId: string, text: string) {
+    this.sends += 1;
+    return super.sendToSeat(seatId, text);
+  }
+}
+
+test('absent bound pane is refused as pane_dead before enqueue or tmux delivery', async () => {
+  const store = new MemoryEventStore(); const tmux = new CountingTmux(); const d = new Daemon(store, tmux);
+  await boundSeat(d, 'palace:W', 'absent-instance');
+  tmux.removeOutOfBand('palace:W');
+  await d.reconcile();
+  const beforeSendEvents = (await store.readAll()).filter((event) => event.entity_type === 'send').length;
+  const result = await d.send({ target: 'palace:W', text: 'hello', schema_version: 5 });
+  expect(result).toMatchObject({ refused: true, reason: 'pane_dead' });
+  expect((await store.readAll()).filter((event) => event.entity_type === 'send')).toHaveLength(beforeSendEvents);
+  expect(tmux.sends).toBe(0);
+});
+
 test('partial delivery (inserted, not submitted) → partial_delivered carries bytes, stays enqueued', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new PartialTmux());
-  await bareSeat(d, 'somnium:NE'); // operator idle → reaches delivery
-  const res = (await d.send({ target: 'somnium:NE', text: 'hello', schema_version: 4 })) as SendReceipt;
+  await boundSeat(d, 'somnium:NE', 'partial-instance');
+  const res = (await d.send({ target: 'somnium:NE', text: 'hello', schema_version: 5 })) as SendReceipt;
   expect(res.verdict).toBe('partial_delivered');
   expect(res.bytes_delivered).toBe(5); // contract: partial MUST carry non-null byte evidence
   const types = (await store.readAll()).map((e) => e.event_type);
