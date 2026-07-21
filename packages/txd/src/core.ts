@@ -471,7 +471,7 @@ export class Daemon {
   // chain (retired + process_reaped + seat_cleared) is atomic and only written
   // AFTER the process is confirmed reaped — a retire-with-live-process is
   // unspellable (spec §4). No silent no-op: an unbound target or a failed reap
-  // refuses loud and changes nothing (the mac mark-for-close-noop class, killed).
+  // refuses loud and changes nothing.
   close(req: CloseRequest, transportReceipt: string | null = null): Promise<CloseResponse> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {
@@ -489,7 +489,7 @@ export class Daemon {
       const binding = proj.currentBindings.find((b) => b.seat_id === req.target || b.instance_id === req.target);
       if (!binding) {
         // Refuse loud — closing a non-bound target is a no-op the caller must see,
-        // never a silent success (the mac /mark-for-close returned ok on nothing).
+        // never a silent success.
         return {
           ok: false,
           target: req.target,

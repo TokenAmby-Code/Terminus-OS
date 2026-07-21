@@ -1,8 +1,7 @@
 # txd — `@terminus-os/txd`
 
 The estate daemon for k12 boxes: the authoritative, event-sourced tmux control
-plane (Bun/TypeScript). tmuxctld successor, extracted out of the deprecated
-Token-OS checkout per the ruled `txd-extraction-spec` (namespace LOCKED:
+plane (Bun/TypeScript), defined by the ruled `txd-extraction-spec` (namespace LOCKED:
 **txd** primary; **tx** is its single rote auxiliary client — "tx pings txd;
 txd does the thing"). The daemon's design is the ruled `k12-daemon-spec`
 (§1–§12); behavior did not change in the move, only the home, the name, the
@@ -68,7 +67,7 @@ each route is the ruled daemon behavior, unchanged.
 The lifecycle vocabulary (`schema_version`, the seed event types, axes,
 send/stop/close/subscribe shapes) lives in `@terminus-os/contracts` (`./txd`
 module) — the daemon pins `SCHEMA_VERSION` exactly. No `file:` links, no
-token-api dependency, no compat layer.
+external registry dependency and no compatibility layer.
 
 ## Config
 

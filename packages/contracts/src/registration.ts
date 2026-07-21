@@ -4,9 +4,9 @@ import { EngineId } from "./ledger.ts";
 /**
  * Instance registration row — the FOUNDATION identity record.
  *
- * The identity/lifecycle core of the `instances` table
- * (token-api/db_schema.py :: CREATE TABLE instances). Enums are typed faithfully to the
- * DB CHECK constraints. The golden-throne / discord / workflow / planning column families
+ * The identity/lifecycle core of the `instances` table. Enums are typed
+ * faithfully to the database CHECK constraints. The golden-throne / discord /
+ * workflow / planning column families
  * are deliberately NOT modelled here — they converge in as their own seams arrive
  * (design-for-convergence; unknown columns are tolerated/stripped on parse).
  */

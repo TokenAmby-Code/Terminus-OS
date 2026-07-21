@@ -1,7 +1,7 @@
 // The canonical persistent tmux estate for k12-personal (rung 2).
 //
 // This is the DECLARATION the boot-time constructor stands (see
-// Daemon.constructEstate in core.ts). It is derived from the mac estate's
+// Daemon.constructEstate in core.ts). It defines the estate's
 // current shape — `tmuxctld/lib/tmuxctl/builder.py:build_workspace` — NOT
 // invented here. Each seat traces to its builder.py origin so a reviewer can
 // audit the mirror. Canonical ids only (colons and all); the tmux membrane in

@@ -7,13 +7,13 @@ import {
 } from "../src/registration.ts";
 
 // Mirror of the identity/lifecycle core of the `instances` table
-// (token-api/db_schema.py :: CREATE TABLE instances + INSTANCE_COLUMNS).
+// The contract pins the canonical instance registration row.
 const ROW = {
   id: "inst-abc",
   name: "terminus-os-scaffold",
   engine: "claude",
   working_dir: "/Users/tokenclaw/worktrees/Terminus-OS/main",
-  device_id: "mac",
+  device_id: "k12-personal",
   origin_type: "dispatch",
   commander_type: "persona",
   commander_id: "council:custodes",
