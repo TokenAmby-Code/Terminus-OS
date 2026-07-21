@@ -154,17 +154,15 @@ export class Daemon {
   // bare `reg.pane_created` (unbound) — it lands in freelist + activity_board and
   // triggers NO contradiction (reconcile only flags bound-dead / retired-live).
   //
-  // Buckets: `created` = pane made + event written this run; `backfilled` = pane
-  // already there but its event was missing (repaired, no new pane); `existing` =
-  // present AND attested (skipped); `failed` = a seat that threw (logged, others
-  // continue). Truth is the stream, so a pane with no `reg.pane_created` is
-  // invisible to every projection — backfill closes that gap.
+  // Buckets: `created` = canonical pane made + event written this run;
+  // `backfilled` = canonical pane already there but its event was missing;
+  // `existing` = present AND attested. `failed` remains in the response contract
+  // but shape failures throw before any event append: half-estates are refused.
   constructEstate(): Promise<{ created: string[]; existing: string[]; backfilled: string[]; failed: string[] }> {
     return this.locked(async () => {
-      // Live OR dead counts as present — a dead seat's session still exists, so
-      // createSeat would throw on a duplicate session name. Skip creation either
-      // way; attestation is tracked separately below.
-      const present = new Set((await this.tmux.listSeats()).map((o) => o.seat_id));
+      // Construction is all-or-nothing below the membrane: create on an empty
+      // socket, accept the exact canonical shape, refuse every other estate.
+      const estate = await this.tmux.ensureEstate();
       // Seats that already carry a `reg.pane_created` fact. A prior boot could
       // have torn (createSeat committed, its append did not) — the pane persists
       // but the fact was lost. Presence WITHOUT attestation is that torn state.
@@ -188,29 +186,12 @@ export class Daemon {
       };
 
       for (const seat of TXD_ESTATE) {
-        try {
-          if (present.has(seat)) {
-            if (attested.has(seat)) {
-              existing.push(seat); // present AND attested — nothing to do
-            } else {
-              // Repair the torn state: backfill the lost fact. No second tmux
-              // session is spawned, so idempotency and the pane both hold.
-              await recordCreated(seat);
-              backfilled.push(seat);
-            }
-          } else {
-            await this.tmux.createSeat(seat);
-            await recordCreated(seat);
-            created.push(seat);
-          }
-        } catch (err) {
-          // A single seat failing must not sink the estate or crash boot — health
-          // stays up. Fail loud, then carry on to the next seat.
-          failed.push(seat);
-          console.error(
-            JSON.stringify({ level: 'error', event: 'estate_seat_failed', seat, detail: String(err) }),
-          );
+        if (attested.has(seat)) {
+          existing.push(seat);
+          continue;
         }
+        await recordCreated(seat);
+        (estate === 'created' ? created : backfilled).push(seat);
       }
 
       return { created, existing, backfilled, failed };

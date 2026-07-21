@@ -22,8 +22,12 @@ contracts source, and the public route shape.
 - **Reconcile = replay.** Out-of-band pane death surfaces as a
   `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
   silently synthesized lifecycle.
-- **Boot-time estate constructor.** `constructEstate()` stands the canonical
-  persistent estate idempotently on tmux socket `k12` at boot — txd is the
+- **Boot-time estate constructor.** `constructEstate()` stands one persistent
+  tmux session (`main`) at boot: `palace` (W/N/S/E), `somnium`
+  (W/N/S/NE/SE), five `council:*` singleton windows, and two `mechanicus:*`
+  singleton windows. Every pane is resolved only through `@canonical_id`.
+  Construction is idempotent; an existing non-canonical estate is refused
+  loudly and must be cleared out-of-band before a later boot. txd is the
   constructor; tx never constructs.
 
 ## HTTP surface — the RATIFIED planes
@@ -139,9 +143,22 @@ EOF
 systemctl --user restart txd
 ```
 
-The unit's directive lines (WorkingDirectory under the box's `live/` checkout,
-the condition guard, KillMode, ExecStart, the PrivateTmp absence) are pinned
-byte-exactly in `test/systemd-unit.test.ts`.
+### tmux server privilege boundary
+
+`txd.service` runs with `NoNewPrivileges=true`, but the persistent tmux server
+must not be its child. Linux carries `NoNewPrivileges` across fork and exec; a
+server started by txd therefore passes `NoNewPrivs=1` to every pane, making
+setuid/capability-dependent tools such as `sudo`, `snap-confine`, and `lxc`
+unusable estate-wide. `txd-tmux.service` is the dedicated unsandboxed server
+owner. txd only connects to its socket and refuses loudly if that external
+server is absent; it never falls back to starting the server itself.
+
+For a one-off command that needs an unsandboxed scope before the durable unit
+is deployed, use `systemd-run --user --pipe --wait <cmd>`.
+
+The units' boundary and directive lines (WorkingDirectory under the box's
+`live/` checkout, ordering, condition guard, NoNewPrivileges split, KillMode,
+ExecStart, and PrivateTmp absence) are pinned in `test/systemd-unit.test.ts`.
 
 ## Develop
 
@@ -156,9 +173,9 @@ bun packages/txd/src/daemon.ts   # run (needs IMPERIUM_MACHINE or TXD_CONFIG)
 
 ## Deploy — systemd `--user` via the Token-Fleet apply leg
 
-`systemd/txd.service` is the unit (user-scoped, `KillMode=process` so daemon
-restarts never kill the daemon-spawned tmux estate; no `PrivateTmp`, documented
-pin). Delivery/installation is a Token-Fleet apply leg scoped to k12-personal —
+`systemd/txd-tmux.service` owns the unsandboxed persistent tmux server;
+`systemd/txd.service` requires it and owns only the sandboxed daemon. Both are
+user-scoped. Delivery/installation is a Token-Fleet apply leg scoped to k12-personal —
 apply legs install units to `~/.config/systemd/user/` and reload, root-free —
 including the runtime write-lock cycle (unlock via scoped CI sudo → propagate →
 re-lock). Config is provisioned at `~/secrets/txd/txd.json` — the `~/secrets/txd`
@@ -167,6 +184,6 @@ ensures on the box, resolving the extraction spec's sole open minor (§3.5/§7)
 in favor of the fleet leg that actually provisions it.
 
 ```bash
-systemctl --user enable --now txd.service
+systemctl --user enable --now txd-tmux.service txd.service
 tx probes it by name: systemctl --user start txd; GET /ctl/health; POST /ctl/reconcile
 ```
