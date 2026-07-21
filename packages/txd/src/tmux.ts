@@ -10,6 +10,8 @@
 // The interface is injectable so tests run against an in-memory fake with zero
 // tmux dependency; on-box acceptance exercises the real plane.
 
+import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS } from './estate.ts';
+
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 
 // Below-membrane delivery outcome (discriminated by verdict). `partial_delivered`
@@ -25,6 +27,8 @@ export interface TmuxControlPlane {
   version(): Promise<string | null>;
   /** Live seats as canonical ids + pane liveness. Never exposes %id. */
   listSeats(): Promise<SeatObservation[]>;
+  /** Create the declared estate on an empty server, validate it if present, or refuse loud. */
+  ensureEstate(): Promise<'created' | 'existing'>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
   /** Kill the seat's pane (teardown). Idempotent. */
@@ -94,6 +98,85 @@ export class RealTmux implements TmuxControlPlane {
       out.push({ seat_id: canon, pane: dead === '1' ? 'dead' : 'live' });
     }
     return out;
+  }
+
+  private async checked(args: string[], operation: string): Promise<string> {
+    const result = await run(this.socket, args);
+    if (result.code !== 0) {
+      throw new Error(`txd tmux ${operation} failed: ${result.stderr.trim() || `exit ${result.code}`}`);
+    }
+    return result.stdout.trim();
+  }
+
+  private async estateRows(): Promise<Array<{ session: string; window: string; seat: string }>> {
+    const result = await run(this.socket, [
+      'list-panes', '-a', '-F', `#{session_name}\t#{window_name}\t#{${CANON_OPT}}`,
+    ]);
+    if (result.code !== 0) return [];
+    return result.stdout.trim().split('\n').filter(Boolean).map((line) => {
+      const [session = '', window = '', seat = ''] = line.split('\t');
+      return { session, window, seat };
+    });
+  }
+
+  private isCanonicalEstate(rows: Array<{ session: string; window: string; seat: string }>): boolean {
+    const expected = Object.entries(TXD_WINDOWS)
+      .flatMap(([window, seats]) => seats.map((seat) => `${TXD_SESSION}\t${window}\t${seat}`))
+      .sort();
+    const actual = rows.map((row) => `${row.session}\t${row.window}\t${row.seat}`).sort();
+    return actual.length === expected.length && actual.every((row, index) => row === expected[index]);
+  }
+
+  private async tag(paneId: string, seatId: string): Promise<void> {
+    await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`);
+  }
+
+  async ensureEstate(): Promise<'created' | 'existing'> {
+    const rows = await this.estateRows();
+    if (rows.length > 0) {
+      if (this.isCanonicalEstate(rows)) return 'existing';
+      throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+    }
+
+    let sessionCreated = false;
+    try {
+      const palaceW = await this.checked(
+        ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', TXD_SESSION, '-n', 'palace', '-x', '200', '-y', '60'],
+        'create canonical session',
+      );
+      sessionCreated = true;
+      const palaceN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', palaceW, '-p', '70'], 'split palace center');
+      const palaceE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', palaceN, '-p', '43'], 'split palace east');
+      const palaceS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-t', palaceN, '-p', '50'], 'split palace south');
+      await Promise.all([
+        this.tag(palaceW, 'palace:W'), this.tag(palaceN, 'palace:N'),
+        this.tag(palaceS, 'palace:S'), this.tag(palaceE, 'palace:E'),
+      ]);
+
+      const somniumW = await this.checked(['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'somnium'], 'create somnium window');
+      const somniumN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', somniumW, '-p', '70'], 'split somnium grid');
+      const somniumNE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', somniumN, '-p', '50'], 'split somnium east column');
+      const somniumS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-t', somniumN, '-p', '50'], 'split somnium south');
+      const somniumSE = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-t', somniumNE, '-p', '50'], 'split somnium southeast');
+      await Promise.all([
+        this.tag(somniumW, 'somnium:W'), this.tag(somniumN, 'somnium:N'),
+        this.tag(somniumS, 'somnium:S'), this.tag(somniumNE, 'somnium:NE'), this.tag(somniumSE, 'somnium:SE'),
+      ]);
+
+      for (const [window, seats] of Object.entries(TXD_WINDOWS).slice(2)) {
+        const paneId = await this.checked(
+          ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', window],
+          `create ${window} window`,
+        );
+        await this.tag(paneId, seats[0]!);
+      }
+
+      if (!this.isCanonicalEstate(await this.estateRows())) throw new Error('txd canonical estate postcondition failed');
+      return 'created';
+    } catch (error) {
+      if (sessionCreated) await run(this.socket, ['kill-session', '-t', TXD_SESSION]);
+      throw error;
+    }
   }
 
   async createSeat(seatId: string): Promise<void> {
@@ -179,6 +262,7 @@ export class FakeTmux implements TmuxControlPlane {
   private failCreate = new Set<string>(); // seats whose createSeat is forced to throw
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
   reachableFlag = true;
+  private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
@@ -188,6 +272,27 @@ export class FakeTmux implements TmuxControlPlane {
   }
   async listSeats(): Promise<SeatObservation[]> {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));
+  }
+  async ensureEstate(): Promise<'created' | 'existing'> {
+    if (this.shape.sessions.length > 0) {
+      const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
+        && JSON.stringify(this.shape.windows) === JSON.stringify(TXD_WINDOWS);
+      if (!canonical) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      return 'existing';
+    }
+    this.shape = {
+      sessions: [TXD_SESSION],
+      windows: Object.fromEntries(Object.entries(TXD_WINDOWS).map(([window, seats]) => [window, [...seats]])),
+    };
+    for (const seat of TXD_ESTATE) this.seats.set(seat, { pane: 'live' });
+    return 'created';
+  }
+  estateShape(): { sessions: string[]; windows: Record<string, string[]> } {
+    return structuredClone(this.shape);
+  }
+  seedNonCanonicalEstate(): void {
+    this.shape = { sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } };
+    this.seats.set('palace:W', { pane: 'live' });
   }
   async createSeat(seatId: string): Promise<void> {
     // Test control: a configured seat throws (simulates a below-membrane tmux

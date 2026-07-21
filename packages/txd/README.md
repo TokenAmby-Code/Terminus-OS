@@ -22,8 +22,12 @@ contracts source, and the public route shape.
 - **Reconcile = replay.** Out-of-band pane death surfaces as a
   `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
   silently synthesized lifecycle.
-- **Boot-time estate constructor.** `constructEstate()` stands the canonical
-  persistent estate idempotently on tmux socket `k12` at boot — txd is the
+- **Boot-time estate constructor.** `constructEstate()` stands one persistent
+  tmux session (`main`) at boot: `palace` (W/N/S/E), `somnium`
+  (W/N/S/NE/SE), five `council:*` singleton windows, and two `mechanicus:*`
+  singleton windows. Every pane is resolved only through `@canonical_id`.
+  Construction is idempotent; an existing non-canonical estate is refused
+  loudly and must be cleared out-of-band before a later boot. txd is the
   constructor; tx never constructs.
 
 ## HTTP surface — the RATIFIED planes

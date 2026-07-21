@@ -7,11 +7,19 @@
 // audit the mirror. Canonical ids only (colons and all); the tmux membrane in
 // tmux.ts sanitizes them into session names.
 //
-// Grouping is deliberate: the perpetual singleton windows (council, mechanicus,
-// reservists = 9 seats) are separated from the two workspace grids (palace,
-// somnium = 9 seats). If the Emperor rules the grids out, a reviewer trims to
-// the perpetual-only tail. Full mirror is the faithful default per "derive from
-// the mac estate's current shape — do not invent seat semantics."
+export const TXD_SESSION = 'main';
+
+export const TXD_WINDOWS = {
+  palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
+  somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
+  'council:custodes': ['council:custodes'],
+  'council:pax': ['council:pax'],
+  'council:malcador': ['council:malcador'],
+  'council:true-terminal': ['council:true-terminal'],
+  'council:administratum': ['council:administratum'],
+  'mechanicus:fabricator-general': ['mechanicus:fabricator-general'],
+  'mechanicus:orchestrator': ['mechanicus:orchestrator'],
+} as const;
 
 export const TXD_ESTATE: readonly string[] = [
   // ── Workspace grids (build_workspace stack panes) ──────────────────────────
@@ -37,7 +45,4 @@ export const TXD_ESTATE: readonly string[] = [
   // mechanicus: the forge singletons.
   'mechanicus:fabricator-general',
   'mechanicus:orchestrator',
-  // reservists: the standby launcher seats.
-  'reservists:civic',
-  'reservists:token-os',
 ];
