@@ -10,10 +10,9 @@ function setup() {
   return { tmux, store, d: new Daemon(store, tmux) };
 }
 
-// A bare seat: launch with NO attestations creates the seat (pane_created) but
-// never binds — resolvable as an unbound live seat.
-async function bareSeat(d: Daemon, seat: string) {
-  await d.launch({ seat_id: seat, schema_version: 3 });
+// The estate constructor, not an invalid launch, creates bare canonical seats.
+async function bareSeat(d: Daemon, _seat: string) {
+  await d.constructEstate();
 }
 async function boundSeat(d: Daemon, seat: string, identity: string) {
   await d.launch({ seat_id: seat, schema_version: 3, identity, persona: 'salamander', tint: '#302800' });

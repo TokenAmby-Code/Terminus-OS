@@ -84,8 +84,8 @@ export class Daemon {
   }
 
   // ── /agents/launch — reg-audit SCAFFOLD (spec §4) ─────────────────────────────────
-  // Creates a seat, then refuses handover unless every attestation-defined-so-far
-  // is present. Binding is ATOMIC: identity + persona + tint commit as ONE
+  // Refuses invalid or conflicting handovers before touching tmux. Binding is
+  // ATOMIC: identity + persona + tint commit as ONE
   // `reg.bound` event carrying the full tuple — half-bound is unspellable.
   launch(req: LaunchRequest, transportReceipt: string | null = null): Promise<LaunchResponse> {
     return this.locked(async () => {
@@ -103,12 +103,71 @@ export class Daemon {
         };
       }
 
+      // Reg-audit: every attestation-defined-so-far must be present.
+      const missing = DOOR1_REQUIRED_ATTESTATIONS.filter((a) => !req[a]);
+      if (missing.length > 0) {
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [...missing],
+          reason: `reg-audit refused handover: missing ${missing.join(', ')}`,
+        };
+      }
+
+      // Binding integrity is checked against one projection snapshot while the
+      // single-writer lock is held. No implicit handover: callers must close a
+      // current binding before a different launch can claim either side.
+      const proj = await this.projections();
+      const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
+      if (seatBinding) {
+        const exactRepeat = seatBinding.instance_id === req.identity
+          && seatBinding.persona === req.persona
+          && seatBinding.tint === req.tint
+          && seatBinding.rank === (req.rank ?? null)
+          && seatBinding.commander === (req.commander ?? null);
+        if (exactRepeat) {
+          return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null };
+        }
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: `seat_occupied: ${req.seat_id} already has a current binding`,
+        };
+      }
+      const instanceBinding = proj.currentBindings.find((binding) => binding.instance_id === req.identity);
+      if (instanceBinding) {
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: `instance_already_bound: identity already has a current seat binding`,
+        };
+      }
+      if (proj.activityByInstance.get(req.identity!) === 'retired') {
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: 'instance_retired: retired identities cannot be rebound',
+        };
+      }
+
       // The estate is persistent. A launch may bind an already-made canonical
-      // seat; creating it again would turn a valid handover into a raw tmux
-      // duplicate-session failure. Record creation only when this door made it.
+      // seat. Only a new seat gets a pane_created fact; createSeat guarantees its
+      // canonical tag or compensates the new session before throwing.
       const existingSeat = (await this.tmux.listSeats()).some((seat) => seat.seat_id === req.seat_id);
       if (!existingSeat) {
         await this.tmux.createSeat(req.seat_id);
+        const created = (await this.tmux.listSeats()).filter((seat) => seat.seat_id === req.seat_id && seat.pane === 'live');
+        if (created.length !== 1) {
+          await this.tmux.killSeat(req.seat_id);
+          throw new Error(`txd launch canonical seat postcondition failed for ${req.seat_id}`);
+        }
         await this.store.append({
           entity_type: 'seat',
           entity_id: req.seat_id,
@@ -117,20 +176,6 @@ export class Daemon {
           provenance: prov,
           occurred_at,
         });
-      }
-
-      // Reg-audit: every attestation-defined-so-far must be present.
-      const missing = DOOR1_REQUIRED_ATTESTATIONS.filter((a) => !req[a]);
-      if (missing.length > 0) {
-        // Stop-the-line: seat exists (freelist), but handover is refused. No
-        // `bound` event — a half-launch never leaves a half-bound seat.
-        return {
-          ok: false,
-          seat_id: req.seat_id,
-          handover: false,
-          missing_attestations: [...missing],
-          reason: `reg-audit refused handover: missing ${missing.join(', ')}`,
-        };
       }
 
       // Atomic bind: the full tuple in ONE event.
