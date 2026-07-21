@@ -357,6 +357,14 @@ export class Daemon {
     transportReceipt: string | null,
     releaseReason: 'agent_seat_exempt' | 'operator_idle' | 'typing_guard_expired',
   ): Promise<SendReceipt> {
+    // The admission resolution is a frozen generation, not permission to send
+    // forever. Revalidate it at the last domain boundary before every tmux
+    // delivery. The daemon lock makes this projection check and the following
+    // adapter call one mutation-critical section for all sanctioned callers.
+    if (!(await this.frozenResolutionIsCurrent(resolution))) {
+      return this.cancelSend(sendId, resolution, transportReceipt);
+    }
+
     const result = await this.tmux.sendToSeat(resolution.seat_id, text);
     for (const observation of result.trace ?? []) {
       await this.store.append({
@@ -390,6 +398,36 @@ export class Daemon {
     return this.receipt(verdict, resolution, sendId, null, null, verdict === 'failed_none_delivered' ? 0 : result.bytes);
   }
 
+  private async frozenResolutionIsCurrent(resolution: SendResolution): Promise<boolean> {
+    const proj = await this.projections();
+    const board = proj.activityBoard.find((row) => row.seat_id === resolution.seat_id);
+    if (!board || board.pane === 'dead' || board.activity === 'retired') return false;
+
+    const binding = proj.currentBindings.find((candidate) => candidate.seat_id === resolution.seat_id);
+    if (resolution.bound_seq === 0) return binding === undefined && board.binding === 'unbound';
+    return binding?.bound_seq === resolution.bound_seq && board.binding === 'bound';
+  }
+
+  private async cancelSend(
+    sendId: string,
+    resolution: SendResolution,
+    transportReceipt: string | null,
+  ): Promise<SendReceipt> {
+    await this.store.append({
+      entity_type: 'send',
+      entity_id: sendId,
+      event_type: 'act.send_cancelled',
+      payload: {
+        target: resolution.seat_id,
+        resolved_seq: resolution.bound_seq,
+        reason: 'binding_changed',
+      },
+      provenance: this.prov('observer', transportReceipt),
+      occurred_at: this.now(),
+    });
+    return this.receipt('cancelled', resolution, sendId, null, null, 0);
+  }
+
   private resolveTarget(target: string, proj: Projections): SendResolution | null {
     // A bound seat, matched by seat id or by the instance it carries.
     const binding = proj.currentBindings.find((b) => b.seat_id === target || b.instance_id === target);
@@ -421,6 +459,7 @@ export class Daemon {
       verdict,
       resolution,
       gate_reason: gate,
+      cancellation_reason: verdict === 'cancelled' ? 'binding_changed' : null,
       activity_window_ms: window,
       bytes_delivered: bytes,
       send_seq: (await this.store.readByEntity(sendId)).at(-1)?.seq ?? -1,
