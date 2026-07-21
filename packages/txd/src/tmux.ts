@@ -63,6 +63,15 @@ export type TmuxCommandResult = { code: number; stdout: string; stderr: string }
 type TmuxRunner = (socket: string, args: string[]) => Promise<TmuxCommandResult>;
 type Sleep = (ms: number) => Promise<void>;
 
+export type TmuxAuditRecord = {
+  operation: string;
+  target: string;
+  outcome: 'succeeded' | 'failed';
+  duration_ms: number;
+  stderr_category: 'none' | 'not_found' | 'permission_denied' | 'transport_error' | 'command_failed';
+};
+type AuditSink = (record: TmuxAuditRecord) => void;
+
 async function run(socket: string, args: string[]): Promise<TmuxCommandResult> {
   const proc = Bun.spawn(['tmux', '-L', socket, ...args], { stdout: 'pipe', stderr: 'pipe' });
   const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
@@ -72,35 +81,71 @@ async function run(socket: string, args: string[]): Promise<TmuxCommandResult> {
 
 export class RealTmux implements TmuxControlPlane {
   private runner: TmuxRunner;
+  private audit: AuditSink;
   private sleep: Sleep;
   private enterDelayMs: number;
 
   constructor(
     private socket: string,
-    options: { run?: TmuxRunner; sleep?: Sleep; enterDelayMs?: number } = {},
+    options: { run?: TmuxRunner; audit?: AuditSink; sleep?: Sleep; enterDelayMs?: number } = {},
   ) {
     this.runner = options.run ?? run;
+    this.audit = options.audit ?? ((record) => console.info(JSON.stringify({ level: 'info', event: 'tmux_operation', ...record })));
     this.sleep = options.sleep ?? ((ms) => Bun.sleep(ms));
     const configured = Number(process.env.TXD_SEND_ENTER_DELAY_MS);
     this.enterDelayMs = options.enterDelayMs
       ?? (Number.isFinite(configured) && configured >= 0 ? configured : 200);
   }
 
+  private stderrCategory(result: TmuxCommandResult): TmuxAuditRecord['stderr_category'] {
+    if (result.code === 0) return 'none';
+    const stderr = result.stderr.toLowerCase();
+    if (/can't find|not found|no server|no such|missing/.test(stderr)) return 'not_found';
+    if (/permission|denied|not permitted/.test(stderr)) return 'permission_denied';
+    if (/connect|socket|server exited|lost server/.test(stderr)) return 'transport_error';
+    return 'command_failed';
+  }
+
+  private operationClass(detail: string): string {
+    if (detail.startsWith('tag ')) return 'tag_seat';
+    if (detail.startsWith('create ') || detail.startsWith('split ')) return 'construct_estate';
+    return 'estate_operation';
+  }
+
+  /** The sole command boundary. Arguments and raw tmux identifiers never enter its audit record. */
+  private async command(operation: string, target: string, args: string[]): Promise<TmuxCommandResult> {
+    const started = performance.now();
+    let result: TmuxCommandResult;
+    try {
+      result = await this.runner(this.socket, args);
+    } catch {
+      result = { code: 1, stdout: '', stderr: 'transport failure' };
+    }
+    this.audit({
+      operation,
+      target: /[%@$]\d+/.test(target) ? 'invalid-canonical-target' : target,
+      outcome: result.code === 0 ? 'succeeded' : 'failed',
+      duration_ms: Math.max(0, performance.now() - started),
+      stderr_category: this.stderrCategory(result),
+    });
+    return result;
+  }
+
   async reachable(): Promise<boolean> {
     // Observation only: starting the server here would make it a child of the
     // sandboxed txd.service and propagate NoNewPrivileges to every estate pane.
-    const r = await this.runner(this.socket, ['show-options', '-g', 'exit-empty']);
+    const r = await this.command('probe_server', 'server', ['show-options', '-g', 'exit-empty']);
     return r.code === 0;
   }
 
   async version(): Promise<string | null> {
-    const r = await this.runner(this.socket, ['-V']);
+    const r = await this.command('observe_version', 'server', ['-V']);
     return r.code === 0 ? r.stdout.trim() : null;
   }
 
   /** Resolve canonical id -> internal %id (membrane; return value stays inside). */
   private async resolvePane(seatId: string): Promise<string | null> {
-    const r = await this.runner(this.socket, ['list-panes', '-a', '-F', `#{pane_id}\t#{${CANON_OPT}}`]);
+    const r = await this.command('resolve_seat', seatId, ['list-panes', '-a', '-F', `#{pane_id}\t#{${CANON_OPT}}`]);
     if (r.code !== 0) return null;
     for (const line of r.stdout.split('\n')) {
       const [paneId, canon] = line.split('\t');
@@ -110,7 +155,7 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   async listSeats(): Promise<SeatObservation[]> {
-    const r = await this.runner(this.socket, ['list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_dead}`]);
+    const r = await this.command('observe_seats', 'estate', ['list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_dead}`]);
     if (r.code !== 0) return [];
     const out: SeatObservation[] = [];
     for (const line of r.stdout.split('\n')) {
@@ -122,16 +167,16 @@ export class RealTmux implements TmuxControlPlane {
     return out;
   }
 
-  private async checked(args: string[], operation: string): Promise<string> {
-    const result = await this.runner(this.socket, args);
+  private async checked(args: string[], operation: string, target = 'estate'): Promise<string> {
+    const result = await this.command(this.operationClass(operation), target, args);
     if (result.code !== 0) {
-      throw new Error(`txd tmux ${operation} failed: ${result.stderr.trim() || `exit ${result.code}`}`);
+      throw new Error(`txd tmux ${operation} failed: ${this.stderrCategory(result)}`);
     }
     return result.stdout.trim();
   }
 
   private async estateRows(): Promise<Array<{ session: string; window: string; seat: string }>> {
-    const result = await this.runner(this.socket, [
+    const result = await this.command('observe_estate', 'estate', [
       'list-panes', '-a', '-F', `#{session_name}\t#{window_name}\t#{${CANON_OPT}}`,
     ]);
     if (result.code !== 0) return [];
@@ -150,7 +195,7 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   private async tag(paneId: string, seatId: string): Promise<void> {
-    await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`);
+    await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`, seatId);
   }
 
   async ensureEstate(): Promise<'created' | 'existing'> {
@@ -229,7 +274,7 @@ export class RealTmux implements TmuxControlPlane {
       if (!this.isCanonicalEstate(await this.estateRows())) throw new Error('txd canonical estate postcondition failed');
       return 'created';
     } catch (error) {
-      if (sessionCreated) await this.runner(this.socket, ['kill-session', '-t', TXD_SESSION]);
+      if (sessionCreated) await this.command('rollback_estate', 'estate', ['kill-session', '-t', TXD_SESSION]);
       throw error;
     }
   }
@@ -241,27 +286,31 @@ export class RealTmux implements TmuxControlPlane {
     // Sanitized tmux session name (canonical id may contain `:`); the true id
     // lives in the pane option only.
     const safe = `seat_${seatId.replace(/[^A-Za-z0-9_]/g, '_')}`;
-    const created = await this.runner(this.socket, ['new-session', '-d', '-s', safe, '-x', '200', '-y', '50']);
+    const created = await this.command('create_seat', seatId, ['new-session', '-d', '-s', safe, '-x', '200', '-y', '50']);
     // Fail loud: if the session didn't come up, do NOT go on to list/retag some
     // other pane and record a seat that was never really created.
     if (created.code !== 0) {
-      throw new Error(`txd tmux createSeat failed for ${seatId}: ${created.stderr.trim() || `exit ${created.code}`}`);
+      throw new Error(`txd tmux createSeat failed for ${seatId}: ${this.stderrCategory(created)}`);
     }
-    const paneR = await this.runner(this.socket, ['list-panes', '-t', safe, '-F', '#{pane_id}']);
+    const paneR = await this.command('resolve_created_seat', seatId, ['list-panes', '-t', safe, '-F', '#{pane_id}']);
     const paneId = paneR.stdout.trim().split('\n')[0];
     // A seat without its canonical-id tag is a broken seat. Tear the just-created
     // session back down (no orphan) before failing loud, rather than leave an
     // untagged pane the membrane can never resolve.
     if (!paneId) {
-      await this.runner(this.socket, ['kill-session', '-t', safe]);
+      await this.command('rollback_seat', seatId, ['kill-session', '-t', safe]);
       throw new Error(`txd tmux createSeat: no pane for ${seatId} (session ${safe})`);
     }
-    await this.runner(this.socket, ['set-option', '-p', '-t', paneId, CANON_OPT, seatId]);
+    const tagged = await this.command('tag_seat', seatId, ['set-option', '-p', '-t', paneId, CANON_OPT, seatId]);
+    if (tagged.code !== 0) {
+      await this.command('rollback_seat', seatId, ['kill-session', '-t', safe]);
+      throw new Error(`txd tmux tag_seat failed for ${seatId}: ${this.stderrCategory(tagged)}`);
+    }
   }
 
   async killSeat(seatId: string): Promise<void> {
     const paneId = await this.resolvePane(seatId);
-    if (paneId) await this.runner(this.socket, ['kill-pane', '-t', paneId]);
+    if (paneId) await this.command('kill_seat', seatId, ['kill-pane', '-t', paneId]);
   }
 
   async reapSeat(seatId: string): Promise<boolean> {
@@ -269,13 +318,13 @@ export class RealTmux implements TmuxControlPlane {
     if (!paneId) return false;
     // -k kills the pane's current command; the pane (and its @canonical_id option)
     // is REUSED and a fresh default shell is started — the estate seat persists.
-    const r = await this.runner(this.socket, ['respawn-pane', '-k', '-t', paneId]);
+    const r = await this.command('reap_seat', seatId, ['respawn-pane', '-k', '-t', paneId]);
     return r.code === 0;
   }
 
   async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
     // Active pane (canonical) per session.
-    const panes = await this.runner(this.socket, [
+    const panes = await this.command('observe_active_seats', 'estate', [
       'list-panes',
       '-a',
       '-F',
@@ -287,7 +336,7 @@ export class RealTmux implements TmuxControlPlane {
       if (winActive === '1' && paneActive === '1' && session && canon) activeCanonBySession.set(session, canon);
     }
     // Attached clients + last activity (epoch seconds).
-    const clients = await this.runner(this.socket, ['list-clients', '-F', '#{client_session}\t#{client_activity}']);
+    const clients = await this.command('observe_clients', 'estate', ['list-clients', '-F', '#{client_session}\t#{client_activity}']);
     const present = new Set<string>();
     const nowSec = Math.floor(nowMs / 1000);
     for (const line of clients.stdout.split('\n')) {
@@ -304,7 +353,7 @@ export class RealTmux implements TmuxControlPlane {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered', trace: [] };
     const trace: SendTraceEvent[] = [];
-    const literal = await this.runner(this.socket, ['send-keys', '-t', paneId, '-l', text]);
+    const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
     trace.push({ kind: 'literal_insert', attempt: 1, ok: literal.code === 0 });
     if (literal.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered', trace };
     const bytes = Buffer.byteLength(text, 'utf8');
@@ -315,11 +364,11 @@ export class RealTmux implements TmuxControlPlane {
     // the final non-empty line of the sent text.
     const verificationNeedle = text.split(/\r?\n/).filter(Boolean).at(-1)?.trim() ?? '';
     const verify = async (attempt: number): Promise<boolean> => {
-      const cursor = await this.runner(this.socket, ['display-message', '-p', '-t', paneId, '#{cursor_y}']);
+      const cursor = await this.command('observe_cursor', seatId, ['display-message', '-p', '-t', paneId, '#{cursor_y}']);
       let ok = false;
       if (cursor.code === 0 && /^\d+$/.test(cursor.stdout.trim())) {
         const row = cursor.stdout.trim();
-        const captured = await this.runner(this.socket, ['capture-pane', '-p', '-J', '-t', paneId, '-S', row, '-E', row]);
+        const captured = await this.command('verify_submit', seatId, ['capture-pane', '-p', '-J', '-t', paneId, '-S', row, '-E', row]);
         ok = captured.code === 0 && verificationNeedle.length > 0 && !captured.stdout.includes(verificationNeedle);
       }
       trace.push({ kind: 'submit_verify', attempt, ok });
@@ -330,7 +379,7 @@ export class RealTmux implements TmuxControlPlane {
     // from the literal paste (and from prior retries) by a tunable backoff.
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       await this.sleep(this.enterDelayMs * attempt);
-      const enter = await this.runner(this.socket, ['send-keys', '-t', paneId, 'Enter']);
+      const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
       trace.push({ kind: 'submit_enter', attempt, ok: enter.code === 0 });
       if (enter.code === 0 && await verify(attempt)) return { bytes, verdict: 'delivered', trace };
       if (enter.code !== 0) trace.push({ kind: 'submit_verify', attempt, ok: false });
