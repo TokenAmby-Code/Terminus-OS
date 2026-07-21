@@ -170,9 +170,9 @@ export class RealTmux implements TmuxControlPlane {
         'create canonical session',
       );
       sessionCreated = true;
-      const reservistsN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-p', '70', '-t', reservistsW], 'split reservists center');
-      const reservistsE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-p', '43', '-t', reservistsN], 'split reservists east');
-      const reservistsS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-p', '50', '-t', reservistsN], 'split reservists south');
+      const reservistsN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', reservistsW], 'split reservists center');
+      const reservistsE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '43%', '-t', reservistsN], 'split reservists east');
+      const reservistsS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', reservistsN], 'split reservists south');
       await Promise.all([
         this.tag(reservistsW, 'reservists:W'), this.tag(reservistsN, 'reservists:N'),
         this.tag(reservistsS, 'reservists:S'), this.tag(reservistsE, 'reservists:E'),
@@ -182,19 +182,19 @@ export class RealTmux implements TmuxControlPlane {
         ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'palace'],
         'create palace window',
       );
-      const palaceN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-p', '70', '-t', palaceW], 'split palace center');
-      const palaceE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-p', '43', '-t', palaceN], 'split palace east');
-      const palaceS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-p', '50', '-t', palaceN], 'split palace south');
+      const palaceN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', palaceW], 'split palace center');
+      const palaceE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '43%', '-t', palaceN], 'split palace east');
+      const palaceS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', palaceN], 'split palace south');
       await Promise.all([
         this.tag(palaceW, 'palace:W'), this.tag(palaceN, 'palace:N'),
         this.tag(palaceS, 'palace:S'), this.tag(palaceE, 'palace:E'),
       ]);
 
       const somniumW = await this.checked(['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'somnium'], 'create somnium window');
-      const somniumN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-p', '70', '-t', somniumW], 'split somnium grid');
-      const somniumNE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-p', '50', '-t', somniumN], 'split somnium east column');
-      const somniumS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-p', '50', '-t', somniumN], 'split somnium south');
-      const somniumSE = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-p', '50', '-t', somniumNE], 'split somnium southeast');
+      const somniumN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', somniumW], 'split somnium grid');
+      const somniumNE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumN], 'split somnium east column');
+      const somniumS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumN], 'split somnium south');
+      const somniumSE = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumNE], 'split somnium southeast');
       await Promise.all([
         this.tag(somniumW, 'somnium:W'), this.tag(somniumN, 'somnium:N'),
         this.tag(somniumS, 'somnium:S'), this.tag(somniumNE, 'somnium:NE'), this.tag(somniumSE, 'somnium:SE'),
