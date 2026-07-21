@@ -30,6 +30,9 @@ import {
   CloseRequestSchema,
   HOOK_TYPES,
   LaunchRequestSchema,
+  ReadinessRequestSchema,
+  RouteRequestSchema,
+  SCHEMA_VERSION,
   SendRequestSchema,
   StopRequestSchema,
   SubscribeRequestSchema,
@@ -156,6 +159,38 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       },
     },
     {
+      method: 'POST', match: exact('/agents/readiness'), label: 'POST /agents/readiness',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, ReadinessRequestSchema, 'invalid_readiness_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.readiness(parsed, receipt(req)); return json(res, res.ok ? 200 : 409);
+      },
+    },
+    {
+      method: 'POST', match: exact('/agents/routes/activate'), label: 'POST /agents/routes/activate',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, RouteRequestSchema, 'invalid_route_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.activateRoute(parsed, receipt(req)); return json(res, res.ok ? 200 : 409);
+      },
+    },
+    {
+      method: 'POST', match: exact('/agents/routes/suspend'), label: 'POST /agents/routes/suspend',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, RouteRequestSchema, 'invalid_route_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.suspendRoute(parsed, receipt(req)); return json(res, res.ok ? 200 : 409);
+      },
+    },
+    {
+      method: 'POST', match: exact('/agents/routes/retire'), label: 'POST /agents/routes/retire',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, RouteRequestSchema, 'invalid_route_request');
+        if (parsed instanceof Response) return parsed;
+        const res = await daemon.retireRoute(parsed, receipt(req)); return json(res, res.ok ? 200 : 409);
+      },
+    },
+    {
       method: 'POST',
       match: exact('/agents/close'),
       label: 'POST /agents/close',
@@ -200,7 +235,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/tmux/read/estate'),
       label: 'GET /tmux/read/estate',
       handler: async () => {
-        const body: EstateReadResponse = { schema_version: 1, rows: await daemon.estateRows() };
+        const body: EstateReadResponse = { schema_version: SCHEMA_VERSION, rows: await daemon.estateRows() };
         return json(body);
       },
     },

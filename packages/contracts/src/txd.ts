@@ -29,7 +29,7 @@ import { z } from 'zod';
 // without a schema_version bump").
 // v3: additive — adds `act.send_submit_observed`; each literal insert, Enter,
 // retry, and pane-readback result is durable evidence for the send verdict.
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 5;
 
 // ── Entities ────────────────────────────────────────────────────────────────
 // The four entity kinds the daemon tracks. `send` is a first-class entity: a
@@ -54,6 +54,12 @@ export const REG_EVENT_NAMES = [
   'bound',
   'stop_subscribed', // v2: a close-on-next-stop subscription (bound-keyed, satiated-once)
   'contradiction_flagged',
+  'contradiction_resolved',
+  'pane_observed',
+  'readiness_attested',
+  'route_activated',
+  'route_suspended',
+  'route_retired',
   'teardown_started',
   'process_reaped',
   'retired',
@@ -87,6 +93,12 @@ export const EVENT_TYPES = [
   'reg.bound',
   'reg.stop_subscribed',
   'reg.contradiction_flagged',
+  'reg.contradiction_resolved',
+  'reg.pane_observed',
+  'reg.readiness_attested',
+  'reg.route_activated',
+  'reg.route_suspended',
+  'reg.route_retired',
   'reg.teardown_started',
   'reg.process_reaped',
   'reg.retired',
@@ -107,7 +119,7 @@ export function eventDomain(eventType: EventType): EventDomain {
 }
 
 // ── Orthogonal axes (spec §3) — the single status field is dead ──────────────
-export const PANE_STATES = ['live', 'dead', 'empty'] as const;
+export const PANE_STATES = ['live', 'dead', 'empty', 'absent'] as const;
 export type PaneState = (typeof PANE_STATES)[number];
 export const PaneStateSchema = z.enum(PANE_STATES);
 
@@ -118,6 +130,16 @@ export const BindingStateSchema = z.enum(BINDING_STATES);
 export const ACTIVITY_STATES = ['working', 'idle', 'stopped', 'retired'] as const;
 export type ActivityState = (typeof ACTIVITY_STATES)[number];
 export const ActivityStateSchema = z.enum(ACTIVITY_STATES);
+
+export const REGISTRATION_STATES = ['unregistered', 'registered', 'retired'] as const;
+export const RegistrationStateSchema = z.enum(REGISTRATION_STATES);
+export type RegistrationState = z.infer<typeof RegistrationStateSchema>;
+export const READINESS_STATES = ['unready', 'ready'] as const;
+export const ReadinessStateSchema = z.enum(READINESS_STATES);
+export type ReadinessState = z.infer<typeof ReadinessStateSchema>;
+export const ROUTING_STATES = ['inactive', 'active', 'suspended', 'retired'] as const;
+export const RoutingStateSchema = z.enum(ROUTING_STATES);
+export type RoutingState = z.infer<typeof RoutingStateSchema>;
 
 // ── Send chokepoint (spec §5) ────────────────────────────────────────────────
 // Gate reasons enqueue-and-HOLD; each carries its TRUE typed cause. The #699
@@ -133,6 +155,14 @@ export const SEND_REFUSAL_REASONS = [
   'pane_unresolved',
   'pane_dead',
   'schema_version_mismatch',
+  'unregistered',
+  'unready',
+  'route_inactive',
+  'placement_unattested',
+  'instance_stopped',
+  'instance_retired',
+  'target_contradicted',
+  'stale_binding',
 ] as const;
 export type SendRefusalReason = (typeof SEND_REFUSAL_REASONS)[number];
 export const SendRefusalReasonSchema = z.enum(SEND_REFUSAL_REASONS);
@@ -197,7 +227,28 @@ export const CurrentBindingSchema = z.object({
   persona: z.string().nullable(),
   rank: z.string().nullable(),
   commander: z.string().nullable(),
+  engine: z.string().nullable(),
+  commander_type: z.string().nullable(),
+  commander_id: z.string().nullable(),
+  singleton_authority: z.boolean().nullable(),
+  dispatch_authority: z.string().nullable(),
+  session_doc_id: z.number().int().nullable(),
+  device_id: z.string().nullable(),
+  working_dir: z.string().nullable(),
+  origin_type: z.string().nullable(),
+  execution_placement: z.string().nullable(),
   tint: z.string().nullable(),
+  registration: RegistrationStateSchema,
+  readiness: ReadinessStateSchema,
+  routing: RoutingStateSchema,
+  placement: z.object({
+    device_id: z.string(),
+    working_dir: z.string(),
+    origin_type: z.string(),
+    execution_placement: z.string(),
+  }).nullable(),
+  route_closed_reason: z.string().nullable(),
+  binding_generation: z.number().int().nullable(),
   // The bound-event seq the binding resolved against — receipts and drains
   // resolve against this exact seq (stale-target-at-drain unrepresentable).
   bound_seq: z.number().int(),
@@ -222,6 +273,14 @@ export const ActivityBoardRowSchema = z.object({
   rank: z.string().nullable(),
   commander: z.string().nullable(),
   tint: z.string().nullable(),
+  registration: RegistrationStateSchema,
+  readiness: ReadinessStateSchema,
+  routing: RoutingStateSchema,
+  placement: z.object({
+    device_id: z.string(), working_dir: z.string(), origin_type: z.string(), execution_placement: z.string(),
+  }).nullable(),
+  route_closed_reason: z.string().nullable(),
+  binding_generation: z.number().int().nullable(),
 });
 export type ActivityBoardRow = z.infer<typeof ActivityBoardRowSchema>;
 
@@ -253,20 +312,36 @@ export const HealthSchema = z.object({
 });
 export type Health = z.infer<typeof HealthSchema>;
 
+const REGISTRATION_TUPLE_SHAPE = {
+  instance_id: z.string().min(1),
+  wrapper_id: z.string().min(1),
+  engine: z.string().min(1),
+  persona_id: z.string().min(1),
+  rank: z.string().min(1),
+  commander_type: z.enum(['emperor', 'persona', 'chapter']),
+  commander_id: z.string().min(1).nullable(),
+  singleton_authority: z.boolean(),
+  dispatch_authority: z.string().min(1),
+  session_doc_id: z.number().int().positive(),
+  device_id: z.string().min(1),
+  working_dir: z.string().min(1),
+  origin_type: z.enum(['local', 'ssh', 'cron', 'dispatch', 'api', 'perpetual']),
+  execution_placement: z.string().min(1),
+} as const;
+export const RegistrationTupleSchema = z.object(REGISTRATION_TUPLE_SHAPE).refine(
+  (r) => (r.commander_type === 'emperor' ? r.commander_id === null : r.commander_id !== null),
+  { message: "commander_id must be null iff commander_type is 'emperor'", path: ['commander_id'] },
+);
+export type RegistrationTuple = z.infer<typeof RegistrationTupleSchema>;
+
 export const LaunchRequestSchema = z.object({
+  ...REGISTRATION_TUPLE_SHAPE,
   seat_id: z.string().min(1),
   schema_version: z.number().int(),
-  // The attestation tuple the reg-audit scaffold checks. At door step 1 the
-  // set is small; later doors grow it. A missing field the audit demands =
-  // refused handover (stop-the-line), never a silent partial launch.
-  identity: z.string().min(1).optional(),
-  persona: z.string().min(1).optional(),
-  rank: z.string().min(1).optional(),
-  tint: z.string().min(1).optional(),
-  commander: z.string().min(1).optional(),
-  singleton_ok: z.boolean().optional(),
-  dispatch_target: z.string().min(1).optional(),
-});
+}).refine(
+  (r) => (r.commander_type === 'emperor' ? r.commander_id === null : r.commander_id !== null),
+  { message: "commander_id must be null iff commander_type is 'emperor'", path: ['commander_id'] },
+);
 export type LaunchRequest = z.infer<typeof LaunchRequestSchema>;
 
 export const LaunchResponseSchema = z.object({
@@ -275,8 +350,30 @@ export const LaunchResponseSchema = z.object({
   handover: z.boolean(), // false when the reg-audit refused
   missing_attestations: z.array(z.string()),
   reason: z.string().nullable(),
+  binding_generation: z.number().int().nullable(),
 });
 export type LaunchResponse = z.infer<typeof LaunchResponseSchema>;
+
+export const ReadinessRequestSchema = z.object({
+  schema_version: z.number().int(),
+  instance_id: z.string().min(1),
+  binding_generation: z.number().int().positive(),
+  execution_placement: z.string().min(1),
+});
+export type ReadinessRequest = z.infer<typeof ReadinessRequestSchema>;
+
+export const RouteRequestSchema = z.object({
+  schema_version: z.number().int(),
+  instance_id: z.string().min(1),
+  binding_generation: z.number().int().positive(),
+  reason: z.string().min(1).optional(),
+});
+export type RouteRequest = z.infer<typeof RouteRequestSchema>;
+
+export const AxisResponseSchema = z.object({
+  ok: z.boolean(), instance_id: z.string(), binding_generation: z.number().int().nullable(), reason: z.string().nullable(),
+});
+export type AxisResponse = z.infer<typeof AxisResponseSchema>;
 
 // The resolution a send is bound to — carried verbatim from admission through
 // drain into the receipt. NEVER re-derived (kills the target=unresolved

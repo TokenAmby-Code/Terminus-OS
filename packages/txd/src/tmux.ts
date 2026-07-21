@@ -484,6 +484,10 @@ export class FakeTmux implements TmuxControlPlane {
     const s = this.seats.get(seatId);
     if (s) s.pane = 'dead';
   }
+  /** Test control: remove physical pane evidence entirely. */
+  removeOutOfBand(seatId: string): void {
+    this.seats.delete(seatId);
+  }
   /** Test control: mark an operator active on a seat as of nowMs. */
   setPresence(seatId: string, atMs: number): void {
     this.present.set(seatId, atMs);

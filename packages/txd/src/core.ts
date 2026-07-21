@@ -21,6 +21,9 @@ import {
   type Provenance,
   type ProvenanceSource,
   type ReconcileResponse,
+  type ReadinessRequest,
+  type RouteRequest,
+  type AxisResponse,
   type SendReceipt,
   type SendRefusal,
   type SendRefusalReason,
@@ -43,7 +46,21 @@ import type { TmuxControlPlane } from './tmux.ts';
 // Reg-audit attestation set DEFINED SO FAR (door step 1). The refusal machinery
 // is day-one; later doors grow this list as they add witnesses (rank, commander,
 // singleton, dispatch_target become required when their witnesses walk in).
-export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as const;
+export const REQUIRED_REGISTRATION_FIELDS = [
+  'instance_id', 'wrapper_id', 'engine', 'persona_id', 'rank', 'commander_type',
+  'singleton_authority', 'dispatch_authority', 'session_doc_id', 'device_id',
+  'working_dir', 'origin_type', 'execution_placement',
+] as const;
+
+export interface LaunchChain {
+  startWrapper(req: LaunchRequest): Promise<void>;
+  startEngineSession(req: LaunchRequest): Promise<void>;
+  stopEngineSession(req: LaunchRequest): Promise<void>;
+  stopWrapper(req: LaunchRequest): Promise<void>;
+}
+const noExternalLaunchChain: LaunchChain = {
+  async startWrapper() {}, async startEngineSession() {}, async stopEngineSession() {}, async stopWrapper() {},
+};
 
 type Now = () => string;
 type ScheduledCallback = () => void | Promise<void>;
@@ -63,6 +80,7 @@ export class Daemon {
     private now: Now = () => new Date().toISOString(),
     private schedule: Schedule = scheduleGuardRelease,
     private nowMs: () => number = Date.now,
+    private launchChain: LaunchChain = noExternalLaunchChain,
   ) {}
 
   /** Serialize a mutating op — the single-writer discipline. */
@@ -83,10 +101,7 @@ export class Daemon {
     return buildProjections(await this.store.readAll());
   }
 
-  // ── /agents/launch — reg-audit SCAFFOLD (spec §4) ─────────────────────────────────
-  // Refuses invalid or conflicting handovers before touching tmux. Binding is
-  // ATOMIC: identity + persona + tint commit as ONE
-  // `reg.bound` event carrying the full tuple — half-bound is unspellable.
+  // ── /agents/launch — authoritative registration chain ────────────────────
   launch(req: LaunchRequest, transportReceipt: string | null = null): Promise<LaunchResponse> {
     return this.locked(async () => {
       const occurred_at = this.now();
@@ -99,19 +114,19 @@ export class Daemon {
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`,
+          reason: `schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`, binding_generation: null,
         };
       }
 
       // Reg-audit: every attestation-defined-so-far must be present.
-      const missing = DOOR1_REQUIRED_ATTESTATIONS.filter((a) => !req[a]);
+      const missing = REQUIRED_REGISTRATION_FIELDS.filter((a) => req[a] === undefined || req[a] === null || req[a] === '');
       if (missing.length > 0) {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [...missing],
-          reason: `reg-audit refused handover: missing ${missing.join(', ')}`,
+          reason: `reg-audit refused handover: missing ${missing.join(', ')}`, binding_generation: null,
         };
       }
 
@@ -121,39 +136,43 @@ export class Daemon {
       const proj = await this.projections();
       const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
       if (seatBinding) {
-        const exactRepeat = seatBinding.instance_id === req.identity
-          && seatBinding.persona === req.persona
-          && seatBinding.tint === req.tint
-          && seatBinding.rank === (req.rank ?? null)
-          && seatBinding.commander === (req.commander ?? null);
+        const exactRepeat = seatBinding.instance_id === req.instance_id
+          && seatBinding.wrapper_id === req.wrapper_id && seatBinding.engine === req.engine
+          && seatBinding.persona === req.persona_id && seatBinding.rank === req.rank
+          && seatBinding.commander_type === req.commander_type && seatBinding.commander_id === req.commander_id
+          && seatBinding.singleton_authority === req.singleton_authority
+          && seatBinding.dispatch_authority === req.dispatch_authority
+          && seatBinding.session_doc_id === req.session_doc_id && seatBinding.device_id === req.device_id
+          && seatBinding.working_dir === req.working_dir && seatBinding.origin_type === req.origin_type
+          && seatBinding.execution_placement === req.execution_placement;
         if (exactRepeat) {
-          return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null };
+          return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null, binding_generation: seatBinding.bound_seq };
         }
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `seat_occupied: ${req.seat_id} already has a current binding`,
+          reason: `seat_occupied: ${req.seat_id} already has a current binding`, binding_generation: null,
         };
       }
-      const instanceBinding = proj.currentBindings.find((binding) => binding.instance_id === req.identity);
+      const instanceBinding = proj.currentBindings.find((binding) => binding.instance_id === req.instance_id || binding.wrapper_id === req.wrapper_id);
       if (instanceBinding) {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `instance_already_bound: identity already has a current seat binding`,
+          reason: `instance_already_bound: instance or wrapper already has a current seat binding`, binding_generation: null,
         };
       }
-      if (proj.activityByInstance.get(req.identity!) === 'retired') {
+      if (proj.activityByInstance.get(req.instance_id) === 'retired') {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: 'instance_retired: retired identities cannot be rebound',
+          reason: 'instance_retired: retired identities cannot be rebound', binding_generation: null,
         };
       }
 
@@ -178,24 +197,31 @@ export class Daemon {
         });
       }
 
-      // Atomic bind: the full tuple in ONE event.
-      await this.store.append({
-        entity_type: 'seat',
-        entity_id: req.seat_id,
-        event_type: 'reg.bound',
-        payload: {
-          wrapper_id: null,
-          instance_id: req.identity,
-          persona: req.persona,
-          tint: req.tint,
-          rank: req.rank ?? null,
-          commander: req.commander ?? null,
-        },
-        provenance: prov,
-        occurred_at,
-      });
-
-      return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null };
+      let wrapperStarted = false;
+      let sessionStarted = false;
+      try {
+        await this.launchChain.startWrapper(req); wrapperStarted = true;
+        await this.launchChain.startEngineSession(req); sessionStarted = true;
+        const common = { ...req } as Record<string, unknown>;
+        delete common.schema_version; delete common.seat_id;
+        const written = await this.store.appendAll([
+          { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.dispatch_requested', payload: { seat_id: req.seat_id, dispatch_authority: req.dispatch_authority }, provenance: prov, occurred_at },
+          { entity_type: 'seat', entity_id: req.seat_id, event_type: 'reg.pane_observed', payload: { pane_state: 'live' }, provenance: this.prov('observer', transportReceipt), occurred_at },
+          { entity_type: 'wrapper', entity_id: req.wrapper_id, event_type: 'reg.wrapper_started', payload: { instance_id: req.instance_id }, provenance: prov, occurred_at },
+          { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.session_started', payload: { wrapper_id: req.wrapper_id, engine: req.engine }, provenance: prov, occurred_at },
+          { entity_type: 'seat', entity_id: req.seat_id, event_type: 'reg.bound', payload: common, provenance: prov, occurred_at },
+        ]);
+        const generation = written.at(-1)!.seq;
+        await this.store.appendAll([
+          { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.readiness_attested', payload: { binding_generation: generation, execution_placement: req.execution_placement }, provenance: prov, occurred_at },
+          { entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.route_activated', payload: { binding_generation: generation }, provenance: prov, occurred_at },
+        ]);
+        return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null, binding_generation: generation };
+      } catch (error) {
+        if (sessionStarted) await this.launchChain.stopEngineSession(req).catch(() => undefined);
+        if (wrapperStarted) await this.launchChain.stopWrapper(req).catch(() => undefined);
+        return { ok: false, seat_id: req.seat_id, handover: false, missing_attestations: [], reason: `launch_chain_failed: ${String(error)}`, binding_generation: null };
+      }
     });
   }
 
@@ -270,6 +296,15 @@ export class Daemon {
       // Pane must be live at admission (unresolved/dead never admitted).
       const board = proj.activityBoard.find((r) => r.seat_id === resolution.seat_id);
       if (board && board.pane === 'dead') return this.refuse('pane_dead', req.target);
+      if (!board || board.registration !== 'registered') return this.refuse('unregistered', req.target);
+      if (board.activity === 'stopped') return this.refuse('instance_stopped', req.target);
+      if (board.activity === 'retired') return this.refuse('instance_retired', req.target);
+      if (!board.placement) return this.refuse('placement_unattested', req.target);
+      if (board.readiness !== 'ready') return this.refuse('unready', req.target);
+      if (board.routing !== 'active') return this.refuse('route_inactive', req.target);
+      if (proj.openContradictions.some((c) => c.entity_id === resolution.seat_id || c.entity_id === board.entity_id)) {
+        return this.refuse('target_contradicted', req.target);
+      }
 
       const occurred_at = this.now();
       const sendId = crypto.randomUUID();
@@ -357,6 +392,14 @@ export class Daemon {
     transportReceipt: string | null,
     releaseReason: 'agent_seat_exempt' | 'operator_idle' | 'typing_guard_expired',
   ): Promise<SendReceipt> {
+    // Frozen-generation guard remains the final check immediately before the
+    // side effect. Readiness is necessary, never a substitute for this guard.
+    const current = await this.projections();
+    const binding = current.currentBindings.find((b) => b.seat_id === resolution.seat_id);
+    if (!binding || binding.bound_seq !== resolution.bound_seq || binding.readiness !== 'ready' || binding.routing !== 'active'
+      || current.openContradictions.some((c) => c.entity_id === resolution.seat_id || c.entity_id === binding.instance_id)) {
+      return this.receipt('failed_none_delivered', resolution, sendId, null, null, 0);
+    }
     const result = await this.tmux.sendToSeat(resolution.seat_id, text);
     for (const observation of result.trace ?? []) {
       await this.store.append({
@@ -427,6 +470,42 @@ export class Daemon {
     };
   }
 
+  readiness(req: ReadinessRequest, transportReceipt: string | null = null): Promise<AxisResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) return { ok: false, instance_id: req.instance_id, binding_generation: null, reason: 'schema_version_mismatch' };
+      const proj = await this.projections();
+      const binding = proj.currentBindings.find((b) => b.instance_id === req.instance_id);
+      if (!binding) return { ok: false, instance_id: req.instance_id, binding_generation: null, reason: 'unregistered' };
+      if (binding.bound_seq !== req.binding_generation) return { ok: false, instance_id: req.instance_id, binding_generation: binding.bound_seq, reason: 'stale_binding' };
+      if (!binding.placement || binding.execution_placement !== req.execution_placement) return { ok: false, instance_id: req.instance_id, binding_generation: binding.bound_seq, reason: 'placement_unattested' };
+      if (proj.openContradictions.some((c) => c.entity_id === binding.seat_id || c.entity_id === req.instance_id)) return { ok: false, instance_id: req.instance_id, binding_generation: binding.bound_seq, reason: 'target_contradicted' };
+      if (binding.readiness !== 'ready') await this.store.append({ entity_type: 'instance', entity_id: req.instance_id, event_type: 'reg.readiness_attested', payload: { binding_generation: binding.bound_seq, execution_placement: req.execution_placement }, provenance: this.prov('wrapper', transportReceipt), occurred_at: this.now() });
+      return { ok: true, instance_id: req.instance_id, binding_generation: binding.bound_seq, reason: null };
+    });
+  }
+
+  activateRoute(req: RouteRequest, transportReceipt: string | null = null): Promise<AxisResponse> {
+    return this.routeTransition(req, 'reg.route_activated', transportReceipt);
+  }
+  suspendRoute(req: RouteRequest, transportReceipt: string | null = null): Promise<AxisResponse> {
+    return this.routeTransition(req, 'reg.route_suspended', transportReceipt);
+  }
+  retireRoute(req: RouteRequest, transportReceipt: string | null = null): Promise<AxisResponse> {
+    return this.routeTransition(req, 'reg.route_retired', transportReceipt);
+  }
+  private routeTransition(req: RouteRequest, event_type: 'reg.route_activated' | 'reg.route_suspended' | 'reg.route_retired', transportReceipt: string | null): Promise<AxisResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) return { ok: false, instance_id: req.instance_id, binding_generation: null, reason: 'schema_version_mismatch' };
+      const proj = await this.projections();
+      const binding = proj.currentBindings.find((b) => b.instance_id === req.instance_id);
+      if (!binding) return { ok: false, instance_id: req.instance_id, binding_generation: null, reason: 'unregistered' };
+      if (binding.bound_seq !== req.binding_generation) return { ok: false, instance_id: req.instance_id, binding_generation: binding.bound_seq, reason: 'stale_binding' };
+      if (event_type === 'reg.route_activated' && binding.readiness !== 'ready') return { ok: false, instance_id: req.instance_id, binding_generation: binding.bound_seq, reason: 'unready' };
+      await this.store.append({ entity_type: 'instance', entity_id: req.instance_id, event_type, payload: { binding_generation: binding.bound_seq, reason: req.reason ?? null }, provenance: this.prov('wrapper', transportReceipt), occurred_at: this.now() });
+      return { ok: true, instance_id: req.instance_id, binding_generation: binding.bound_seq, reason: null };
+    });
+  }
+
   // ── /agents/close — the generic "close this instance" system (rung 3) ──────────────
   // Reaps the agent process and returns the estate seat to the freelist. Terminal
   // chain (retired + process_reaped + seat_cleared) is atomic and only written
@@ -492,6 +571,7 @@ export class Daemon {
     const prov = this.prov('observer', transportReceipt);
     const inputs: EventInput[] = [];
     if (binding.instance_id) {
+      inputs.push({ entity_type: 'instance', entity_id: binding.instance_id, event_type: 'reg.route_retired', payload: { binding_generation: binding.bound_seq, reason: 'instance_retired' }, provenance: prov, occurred_at });
       inputs.push({ entity_type: 'instance', entity_id: binding.instance_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
     }
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { instance_id: binding.instance_id }, provenance: prov, occurred_at });
@@ -623,9 +703,23 @@ export class Daemon {
 
       const observed = await this.tmux.listSeats();
       const observedPane = new Map(observed.map((o) => [o.seat_id, o.pane]));
+      const projectedSeats = new Set(proj.activityBoard.map((row) => row.seat_id).filter((seat): seat is string => seat !== null));
 
-      const alreadyOpen = new Set(proj.openContradictions.map((c) => `${c.entity_id}:${c.kind}`));
+      // Observation is its own fact. Absence never masquerades as teardown.
+      const observationInputs: EventInput[] = [];
+      for (const seat of projectedSeats) observationInputs.push({
+        entity_type: 'seat', entity_id: seat, event_type: 'reg.pane_observed',
+        payload: { pane_state: observedPane.get(seat) ?? 'absent' }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+      });
+      for (const [seat, pane] of observedPane) if (!projectedSeats.has(seat)) observationInputs.push({
+        entity_type: 'seat', entity_id: seat, event_type: 'reg.pane_observed', payload: { pane_state: pane },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+      });
+      if (observationInputs.length) await this.store.appendAll(observationInputs);
+
+      const alreadyOpen = new Map(proj.openContradictions.map((c) => [`${c.entity_id}:${c.kind}`, c]));
       const newContradictions: OpenContradiction[] = [];
+      const presentProblems = new Set<string>();
 
       const flag = async (
         entity_id: string,
@@ -633,7 +727,8 @@ export class Daemon {
         missing: string | null,
         detail: string,
       ): Promise<void> => {
-        if (alreadyOpen.has(`${entity_id}:${kind}`)) return; // already flagged & still open
+        presentProblems.add(`${entity_id}:${kind}`);
+        if (alreadyOpen.has(`${entity_id}:${kind}`)) return;
         const occurred_at = this.now();
         const rec = await this.store.append({
           entity_type: 'seat',
@@ -657,17 +752,13 @@ export class Daemon {
         });
       };
 
-      // Bound seat whose pane died out-of-band (the retire chain never ran).
-      for (const b of proj.currentBindings) {
-        const pane = observedPane.get(b.seat_id);
-        if (pane === 'dead' || pane === undefined) {
-          await flag(
-            b.seat_id,
-            'bound_pane_dead',
-            'seat_cleared',
-            `seat is bound (bound_seq=${b.bound_seq}) but tmux pane is ${pane ?? 'absent'} — no teardown/reap/clear attested`,
-          );
-        }
+      for (const row of proj.activityBoard) {
+        const pane = observedPane.get(row.seat_id!);
+        if (pane === undefined) await flag(row.seat_id!, row.binding === 'bound' ? 'absent_bound_seat' : 'absent_unbound_projected_seat', 'pane_presence', 'projected seat is physically absent');
+        else if (pane === 'dead' && row.binding === 'bound') await flag(row.seat_id!, 'bound_pane_dead', 'seat_cleared', `seat is bound but tmux pane is dead`);
+      }
+      for (const seat of observedPane.keys()) {
+        if (!projectedSeats.has(seat)) await flag(seat, 'physical_seat_missing_projection', 'projection_evidence', 'physical seat has no prior projection evidence');
       }
       // Retired instance whose pane is still live (retire-with-live-process).
       for (const row of proj.activityBoard) {
@@ -676,6 +767,15 @@ export class Daemon {
           await flag(row.seat_id, 'retired_pane_live', 'process_reaped', `activity=retired but tmux pane is live`);
         }
       }
+
+      // Contradictions close only through an explicit, sequence-and-kind keyed
+      // resolution fact after the new physical observation disproves them.
+      const resolutions: EventInput[] = [];
+      for (const [key, contradiction] of alreadyOpen) if (!presentProblems.has(key)) resolutions.push({
+        entity_type: contradiction.entity_type, entity_id: contradiction.entity_id, event_type: 'reg.contradiction_resolved',
+        payload: { contradiction_seq: contradiction.seq, kind: contradiction.kind }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+      });
+      if (resolutions.length) await this.store.appendAll(resolutions);
 
       // Recompute open set over the freshly-appended stream.
       const openContradictions = buildProjections(await this.store.readAll()).openContradictions;
@@ -710,8 +810,15 @@ export class Daemon {
     // `tmux -V` — a responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
     const open = proj.openContradictions.length;
+    const observed = await this.tmux.listSeats();
+    const projected = new Map(proj.activityBoard.map((row) => [row.seat_id, row.pane]));
+    const canonicalPhysical = observed.length === TXD_ESTATE.length && TXD_ESTATE.every((seat) => observed.some((row) => row.seat_id === seat));
+    const physicalMismatch = !canonicalPhysical || observed.length !== projected.size || observed.some((seat) => {
+      const pane = projected.get(seat.seat_id);
+      return pane === undefined || (pane === 'empty' ? 'live' : pane) !== seat.pane;
+    });
     return {
-      ok: open === 0, // bring-up mode: any open contradiction ⇒ not ok
+      ok: open === 0 && tmux_reachable && !physicalMismatch,
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,

@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { registration } from './registration-fixture.ts';
 import { makeServer } from '../src/server.ts';
 import { findTmuxId, findTmuxIdDeep, assertNoTmuxId } from '../src/ids.ts';
 import type { TmuxControlPlane } from '../src/tmux.ts';
@@ -34,11 +35,11 @@ test('assertNoTmuxId throws loud on a leak', async () => {
 test('mutation ingress recursively rejects raw tmux ids before tmux or persistence', async () => {
   const paths = ['/agents/launch', '/agents/send', '/agents/close', '/ingress/hooks/stop', '/agents/subscribe'];
   const valid = [
-    { seat_id: 'palace:W', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' },
-    { target: 'palace:W', text: 'hello', schema_version: 3 },
-    { target: 'palace:W', schema_version: 3 },
-    { instance_id: 'i1', schema_version: 3 },
-    { instance_id: 'i1', schema_version: 3, action: 'close' },
+    { seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'p', tint: '#1' },
+    { target: 'palace:W', text: 'hello', schema_version: 5 },
+    { target: 'palace:W', schema_version: 5 },
+    { instance_id: 'i1', schema_version: 5 },
+    { instance_id: 'i1', schema_version: 5, action: 'close' },
   ];
   const attacks = [
     (body: Record<string, unknown>) => ({ ...body, metadata: { pane: '%91' } }),
@@ -93,7 +94,7 @@ test('handler errors are sanitized before structured logging', async () => {
     // Force a below-membrane adapter error containing a raw id without putting
     // that id in the request (request ingress must remain independently clean).
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/launch`, {
-      method: 'POST', body: JSON.stringify({ seat_id: 'palace:W', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' }),
+      method: 'POST', body: JSON.stringify(registration('palace:W', 'i1', 'p')),
     });
     expect(res.status).toBe(500);
     expect(lines).toHaveLength(1);
@@ -110,9 +111,9 @@ test('no tmux id appears in any /agents/*, /ingress/hooks/stop, /tmux/read, or /
   try {
     const post = (p: string, body: unknown) => fetch(`http://127.0.0.1:${srv.port}${p}`, { method: 'POST', body: JSON.stringify(body) });
     const bodies: unknown[] = [];
-    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' })).json());
-    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 3 })).json());
-    bodies.push(await (await post('/ingress/hooks/stop', { instance_id: 'i1', schema_version: 3 })).json());
+    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 5, identity: 'i1', persona: 'p', tint: '#1' })).json());
+    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 5 })).json());
+    bodies.push(await (await post('/ingress/hooks/stop', { instance_id: 'i1', schema_version: 5 })).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`)).json());
     bodies.push(await (await post('/ctl/reconcile', {})).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/ctl/health`)).json());
@@ -125,8 +126,8 @@ test('no tmux id appears in any /agents/*, /ingress/hooks/stop, /tmux/read, or /
 test('no tmux id lands in any persisted event payload', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
-  await d.launch({ seat_id: 'palace:W', schema_version: 3, identity: 'i1', persona: 'p', tint: '#1' });
-  await d.send({ target: 'palace:W', text: 'hi', schema_version: 3 });
+  await d.launch(registration('palace:W', 'i1', 'p'));
+  await d.send({ target: 'palace:W', text: 'hi', schema_version: 5 });
   await d.reconcile();
   for (const e of await store.readAll()) {
     expect(findTmuxIdDeep(e.payload)).toBeNull();

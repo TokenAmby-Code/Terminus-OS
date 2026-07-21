@@ -3,6 +3,7 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { buildProjections } from '../src/projections.ts';
+import { registrationTuple } from './registration-fixture.ts';
 
 function setup() {
   const store = new MemoryEventStore();
@@ -10,7 +11,7 @@ function setup() {
   return { store, tmux, d: new Daemon(store, tmux) };
 }
 
-const FULL = { schema_version: 3, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
+const FULL = registrationTuple();
 
 // Rung 3: /close is the generic "close this instance" system. For the persistent
 // estate it REAPS the agent process, KEEPS the pane (respawned bare), and returns
@@ -19,7 +20,7 @@ const FULL = { schema_version: 3, identity: 'i1', persona: 'salamander', tint: '
 test('close reaps the process, keeps the pane, returns the seat to the freelist', async () => {
   const { store, tmux, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  const res = await d.close({ target: 'palace:W', schema_version: 3 });
+  const res = await d.close({ target: 'palace:W', schema_version: 5 });
   expect(res).toMatchObject({ ok: true, closed: true, seat_id: 'palace:W', instance_id: 'i1' });
 
   const types = (await store.readAll()).map((e) => e.event_type);
@@ -37,13 +38,13 @@ test('close reaps the process, keeps the pane, returns the seat to the freelist'
 test('close resolves by instance id as well as seat id', async () => {
   const { d } = setup();
   await d.launch({ seat_id: 'somnium:NE', ...FULL });
-  const res = await d.close({ target: 'i1', schema_version: 3 }); // by instance id
+  const res = await d.close({ target: 'i1', schema_version: 5 }); // by instance id
   expect(res).toMatchObject({ ok: true, closed: true, seat_id: 'somnium:NE', instance_id: 'i1' });
 });
 
 test('close of a non-bound target refuses loud — no events, never a silent no-op', async () => {
   const { store, d } = setup();
-  const res = await d.close({ target: 'palace:W', schema_version: 3 }); // never launched
+  const res = await d.close({ target: 'palace:W', schema_version: 5 }); // never launched
   expect(res).toMatchObject({ ok: false, closed: false });
   expect(res.reason).toContain('no_binding');
   expect(await store.count()).toBe(0);
@@ -54,7 +55,7 @@ test('a failed reap refuses loud and writes NO retire chain (retire-with-live-pr
   await d.launch({ seat_id: 'palace:N', ...FULL });
   tmux.failReapSeat('palace:N');
   const before = await store.count();
-  const res = await d.close({ target: 'palace:N', schema_version: 3 });
+  const res = await d.close({ target: 'palace:N', schema_version: 5 });
   expect(res).toMatchObject({ ok: false, closed: false });
   expect(res.reason).toContain('reap_failed');
   // Nothing appended: the binding stands, no retired/process_reaped/seat_cleared.

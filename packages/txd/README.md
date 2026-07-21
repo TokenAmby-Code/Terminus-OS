@@ -16,14 +16,13 @@ contracts source, and the public route shape.
   rebuilt by replay — nobody writes them.
 - **Canonical-id membrane.** Raw tmux `%id`s never cross upward. Every response,
   log line, and event is scrubbed (`assertNoTmuxId`); a breach fails loud.
-- **Send chokepoint.** Enqueue-by-default; typed gate/refusal reasons; a
-  ledger-bound agent seat bypasses the operator typing guard, while an unbound
-  pane reads tmux client activity at admission and drain. Held sends recheck on
-  guard expiry and release with an observable reason. Each receipt carries the
-  send's own resolution.
-- **Reconcile = replay.** Out-of-band pane death surfaces as a
-  `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
-  silently synthesized lifecycle.
+- **Send chokepoint.** Delivery is closed unless the current binding generation
+  has a complete registration, attested placement and readiness, and an active
+  route. Every drain repeats the frozen-generation check immediately before
+  tmux delivery.
+- **Reconcile = replay + observation.** Physical absence is an explicit pane
+  state. Projection/tmux disagreements surface as p0 contradiction facts and
+  close only through sequence-and-kind keyed resolution events.
 - **Boot-time estate constructor.** `constructEstate()` stands one persistent
   tmux session (`main`) at boot: `reservists` (W/N/S/E), `palace` (W/N/S/E),
   `somnium` (W/N/S/NE/SE), one five-pane `council` window, and one two-pane
@@ -44,6 +43,10 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/reconcile`        | Replay-driven reconcile; p0 on contradiction     |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/send`          | Send chokepoint (enqueue-by-default)             |
+| POST   | `/agents/readiness`     | Attest readiness for one binding generation      |
+| POST   | `/agents/routes/activate` | Activate delivery for that ready generation    |
+| POST   | `/agents/routes/suspend`  | Suspend delivery with a typed reason           |
+| POST   | `/agents/routes/retire`   | Retire delivery for a closing generation       |
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
 | POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
 | POST   | `/ingress/hooks/stop`   | Stop-hook door: record / dedupe / refuse-ghost; fires auto-close |
