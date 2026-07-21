@@ -1,10 +1,10 @@
-// Canonical k12 tmux configuration — behavioral-pin lane.
+// Canonical tx tmux configuration — behavioral-pin lane.
 
 import { describe, expect, test } from 'bun:test';
 
-const conf = await Bun.file(new URL('../tmux/k12.conf', import.meta.url)).text();
+const conf = await Bun.file(new URL('../tmux/tx.conf', import.meta.url)).text();
 
-describe('tmux/k12.conf', () => {
+describe('tmux/tx.conf', () => {
   test('pins canonical indexing, prefix, terminal, and reload path', () => {
     expect(conf).toContain('set -g prefix C-Space');
     expect(conf).toContain('unbind C-b');
@@ -13,7 +13,7 @@ describe('tmux/k12.conf', () => {
     expect(conf).toContain('set -g default-terminal "tmux-256color"');
     expect(conf).toContain('set -g base-index 0');
     expect(conf).toContain('setw -g pane-base-index 0');
-    expect(conf).toContain('bind r source-file ~/runtimes/Terminus-OS/live/packages/txd/tmux/k12.conf');
+    expect(conf).toContain('bind r source-file ~/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf');
   });
 
   test('contains native navigation, copy-mode traps, and tmux 3.4 wheel scrolling', () => {

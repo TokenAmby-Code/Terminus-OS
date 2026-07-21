@@ -155,7 +155,7 @@ export class RealTmux implements TmuxControlPlane {
 
   async ensureEstate(): Promise<'created' | 'existing'> {
     if (!(await this.reachable())) {
-      throw new Error('txd tmux server is not externally owned; txd-tmux.service must start it before txd');
+      throw new Error('txd tmux server is not externally owned; tx-estate.service must start it before txd');
     }
     const rows = await this.estateRows();
     if (rows.length > 0) {
