@@ -1,0 +1,16 @@
+{
+  "name": "@terminus-os/telemetryd",
+  "version": "0.1.0",
+  "description": "Typed, event-driven desktop telemetry ingress for enforcement consumers.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/daemon.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@terminus-os/contracts": "workspace:*",
+    "@terminus-os/db": "workspace:*"
+  }
+}

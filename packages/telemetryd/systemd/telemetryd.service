@@ -1,0 +1,16 @@
+[Unit]
+Description=Terminus desktop telemetry ingress
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/telemetryd
+Environment=TELEMETRYD_BIND=127.0.0.1
+Environment=TELEMETRYD_PORT=7784
+ExecStart=%h/.bun/bin/bun src/daemon.ts
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
