@@ -23,6 +23,17 @@
         "zod": "^4.4.3",
       },
     },
+    "packages/tx": {
+      "name": "@terminus-os/tx",
+      "version": "0.1.0",
+      "bin": {
+        "tx": "src/main.ts",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "typescript": "^5.8.0",
+      },
+    },
     "packages/txd": {
       "name": "@terminus-os/txd",
       "version": "0.1.0",
@@ -40,6 +51,8 @@
     "@terminus-os/contracts": ["@terminus-os/contracts@workspace:packages/contracts"],
 
     "@terminus-os/db": ["@terminus-os/db@workspace:packages/db"],
+
+    "@terminus-os/tx": ["@terminus-os/tx@workspace:packages/tx"],
 
     "@terminus-os/txd": ["@terminus-os/txd@workspace:packages/txd"],
 

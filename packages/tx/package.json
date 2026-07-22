@@ -1,0 +1,10 @@
+{
+  "name": "@terminus-os/tx",
+  "version": "0.1.0",
+  "description": "tx — extensible operator CLI for the txd estate daemon",
+  "type": "module",
+  "private": true,
+  "bin": { "tx": "src/main.ts" },
+  "scripts": { "test": "bun test", "typecheck": "tsc --noEmit" },
+  "devDependencies": { "@types/bun": "^1.3.14", "typescript": "^5.8.0" }
+}
