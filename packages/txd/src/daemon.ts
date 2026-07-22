@@ -40,6 +40,7 @@ console.log(
 // unsandboxed tx-estate.service must already own the server; missing ownership or
 // a non-canonical existing shape fails boot loudly before event mutation.
 const est = await daemon.constructEstate();
+await daemon.finalizeEstateRotation();
 // Structured logs go to stderr here as elsewhere in the daemon (core.ts).
 console.error(
   JSON.stringify({

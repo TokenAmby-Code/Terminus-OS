@@ -32,12 +32,13 @@ import { z } from 'zod';
 // v4: additive — adds `act.send_cancelled` and the `cancelled` delivery verdict.
 // A frozen seat generation that changes before delivery terminates without a
 // tmux call, with `binding_changed` recorded as the cancellation reason.
-export const SCHEMA_VERSION = 5;
+// v6: additive — explicit estate rotation request/refusal/completion lifecycle.
+export const SCHEMA_VERSION = 6;
 
 // ── Entities ────────────────────────────────────────────────────────────────
 // The four entity kinds the daemon tracks. `send` is a first-class entity: a
 // send has its own lifecycle (enqueued → gated? → delivered) and trust surface.
-export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'send', 'message', 'ask', 'assertion'] as const;
+export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'send', 'message', 'ask', 'assertion', 'estate'] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
 export const EntityTypeSchema = z.enum(ENTITY_TYPES);
 
@@ -45,7 +46,7 @@ export const EntityTypeSchema = z.enum(ENTITY_TYPES);
 // Domain is encoded as a prefix on the qualified event_type. There is ONE
 // stream; the prefix enables per-domain projections/retention later without a
 // parallel behavior stream (rejected explicitly as a split-brain factory).
-export const EVENT_DOMAINS = ['reg', 'act'] as const;
+export const EVENT_DOMAINS = ['reg', 'act', 'estate'] as const;
 export type EventDomain = (typeof EVENT_DOMAINS)[number];
 
 // reg.* — registration & binding lifecycle, plus daemon observations about it.
@@ -85,6 +86,7 @@ export const ACT_EVENT_NAMES = [
   'comm_delivery_asserted',
   'comm_callback_asserted',
 ] as const;
+export const ESTATE_EVENT_NAMES = ['rotation_refused', 'rotation_requested', 'rotation_completed'] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
 // the type stays a narrow literal union and stays greppable. 11 reg + 7 act = 18.
@@ -113,6 +115,9 @@ export const EVENT_TYPES = [
   'act.comm_bytes_sent',
   'act.comm_delivery_asserted',
   'act.comm_callback_asserted',
+  'estate.rotation_refused',
+  'estate.rotation_requested',
+  'estate.rotation_completed',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const EventTypeSchema = z.enum(EVENT_TYPES);
@@ -481,6 +486,23 @@ export const EstateReadResponseSchema = z.object({
   rows: z.array(ActivityBoardRowSchema),
 });
 export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;
+
+export const EstateRotateRequestSchema = z.object({
+  schema_version: z.number().int(),
+  force: z.boolean().default(false),
+});
+export type EstateRotateRequest = z.infer<typeof EstateRotateRequestSchema>;
+
+export const EstateRotateResponseSchema = z.object({
+  ok: z.boolean(),
+  rotation_id: z.string().nullable(),
+  accepted: z.boolean(),
+  force: z.boolean(),
+  bound_seats: z.array(z.string()),
+  foreground_workloads: z.array(z.object({ seat_id: z.string(), command: z.string() })),
+  reason: z.string().nullable(),
+});
+export type EstateRotateResponse = z.infer<typeof EstateRotateResponseSchema>;
 
 // Communications are admitted as one atomic request.  `message` is opaque;
 // txd never parses or normalizes it.  Pages are resolved to an immutable list

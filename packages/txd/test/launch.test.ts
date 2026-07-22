@@ -15,7 +15,7 @@ test('missing attestation refuses before pane creation or binding', async () => 
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux);
-  const res = await d.launch({ seat_id: 'somnium:NE', schema_version: 5, identity: 'i1', persona: 'p' }); // tint missing
+  const res = await d.launch({ seat_id: 'somnium:NE', schema_version: 6, identity: 'i1', persona: 'p' }); // tint missing
   expect(res.handover).toBe(false);
   expect(res.missing_attestations).toEqual(['tint']);
   expect(await tmux.listSeats()).toEqual([]);
@@ -24,7 +24,7 @@ test('missing attestation refuses before pane creation or binding', async () => 
 
 test('exact repeat launch is successful and appends no duplicate event', async () => {
   const { store, d } = setup();
-  const launch = { seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'salamander', tint: '#302800' };
+  const launch = { seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' };
   expect((await d.launch(launch)).ok).toBe(true);
   const before = await store.count();
 
@@ -38,11 +38,11 @@ test('occupied seat refuses a different instance without tmux or event mutation'
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux);
-  await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' });
   const beforeEvents = await store.count();
   const beforeSeats = await tmux.listSeats();
 
-  const refused = await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'i2', persona: 'custodes', tint: '#c9a227' });
+  const refused = await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i2', persona: 'custodes', tint: '#c9a227' });
 
   expect(refused).toMatchObject({ ok: false, handover: false });
   expect(refused.reason).toContain('seat_occupied');
@@ -52,10 +52,10 @@ test('occupied seat refuses a different instance without tmux or event mutation'
 
 test('same instance with changed attestations is not an exact repeat', async () => {
   const { store, d } = setup();
-  await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' });
   const before = await store.count();
 
-  const refused = await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'custodes', tint: '#c9a227' });
+  const refused = await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'custodes', tint: '#c9a227' });
 
   expect(refused).toMatchObject({ ok: false, handover: false });
   expect(refused.reason).toContain('seat_occupied');
@@ -64,10 +64,10 @@ test('same instance with changed attestations is not an exact repeat', async () 
 
 test('one instance cannot bind to multiple seats', async () => {
   const { store, d } = setup();
-  await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' });
   const before = await store.count();
 
-  const refused = await d.launch({ seat_id: 'somnium:NE', schema_version: 5, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  const refused = await d.launch({ seat_id: 'somnium:NE', schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' });
 
   expect(refused).toMatchObject({ ok: false, handover: false });
   expect(refused.reason).toContain('instance_already_bound');
@@ -76,7 +76,7 @@ test('one instance cannot bind to multiple seats', async () => {
 
 test('full attestation tuple hands over with ONE atomic bound event', async () => {
   const { store, d } = setup();
-  const res = await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  const res = await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' });
   expect(res.handover).toBe(true);
   expect(res.missing_attestations).toEqual([]);
   const bound = (await store.readAll()).filter((e) => e.event_type === 'reg.bound');
@@ -90,7 +90,7 @@ test('binds an existing estate seat without attempting a duplicate pane creation
   const before = (await store.readAll()).filter((e) => e.entity_id === 'council:custodes' && e.event_type === 'reg.pane_created');
   const res = await d.launch({
     seat_id: 'council:custodes',
-    schema_version: 5,
+    schema_version: 6,
     identity: 'k12p:redub-custodes',
     persona: 'custodes',
     rank: 'overseer',

@@ -17,6 +17,7 @@ const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 const RATIFIED = [
   'GET /ctl/health',
   'POST /ctl/reconcile',
+  'POST /ctl/estate/rotate',
   'POST /agents/launch',
   'POST /agents/send',
   'POST /agents/close',
@@ -67,12 +68,12 @@ test('unused vendor hook types quick-return 410 and are side-effect-free', async
 
 test('the stop-hook door serves at /ingress/hooks/stop with the ruled stop behavior', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/stop`, {
       method: 'POST',
-      body: JSON.stringify({ instance_id: 'i1', schema_version: 5 }),
+      body: JSON.stringify({ instance_id: 'i1', schema_version: 6 }),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, recorded: true, activity: 'stopped' });
@@ -83,7 +84,7 @@ test('the stop-hook door serves at /ingress/hooks/stop with the ruled stop behav
 
 test('GET /tmux/read/estate serves the estate view including who is bound', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 5, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`);
@@ -104,15 +105,15 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
 test('comm identity ambiguity is a loud typed refusal with zero communication effects', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
-  await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'source', persona: 'source-persona', tint: '#1' });
-  await d.launch({ seat_id: 'palace:N', schema_version: 5, identity: 'a', persona: 'astartes', tint: '#2' });
-  await d.launch({ seat_id: 'palace:S', schema_version: 5, identity: 'b', persona: 'astartes', tint: '#3' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'source', persona: 'source-persona', tint: '#1' });
+  await d.launch({ seat_id: 'palace:N', schema_version: 6, identity: 'a', persona: 'astartes', tint: '#2' });
+  await d.launch({ seat_id: 'palace:S', schema_version: 6, identity: 'b', persona: 'astartes', tint: '#3' });
   const before = await store.count();
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema_version: 5, source_instance_id: 'source', target: 'astartes', message: 'must not land', ask: false, reply: false }),
+      body: JSON.stringify({ schema_version: 6, source_instance_id: 'source', target: 'astartes', message: 'must not land', ask: false, reply: false }),
     });
     expect(response.status).toBe(422);
     expect(await response.json()).toEqual({ ok: false, error: 'comm_refused', detail: 'identity_ambiguous: astartes' });
@@ -140,13 +141,13 @@ const LEGACY = [
 
 test('adversarial: every legacy route is dead (404) — no shim, no alias', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 5, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     for (const [method, path] of LEGACY) {
       const res = await fetch(`http://127.0.0.1:${srv.port}${encodeURI(path)}`, {
         method,
-        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 5 }) } : {}),
+        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 6 }) } : {}),
       });
       expect(res.status).toBe(404);
     }

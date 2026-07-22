@@ -31,6 +31,7 @@ import {
   CommHookSchema,
   CommRequestSchema,
   CommWaitRequestSchema,
+  EstateRotateRequestSchema,
   HOOK_TYPES,
   LaunchRequestSchema,
   SendRequestSchema,
@@ -156,6 +157,28 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const res = await daemon.reconcile(receipt(req));
         // Bring-up mode: p0 contradiction ⇒ fail loud with a non-2xx.
         return json(res, res.p0 ? 409 : 200);
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ctl/estate/rotate'),
+      label: 'POST /ctl/estate/rotate',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, EstateRotateRequestSchema, 'invalid_estate_rotate_request');
+        if (parsed instanceof Response) return parsed;
+        const result = await daemon.requestEstateRotation(parsed, receipt(req));
+        if (!result.accepted) return json(result, 409);
+        const encoded = new TextEncoder().encode(JSON.stringify(result));
+        let sent = false;
+        return new Response(new ReadableStream({
+          pull(controller) {
+            if (sent) return;
+            sent = true;
+            controller.enqueue(encoded);
+            controller.close();
+            queueMicrotask(() => void daemon.executeEstateRotation());
+          },
+        }), { status: 202, headers: { 'content-type': 'application/json' } });
       },
     },
     // ── /agents/* — the deliberate-action plane ─────────────────────────────
