@@ -28,6 +28,9 @@
 
 import {
   CloseRequestSchema,
+  CommHookSchema,
+  CommRequestSchema,
+  CommWaitRequestSchema,
   HOOK_TYPES,
   LaunchRequestSchema,
   SendRequestSchema,
@@ -52,7 +55,7 @@ export type Route = {
 
 // The one hook type txd consumes: the stop-hook door. Every other pinned vendor
 // hook type gets a 410 quick-return endpoint below.
-export const CONSUMED_HOOK_TYPES: readonly HookType[] = ['stop'];
+export const CONSUMED_HOOK_TYPES: readonly HookType[] = ['stop', 'user_prompt_submit'];
 
 function json(body: unknown, status = 200): Response {
   // Canonical-id membrane enforcement: nothing crosses upward carrying a raw
@@ -116,6 +119,26 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       handler: async () => {
         const h = await daemon.health(machine, build);
         return json(h, h.ok ? 200 : 503);
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/agents/comm'),
+      label: 'POST /agents/comm',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, CommRequestSchema, 'invalid_comm_request');
+        if (parsed instanceof Response) return parsed;
+        return json(await daemon.comm(parsed, receipt(req)));
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/agents/comm/wait'),
+      label: 'POST /agents/comm/wait',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, CommWaitRequestSchema, 'invalid_comm_wait_request');
+        if (parsed instanceof Response) return parsed;
+        return json(await daemon.waitComm(parsed));
       },
     },
     {
@@ -189,9 +212,22 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const parsed = await parseMutation(req, StopRequestSchema, 'invalid_stop_request');
         if (parsed instanceof Response) return parsed;
         const res = await daemon.stop(parsed, receipt(req));
+        if (!('refused' in res) && parsed.content !== undefined) {
+          await daemon.commStop(parsed.instance_id, parsed.content, parsed.stop_event_id ?? null, receipt(req));
+        }
         // Ghost/schema refusal fails loud (nothing recorded); recorded/deduped are 200.
         if ('refused' in res) return json(res, 422);
         return json(res, 200);
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ingress/hooks/user_prompt_submit'),
+      label: 'POST /ingress/hooks/user_prompt_submit',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, CommHookSchema, 'invalid_user_prompt_submit_request');
+        if (parsed instanceof Response) return parsed;
+        return json(await daemon.promptSubmitted(parsed, receipt(req)));
       },
     },
     // ── /tmux/read/* — the only public read surface ─────────────────────────

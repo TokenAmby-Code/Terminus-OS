@@ -43,7 +43,7 @@ for (const scenario of ['disappeared', 'changed generation', 'retired', 'moved']
     const tmux = new RecordingTmux();
     const daemon = new Daemon(store, tmux);
     await daemon.constructEstate();
-    await daemon.launch({ seat_id: SEAT, schema_version: 4, identity: 'occupant-A', persona: 'astartes', tint: '#302800' });
+    await daemon.launch({ seat_id: SEAT, schema_version: 5, identity: 'occupant-A', persona: 'astartes', tint: '#302800' });
 
     if (scenario === 'disappeared') {
       store.mutation = [event({ entity_type: 'seat', entity_id: SEAT, event_type: 'reg.teardown_started', payload: {} })];
@@ -61,7 +61,7 @@ for (const scenario of ['disappeared', 'changed generation', 'retired', 'moved']
       ];
     }
 
-    const receipt = (await daemon.send({ target: 'occupant-A', text: 'frozen for A', schema_version: 4 })) as SendReceipt;
+    const receipt = (await daemon.send({ target: 'occupant-A', text: 'frozen for A', schema_version: 5 })) as SendReceipt;
 
     expect(receipt).toMatchObject({ verdict: 'cancelled', cancellation_reason: 'binding_changed', bytes_delivered: 0 });
     expect(tmux.deliveries).toEqual([]);

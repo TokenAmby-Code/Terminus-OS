@@ -11,6 +11,13 @@ import {
   type ActivityBoardRow,
   type CloseRequest,
   type CloseResponse,
+  type CommAccepted,
+  type CommCallback,
+  type CommHook,
+  type CommRequest,
+  type CommTarget,
+  type CommWaitRequest,
+  type CommWaitResponse,
   type CurrentBinding,
   type DeliveryVerdict,
   type EventInput,
@@ -56,6 +63,7 @@ const scheduleGuardRelease: Schedule = (callback, delayMs) => {
 
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
+  private commWaiters = new Map<string, Set<() => void>>();
 
   constructor(
     private store: EventStore,
@@ -81,6 +89,138 @@ export class Daemon {
 
   private async projections(): Promise<Projections> {
     return buildProjections(await this.store.readAll());
+  }
+
+  private wakeAsk(askId: string): void {
+    for (const wake of this.commWaiters.get(askId) ?? []) wake();
+    this.commWaiters.delete(askId);
+  }
+
+  private commTargets(identity: string, proj: Projections): CommTarget[] {
+    const matches = proj.currentBindings.filter((b) =>
+      b.instance_id === identity || b.persona === identity || b.seat_id === identity,
+    );
+    return matches.map((b) => ({ instance_id: b.instance_id!, seat_id: b.seat_id, persona: b.persona }));
+  }
+
+  comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const proj = await this.projections();
+      if (!proj.currentBindings.some((b) => b.instance_id === req.source_instance_id)) throw new Error('source_not_bound');
+      const events = await this.store.readAll();
+      let targetIdentity = req.target;
+      let replyingToAsk: string | null = null;
+      if (req.reply) {
+        const inbound = [...events].reverse().find((e) => e.event_type === 'reg.comm_accepted'
+          && Array.isArray(e.payload.target_instance_ids)
+          && e.payload.target_instance_ids.includes(req.source_instance_id));
+        if (!inbound) throw new Error('no_recent_inbound_sender');
+        targetIdentity = String(inbound.payload.source_instance_id);
+        replyingToAsk = typeof inbound.payload.ask_id === 'string' ? inbound.payload.ask_id : null;
+      }
+      let targets: CommTarget[];
+      if (req.page) {
+        targets = proj.currentBindings
+          .filter((b) => b.seat_id.split(':', 1)[0] === req.page)
+          .map((b) => ({ instance_id: b.instance_id!, seat_id: b.seat_id, persona: b.persona }));
+        if (targets.length === 0) throw new Error(`page_absent: ${req.page}`);
+      } else {
+        targets = this.commTargets(targetIdentity!, proj);
+        if (targets.length === 0) throw new Error(`identity_absent: ${targetIdentity}`);
+        if (targets.length > 1) throw new Error(`identity_ambiguous: ${targetIdentity}`);
+      }
+      const messageId = crypto.randomUUID();
+      const askId = req.ask ? crypto.randomUUID() : null;
+      const occurred_at = this.now();
+      const accepted = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted', payload: {
+        source_instance_id: req.source_instance_id, target_instance_ids: targets.map((t) => t.instance_id), targets,
+        ask_id: askId, reply_to_ask_id: replyingToAsk, message: req.message,
+      }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
+      const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
+        event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
+      const event_ids = [accepted.seq, snapshot.seq];
+      for (const target of targets) {
+        const frame = `[tx comm ${messageId} from ${req.source_instance_id}${askId ? ` ask ${askId}` : ''}]\n${req.message}`;
+        const sent = await this.tmux.sendToSeat(target.seat_id, frame);
+        if (sent.verdict !== 'delivered') throw new Error(`transport_${sent.verdict}: ${target.instance_id}`);
+        const event = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
+          payload: { target_instance_id: target.instance_id, seat_id: target.seat_id, bytes: sent.bytes }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+        event_ids.push(event.seq);
+      }
+      if (replyingToAsk) await this.assertCallback(replyingToAsk, req.source_instance_id, req.message, 'reply', null, transportReceipt);
+      return { ok: true, message_id: messageId, ask_id: askId, source_instance_id: req.source_instance_id, targets, bytes_sent: true, event_ids };
+    });
+  }
+
+  private async assertCallback(askId: string, targetInstance: string, content: string, source: 'reply' | 'stop', stopEventId: string | null, receipt: string | null): Promise<void> {
+    const events = await this.store.readAll();
+    const snapshot = events.find((e) => e.entity_id === askId && e.event_type === 'reg.comm_target_snapshotted');
+    const targets = (snapshot?.payload.targets ?? []) as CommTarget[];
+    if (!targets.some((t) => t.instance_id === targetInstance)) return;
+    if (events.some((e) => e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === askId && e.payload.target_instance_id === targetInstance)) return;
+    const accepted = events.find((e) => e.entity_id === snapshot?.payload.message_id && e.event_type === 'reg.comm_accepted');
+    const subscriber = String(accepted?.payload.source_instance_id ?? '');
+    const assertionId = source === 'stop' ? `${stopEventId ?? 'stop'}:${subscriber}:${targetInstance}` : `${askId}:${targetInstance}`;
+    if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_callback_asserted')) return;
+    await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_callback_asserted',
+      payload: { ask_id: askId, subscriber_instance_id: subscriber, target_instance_id: targetInstance, content, source, stop_event_id: stopEventId }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
+    this.wakeAsk(askId);
+  }
+
+  promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: boolean }> {
+    return this.locked(async () => {
+      const events = await this.store.readAll();
+      const accepted = events.find((e) => e.entity_id === hook.message_id && e.event_type === 'reg.comm_accepted');
+      if (!accepted || !(accepted.payload.target_instance_ids as unknown[]).includes(hook.instance_id)) throw new Error('message_target_mismatch');
+      const assertionId = `${hook.message_id}:${hook.instance_id}`;
+      if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) return { ok: true, asserted: false };
+      await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+        payload: { message_id: hook.message_id, target_instance_id: hook.instance_id, source_instance_id: accepted.payload.source_instance_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
+      const proj = await this.projections();
+      const sender = proj.currentBindings.find((b) => b.instance_id === accepted.payload.source_instance_id);
+      if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${hook.message_id} target ${hook.instance_id}]`);
+      return { ok: true, asserted: true };
+    });
+  }
+
+  commStop(instanceId: string, content: string, stopEventId: string | null, receipt: string | null): Promise<void> {
+    return this.locked(async () => {
+      const events = await this.store.readAll();
+      const asks = events.filter((e) => e.event_type === 'reg.comm_target_snapshotted' && (e.payload.targets as CommTarget[]).some((t) => t.instance_id === instanceId));
+      for (const ask of asks) await this.assertCallback(ask.entity_id, instanceId, content, 'stop', stopEventId, receipt);
+    });
+  }
+
+  async waitComm(req: CommWaitRequest): Promise<CommWaitResponse> {
+    if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+    const read = async (): Promise<CommWaitResponse> => {
+      const events = await this.store.readAll();
+      const snapshot = events.find((e) => e.entity_id === req.ask_id && e.event_type === 'reg.comm_target_snapshotted');
+      if (!snapshot) throw new Error('ask_absent');
+      const targets = snapshot.payload.targets as CommTarget[];
+      const accepted = events.find((e) => e.entity_id === snapshot.payload.message_id && e.event_type === 'reg.comm_accepted');
+      if (accepted?.payload.source_instance_id !== req.subscriber_instance_id) throw new Error('ask_subscriber_mismatch');
+      const targetIds = new Set(targets.map((t) => t.instance_id));
+      const callbacks: CommCallback[] = events.filter((e) => e.event_type === 'act.comm_callback_asserted' && (
+        e.payload.ask_id === req.ask_id || (e.payload.source === 'stop' && e.payload.subscriber_instance_id === req.subscriber_instance_id && targetIds.has(String(e.payload.target_instance_id)))
+      )).map((e) => ({
+        target: targets.find((t) => t.instance_id === e.payload.target_instance_id)!, content: String(e.payload.content), assertion_event_id: e.seq, source: e.payload.source as 'reply' | 'stop',
+      }));
+      const done = new Set(callbacks.map((c) => c.target.instance_id));
+      const outstanding = targets.filter((t) => !done.has(t.instance_id));
+      return { ask_id: req.ask_id, complete: outstanding.length === 0, callbacks, outstanding };
+    };
+    const deadline = Date.now() + req.timeout_ms;
+    let result = await read();
+    while (!result.complete && Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        const set = this.commWaiters.get(req.ask_id) ?? new Set<() => void>(); set.add(resolve); this.commWaiters.set(req.ask_id, set);
+        const timer = setTimeout(resolve, Math.max(1, deadline - Date.now())); timer.unref?.();
+      });
+      result = await read();
+    }
+    return result;
   }
 
   // ── /agents/launch — reg-audit SCAFFOLD (spec §4) ─────────────────────────────────
