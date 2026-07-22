@@ -32,12 +32,12 @@ import { z } from 'zod';
 // v4: additive — adds `act.send_cancelled` and the `cancelled` delivery verdict.
 // A frozen seat generation that changes before delivery terminates without a
 // tmux call, with `binding_changed` recorded as the cancellation reason.
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 // ── Entities ────────────────────────────────────────────────────────────────
 // The four entity kinds the daemon tracks. `send` is a first-class entity: a
 // send has its own lifecycle (enqueued → gated? → delivered) and trust surface.
-export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'send'] as const;
+export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'send', 'message', 'ask', 'assertion'] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
 export const EntityTypeSchema = z.enum(ENTITY_TYPES);
 
@@ -56,6 +56,8 @@ export const REG_EVENT_NAMES = [
   'session_started',
   'bound',
   'stop_subscribed', // v2: a close-on-next-stop subscription (bound-keyed, satiated-once)
+  'comm_accepted',
+  'comm_target_snapshotted',
   'contradiction_flagged',
   'teardown_started',
   'process_reaped',
@@ -79,6 +81,9 @@ export const ACT_EVENT_NAMES = [
   'send_delivered',
   'send_cancelled',
   'receipt_deduped',
+  'comm_bytes_sent',
+  'comm_delivery_asserted',
+  'comm_callback_asserted',
 ] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
@@ -90,6 +95,8 @@ export const EVENT_TYPES = [
   'reg.session_started',
   'reg.bound',
   'reg.stop_subscribed',
+  'reg.comm_accepted',
+  'reg.comm_target_snapshotted',
   'reg.contradiction_flagged',
   'reg.teardown_started',
   'reg.process_reaped',
@@ -103,6 +110,9 @@ export const EVENT_TYPES = [
   'act.send_delivered',
   'act.send_cancelled',
   'act.receipt_deduped',
+  'act.comm_bytes_sent',
+  'act.comm_delivery_asserted',
+  'act.comm_callback_asserted',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const EventTypeSchema = z.enum(EVENT_TYPES);
@@ -375,6 +385,8 @@ export type CloseResponse = z.infer<typeof CloseResponseSchema>;
 export const StopRequestSchema = z.object({
   instance_id: z.string().min(1), // canonical instance id ONLY — never a tmux %id
   schema_version: z.number().int(),
+  content: z.string().optional(),
+  stop_event_id: z.string().min(1).optional(),
 });
 export type StopRequest = z.infer<typeof StopRequestSchema>;
 
@@ -469,3 +481,47 @@ export const EstateReadResponseSchema = z.object({
   rows: z.array(ActivityBoardRowSchema),
 });
 export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;
+
+// Communications are admitted as one atomic request.  `message` is opaque;
+// txd never parses or normalizes it.  Pages are resolved to an immutable list
+// before the accepted event is appended.
+export const MAX_COMM_MESSAGE_BYTES = 64 * 1024;
+export const COMM_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
+export const CommRequestSchema = z.object({
+  schema_version: z.number().int(),
+  source_instance_id: z.string().min(1),
+  target: z.string().min(1).optional(),
+  page: z.string().min(1).optional(),
+  message: z.string().refine((value) => new TextEncoder().encode(value).length <= MAX_COMM_MESSAGE_BYTES, 'message exceeds maximum encoded size'),
+  ask: z.boolean().default(false),
+  reply: z.boolean().default(false),
+}).superRefine((value, ctx) => {
+  const modes = Number(value.target !== undefined) + Number(value.page !== undefined) + Number(value.reply);
+  if (modes !== 1) ctx.addIssue({ code: 'custom', message: 'exactly one of target, page, or reply is required' });
+  if (value.reply && value.ask) ctx.addIssue({ code: 'custom', message: 'reply cannot also ask' });
+});
+export type CommRequest = z.infer<typeof CommRequestSchema>;
+
+export const CommTargetSchema = z.object({ instance_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
+export type CommTarget = z.infer<typeof CommTargetSchema>;
+export const CommAcceptedSchema = z.object({
+  ok: z.literal(true), message_id: z.string(), ask_id: z.string().nullable(),
+  source_instance_id: z.string(), targets: z.array(CommTargetSchema), bytes_sent: z.boolean(), event_ids: z.array(z.number().int()),
+});
+export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
+
+export const CommHookSchema = z.object({
+  schema_version: z.number().int(), instance_id: z.string().min(1), message_id: z.string().min(1).optional(),
+  content: z.string().optional(), stop_event_id: z.string().min(1).optional(),
+});
+export type CommHook = z.infer<typeof CommHookSchema>;
+
+export const CommWaitRequestSchema = z.object({
+  schema_version: z.number().int(), ask_id: z.string().min(1), subscriber_instance_id: z.string().min(1),
+  timeout_ms: z.number().int().min(COMM_WAIT_TIMEOUT_MS).default(COMM_WAIT_TIMEOUT_MS),
+});
+export type CommWaitRequest = z.infer<typeof CommWaitRequestSchema>;
+export const CommCallbackSchema = z.object({ target: CommTargetSchema, content: z.string(), assertion_event_id: z.number().int(), source: z.enum(['reply', 'stop']) });
+export type CommCallback = z.infer<typeof CommCallbackSchema>;
+export const CommWaitResponseSchema = z.object({ ask_id: z.string(), complete: z.boolean(), callbacks: z.array(CommCallbackSchema), outstanding: z.array(CommTargetSchema) });
+export type CommWaitResponse = z.infer<typeof CommWaitResponseSchema>;

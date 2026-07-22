@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   ACT_EVENT_NAMES,
+  CommRequestSchema,
   EVENT_TYPES,
   EventInputSchema,
   EventTypeSchema,
   HealthSchema,
+  MAX_COMM_MESSAGE_BYTES,
   REG_EVENT_NAMES,
   SCHEMA_VERSION,
   SendReceiptSchema,
@@ -14,14 +16,16 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 4 (v4 = frozen-send cancellation)", () => {
-    expect(SCHEMA_VERSION).toBe(4);
+  test("schema_version pins at 5 (v5 = communication assertions)", () => {
+    expect(SCHEMA_VERSION).toBe(5);
   });
 
-  test("the qualified event-type union is exactly the ruled 19 (11 reg + 8 act)", () => {
-    expect(EVENT_TYPES).toHaveLength(19);
-    expect(REG_EVENT_NAMES).toHaveLength(11);
-    expect(ACT_EVENT_NAMES).toHaveLength(8);
+  test("the qualified event-type union includes the v5 communication facts", () => {
+    expect(EVENT_TYPES).toHaveLength(24);
+    expect(EVENT_TYPES).toContain('reg.comm_accepted');
+    expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
+    expect(REG_EVENT_NAMES).toHaveLength(13);
+    expect(ACT_EVENT_NAMES).toHaveLength(11);
     for (const t of EVENT_TYPES) {
       const domain = eventDomain(t);
       const name = t.slice(t.indexOf(".") + 1);
@@ -42,6 +46,13 @@ describe("txd lifecycle vocabulary", () => {
       occurred_at: "2026-07-20T00:00:00.000Z",
     });
     expect(parsed.event_type).toBe("reg.pane_created");
+  });
+
+  test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
+    const base = { schema_version: 5, source_instance_id: "source", target: "target", ask: false, reply: false };
+    expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
+    expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
+    expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
   });
 
   test("partial_delivered must carry non-null byte evidence (refine enforced)", () => {
