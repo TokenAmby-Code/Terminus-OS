@@ -128,7 +128,12 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       handler: async (req) => {
         const parsed = await parseMutation(req, CommRequestSchema, 'invalid_comm_request');
         if (parsed instanceof Response) return parsed;
-        return json(await daemon.comm(parsed, receipt(req)));
+        try {
+          return json(await daemon.comm(parsed, receipt(req)));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return json({ ok: false, error: 'comm_refused', detail }, 422);
+        }
       },
     },
     {
