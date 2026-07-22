@@ -25,6 +25,8 @@ Type=simple
 WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd
 Environment=TXD_CONFIG=%h/secrets/txd/txd.json
 Environment=IMPERIUM_MACHINE=k12-personal
+Environment=TXD_ROTATION_LOCK_FILE=%h/.local/state/txd/estate-rotation.lock
+Environment=TXD_ROTATION_SIGNAL_FIFO=%h/.local/state/txd/estate-rotation.signal
 # Absolute bun path (pinned 1.3.14 on the fleet).
 ExecStart=%h/.bun/bin/bun src/daemon.ts
 Restart=on-failure

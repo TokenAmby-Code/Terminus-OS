@@ -16,6 +16,10 @@ export type DaemonConfig = {
   db: DbEndpointT;
   /** The tmux socket name (`tmux -L <name>`) this daemon owns authoritatively. */
   tmuxSocket: string;
+  /** Kernel lock held across an estate rotation until reconstruction completes. */
+  rotationLockFile: string;
+  /** Private handoff FIFO between the retiring and reconstructed daemon generations. */
+  rotationSignalFifo: string;
 };
 
 // Partial with explicit undefined: the root tsconfig pins
@@ -36,6 +40,8 @@ const HARD_DEFAULTS = {
     application_name: 'txd',
   }),
   tmuxSocket: 'k12',
+  rotationLockFile: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.lock`,
+  rotationSignalFifo: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.signal`,
 } as const;
 
 function envDefaults(): PartialConfig {
@@ -54,6 +60,8 @@ function envDefaults(): PartialConfig {
           })
         : undefined,
     tmuxSocket: process.env.TXD_TMUX_SOCKET,
+    rotationLockFile: process.env.TXD_ROTATION_LOCK_FILE,
+    rotationSignalFifo: process.env.TXD_ROTATION_SIGNAL_FIFO,
   };
 }
 
@@ -65,6 +73,8 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     machine: raw.machine ?? env.machine, // NO hard default — must be known
     db: raw.db ?? env.db ?? HARD_DEFAULTS.db,
     tmuxSocket: raw.tmuxSocket ?? env.tmuxSocket ?? HARD_DEFAULTS.tmuxSocket,
+    rotationLockFile: raw.rotationLockFile ?? env.rotationLockFile ?? HARD_DEFAULTS.rotationLockFile,
+    rotationSignalFifo: raw.rotationSignalFifo ?? env.rotationSignalFifo ?? HARD_DEFAULTS.rotationSignalFifo,
   };
 
   if (!cfg.bind) throw new Error('txd config error: bind is required');
@@ -78,6 +88,8 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     throw new Error(`txd config error: invalid db endpoint — ${db.error.message}`);
   cfg.db = db.data;
   if (!cfg.tmuxSocket) throw new Error('txd config error: tmuxSocket is required');
+  if (!cfg.rotationLockFile) throw new Error('txd config error: rotationLockFile is required');
+  if (!cfg.rotationSignalFifo) throw new Error('txd config error: rotationSignalFifo is required');
 
   return cfg as DaemonConfig;
 }

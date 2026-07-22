@@ -74,6 +74,11 @@ describe('systemd/txd.service pins', () => {
     pin('WantedBy=default.target');
     pin('Environment=IMPERIUM_MACHINE=k12-personal');
   });
+
+  test('rotation lock path is the fleet attach lifecycle boundary', () => {
+    pin('Environment=TXD_ROTATION_LOCK_FILE=%h/.local/state/txd/estate-rotation.lock');
+    pin('Environment=TXD_ROTATION_SIGNAL_FIFO=%h/.local/state/txd/estate-rotation.signal');
+  });
 });
 
 describe('systemd/tx-estate.service boundary', () => {

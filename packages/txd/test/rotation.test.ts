@@ -3,6 +3,7 @@ import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { Daemon } from '../src/core.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
+import type { EstateRotationBarrier } from '../src/rotation-lock.ts';
 
 async function setup() {
   const store = new MemoryEventStore();
@@ -49,4 +50,23 @@ test('new daemon generation completes the latest pending rotation once', async (
   const completions = (await store.readAll()).filter((event) => event.event_type === 'estate.rotation_completed');
   expect(completions).toHaveLength(1);
   expect(completions[0]?.entity_id).toBe(request.rotation_id!);
+});
+
+test('forced rotation holds the lifecycle barrier from durable request through reconstruction', async () => {
+  const store = new MemoryEventStore();
+  const tmux = new FakeTmux();
+  const calls: string[] = [];
+  const barrier: EstateRotationBarrier = {
+    async begin() { calls.push('begin'); },
+    async complete() { calls.push('complete'); },
+    async abort() { calls.push('abort'); },
+  };
+  const daemon = new Daemon(store, tmux, undefined, undefined, undefined, barrier);
+  await daemon.constructEstate();
+  await daemon.requestEstateRotation({ schema_version: SCHEMA_VERSION, force: true });
+  expect(calls).toEqual(['begin']);
+  await daemon.executeEstateRotation();
+  expect(calls).toEqual(['begin']);
+  await daemon.finalizeEstateRotation();
+  expect(calls).toEqual(['begin', 'complete']);
 });
