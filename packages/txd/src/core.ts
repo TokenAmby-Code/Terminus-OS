@@ -47,6 +47,7 @@ import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections } from './projections.ts';
 import { TXD_ESTATE } from './estate.ts';
+import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 
 // Reg-audit attestation set DEFINED SO FAR (door step 1). The refusal machinery
@@ -73,6 +74,7 @@ export class Daemon {
     private now: Now = () => new Date().toISOString(),
     private schedule: Schedule = scheduleGuardRelease,
     private nowMs: () => number = Date.now,
+    private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
   ) {}
 
   /** Serialize a mutating op — the single-writer discipline. */
@@ -904,13 +906,22 @@ export class Daemon {
         await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.rotation_refused', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
         return { ok: false, rotation_id, accepted: false, force: false, bound_seats, foreground_workloads, reason: 'estate_busy' };
       }
-      await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.rotation_requested', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
+      await this.rotationBarrier.begin();
+      try {
+        await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.rotation_requested', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
+      } catch (error) {
+        await this.rotationBarrier.abort();
+        throw error;
+      }
       return { ok: true, rotation_id, accepted: true, force: req.force, bound_seats, foreground_workloads, reason: null };
     });
   }
 
   async executeEstateRotation(): Promise<void> {
-    if (!(await this.tmux.killServer())) throw new Error('estate rotation failed to stop the owned tmux server');
+    if (!(await this.tmux.killServer())) {
+      await this.rotationBarrier.abort();
+      throw new Error('estate rotation failed to stop the owned tmux server');
+    }
   }
 
   finalizeEstateRotation(): Promise<void> {
@@ -918,11 +929,15 @@ export class Daemon {
       const events = await this.store.readAll();
       const completed = new Set(events.filter((event) => event.event_type === 'estate.rotation_completed').map((event) => event.entity_id));
       const pending = [...events].reverse().find((event) => event.event_type === 'estate.rotation_requested' && !completed.has(event.entity_id));
-      if (!pending) return;
+      if (!pending) {
+        await this.rotationBarrier.complete();
+        return;
+      }
       await this.store.append({
         entity_type: 'estate', entity_id: pending.entity_id, event_type: 'estate.rotation_completed',
         payload: { canonical_seats: TXD_ESTATE.length }, provenance: this.prov('observer', null), occurred_at: this.now(),
       });
+      await this.rotationBarrier.complete();
     });
   }
 

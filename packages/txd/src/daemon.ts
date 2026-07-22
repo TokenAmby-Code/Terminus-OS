@@ -8,6 +8,7 @@ import { RealTmux } from './tmux.ts';
 import { Daemon } from './core.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
+import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
 
 const build: BuildInfo = {
   version: '0.1.0',
@@ -21,7 +22,8 @@ const cfg = await loadConfig();
 // Connect + migrate (forward-only, shared migrations home) — fail loud at boot.
 const store = await PostgresEventStore.connect(cfg.db);
 const tmux = new RealTmux(cfg.tmuxSocket);
-const daemon = new Daemon(store, tmux);
+const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
+const daemon = new Daemon(store, tmux, undefined, undefined, undefined, rotationBarrier);
 const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
 
 console.log(
