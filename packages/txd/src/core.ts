@@ -22,6 +22,8 @@ import {
   type DeliveryVerdict,
   type EventInput,
   type Health,
+  type EstateRotateRequest,
+  type EstateRotateResponse,
   type LaunchRequest,
   type LaunchResponse,
   type OpenContradiction,
@@ -881,6 +883,47 @@ export class Daemon {
   // txd's job).
   async estateRows(): Promise<ActivityBoardRow[]> {
     return (await this.projections()).activityBoard;
+  }
+
+  requestEstateRotation(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) {
+        return { ok: false, rotation_id: null, accepted: false, force: req.force, bound_seats: [], foreground_workloads: [], reason: 'schema_version_mismatch' };
+      }
+      const proj = await this.projections();
+      const bound_seats = proj.currentBindings.map((binding) => binding.seat_id).sort();
+      const foreground_workloads = (await this.tmux.workloads())
+        .filter((workload) => !workload.idle)
+        .map(({ seat_id, command }) => ({ seat_id, command }))
+        .sort((a, b) => a.seat_id.localeCompare(b.seat_id));
+      const blocked = bound_seats.length > 0 || foreground_workloads.length > 0;
+      const rotation_id = crypto.randomUUID();
+      const occurred_at = this.now();
+      const payload = { force: req.force, bound_seats, foreground_workloads };
+      if (blocked && !req.force) {
+        await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.rotation_refused', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
+        return { ok: false, rotation_id, accepted: false, force: false, bound_seats, foreground_workloads, reason: 'estate_busy' };
+      }
+      await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.rotation_requested', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
+      return { ok: true, rotation_id, accepted: true, force: req.force, bound_seats, foreground_workloads, reason: null };
+    });
+  }
+
+  async executeEstateRotation(): Promise<void> {
+    if (!(await this.tmux.killServer())) throw new Error('estate rotation failed to stop the owned tmux server');
+  }
+
+  finalizeEstateRotation(): Promise<void> {
+    return this.locked(async () => {
+      const events = await this.store.readAll();
+      const completed = new Set(events.filter((event) => event.event_type === 'estate.rotation_completed').map((event) => event.entity_id));
+      const pending = [...events].reverse().find((event) => event.event_type === 'estate.rotation_requested' && !completed.has(event.entity_id));
+      if (!pending) return;
+      await this.store.append({
+        entity_type: 'estate', entity_id: pending.entity_id, event_type: 'estate.rotation_completed',
+        payload: { canonical_seats: TXD_ESTATE.length }, provenance: this.prov('observer', null), occurred_at: this.now(),
+      });
+    });
   }
 
   async health(machine: string, build: { version: string; git_sha: string; bun: string }): Promise<Health> {

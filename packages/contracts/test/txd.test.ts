@@ -3,6 +3,7 @@ import {
   ACT_EVENT_NAMES,
   CommRequestSchema,
   EVENT_TYPES,
+  ESTATE_EVENT_NAMES,
   EventInputSchema,
   EventTypeSchema,
   HealthSchema,
@@ -16,21 +17,22 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 5 (v5 = communication assertions)", () => {
-    expect(SCHEMA_VERSION).toBe(5);
+  test("schema_version pins at 6 (v6 = explicit estate rotation)", () => {
+    expect(SCHEMA_VERSION).toBe(6);
   });
 
-  test("the qualified event-type union includes the v5 communication facts", () => {
-    expect(EVENT_TYPES).toHaveLength(24);
+  test("the qualified event-type union includes communication and estate lifecycle facts", () => {
+    expect(EVENT_TYPES).toHaveLength(27);
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
     expect(REG_EVENT_NAMES).toHaveLength(13);
     expect(ACT_EVENT_NAMES).toHaveLength(11);
+    expect(ESTATE_EVENT_NAMES).toEqual(['rotation_refused', 'rotation_requested', 'rotation_completed']);
     for (const t of EVENT_TYPES) {
       const domain = eventDomain(t);
       const name = t.slice(t.indexOf(".") + 1);
-      expect(["reg", "act"]).toContain(domain);
-      const names: readonly string[] = domain === "reg" ? REG_EVENT_NAMES : ACT_EVENT_NAMES;
+      expect(["reg", "act", "estate"]).toContain(domain);
+      const names: readonly string[] = domain === "reg" ? REG_EVENT_NAMES : domain === "act" ? ACT_EVENT_NAMES : ESTATE_EVENT_NAMES;
       expect(names).toContain(name);
     }
     expect(() => EventTypeSchema.parse("reg.invented_event")).toThrow();
@@ -49,7 +51,7 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
-    const base = { schema_version: 5, source_instance_id: "source", target: "target", ask: false, reply: false };
+    const base = { schema_version: 6, source_instance_id: "source", target: "target", ask: false, reply: false };
     expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
     expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');

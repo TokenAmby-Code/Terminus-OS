@@ -13,6 +13,7 @@
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS } from './estate.ts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
+export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
 
 export type SendTraceEvent = {
   kind: 'literal_insert' | 'submit_enter' | 'submit_verify';
@@ -31,6 +32,8 @@ export type SendOutcome =
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
   version(): Promise<string | null>;
+  workloads(): Promise<SeatWorkload[]>;
+  killServer(): Promise<boolean>;
   /** Live seats as canonical ids + pane liveness. Never exposes %id. */
   listSeats(): Promise<SeatObservation[]>;
   /** Create the declared estate on an empty server, validate it if present, or refuse loud. */
@@ -141,6 +144,20 @@ export class RealTmux implements TmuxControlPlane {
   async version(): Promise<string | null> {
     const r = await this.command('observe_version', 'server', ['-V']);
     return r.code === 0 ? r.stdout.trim() : null;
+  }
+
+  async workloads(): Promise<SeatWorkload[]> {
+    const r = await this.command('observe_workloads', 'estate', ['list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_current_command}`]);
+    if (r.code !== 0) return [];
+    const idle = new Set(['bash', 'zsh', 'fish', 'sh', 'dash']);
+    return r.stdout.split('\n').filter(Boolean).flatMap((line) => {
+      const [seat_id, command = ''] = line.split('\t');
+      return seat_id ? [{ seat_id, command, idle: idle.has(command) }] : [];
+    });
+  }
+
+  async killServer(): Promise<boolean> {
+    return (await this.command('rotate_estate', 'estate', ['kill-server'])).code === 0;
   }
 
   /** Resolve canonical id -> internal %id (membrane; return value stays inside). */
@@ -401,6 +418,8 @@ export class FakeTmux implements TmuxControlPlane {
   private failCreate = new Set<string>(); // seats whose createSeat is forced to throw
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
   reachableFlag = true;
+  killed = false;
+  private commands = new Map<string, string>();
   private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
 
   async reachable(): Promise<boolean> {
@@ -409,6 +428,14 @@ export class FakeTmux implements TmuxControlPlane {
   async version(): Promise<string | null> {
     return 'tmux 3.5a (fake)';
   }
+  async workloads(): Promise<SeatWorkload[]> {
+    return [...this.seats.keys()].map((seat_id) => {
+      const command = this.commands.get(seat_id) ?? 'bash';
+      return { seat_id, command, idle: ['bash', 'zsh', 'fish', 'sh', 'dash'].includes(command) };
+    });
+  }
+  async killServer(): Promise<boolean> { this.killed = true; this.reachableFlag = false; return true; }
+  setCommand(seatId: string, command: string): void { this.commands.set(seatId, command); }
   async listSeats(): Promise<SeatObservation[]> {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));
   }

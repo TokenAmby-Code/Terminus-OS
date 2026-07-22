@@ -22,8 +22,8 @@ test('health is a registered command, not hard-coded parser behavior', async () 
 
 test('the shared router supports nested subcommands', async () => {
   const h = harness();
-  expect(await runCli(['estate', 'show'], h.deps)).toBe(2);
-  expect(h.stderr[0]).toContain('unknown command: estate show');
+  expect(await runCli(['estate', 'missing'], h.deps)).toBe(2);
+  expect(h.stderr[0]).toContain('unknown command: estate missing');
 });
 
 test('help is deterministic and lists extension points', async () => {
