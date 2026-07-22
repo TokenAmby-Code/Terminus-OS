@@ -101,6 +101,25 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
   }
 });
 
+test('comm identity ambiguity is a loud typed refusal with zero communication effects', async () => {
+  const store = new MemoryEventStore();
+  const d = new Daemon(store, new FakeTmux());
+  await d.launch({ seat_id: 'palace:W', schema_version: 5, identity: 'source', persona: 'source-persona', tint: '#1' });
+  await d.launch({ seat_id: 'palace:N', schema_version: 5, identity: 'a', persona: 'astartes', tint: '#2' });
+  await d.launch({ seat_id: 'palace:S', schema_version: 5, identity: 'b', persona: 'astartes', tint: '#3' });
+  const before = await store.count();
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: 5, source_instance_id: 'source', target: 'astartes', message: 'must not land', ask: false, reply: false }),
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ ok: false, error: 'comm_refused', detail: 'identity_ambiguous: astartes' });
+    expect(await store.count()).toBe(before);
+  } finally { srv.stop(true); }
+});
+
 // ── Adversarial: legacy stays dead ──────────────────────────────────────────
 // The pre-extraction daemon surface (flat routes + the public per-entity
 // event-history endpoint) must NOT survive. 404, not redirect, not shim
