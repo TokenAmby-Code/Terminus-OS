@@ -12,3 +12,4 @@ export * from "./notification.ts";
 export * from "./machine-config.ts";
 export * from "./txd.ts";
 export * from "./hooks.ts";
+export * from "./desktop-telemetry.ts";

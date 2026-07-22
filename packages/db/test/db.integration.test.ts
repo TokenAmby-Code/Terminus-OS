@@ -60,14 +60,14 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
 
   test("the migrations apply and land their ledger rows", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
-    expect(report.applied.map(m => m.id)).toEqual([1, 2]);
+    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3]);
     expect(report.alreadyApplied).toBe(0);
   });
 
   test("re-running the runner is a no-op (idempotence)", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
     expect(report.applied).toEqual([]);
-    expect(report.alreadyApplied).toBe(2);
+    expect(report.alreadyApplied).toBe(3);
   });
 
   test("checkHealth reports up on server_version 18.x", async () => {
@@ -86,6 +86,7 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
     expect(rows).toEqual([
       { id: 1, name: "schema_migrations" },
       { id: 2, name: "txd_events" },
+      { id: 3, name: "desktop_telemetry" },
     ]);
 
     const WrongRow = z.object({ id: z.string() });

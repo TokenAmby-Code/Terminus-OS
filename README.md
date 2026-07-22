@@ -20,6 +20,10 @@ packages/
       ephemeral.ts       temporary ephemeral-channel capability policy
       index.ts
     test/
+  telemetryd/          typed desktop-fact ingress; PostgreSQL NOTIFY feeds enforcement consumers
+    src/
+    systemd/
+    test/
 ```
 
 The foundation is registration / bind / ledger. The `tmuxctld` op envelopes
