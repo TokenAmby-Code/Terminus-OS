@@ -86,7 +86,15 @@ export const ACT_EVENT_NAMES = [
   'comm_delivery_asserted',
   'comm_callback_asserted',
 ] as const;
-export const ESTATE_EVENT_NAMES = ['rotation_refused', 'rotation_requested', 'rotation_completed'] as const;
+export const ESTATE_EVENT_NAMES = [
+  'rotation_refused',
+  'rotation_requested',
+  'rotation_completed',
+  'scoped_reset_refused',
+  'scoped_reset_requested',
+  'scoped_reset_completed',
+  'scoped_reset_failed',
+] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
 // the type stays a narrow literal union and stays greppable. 11 reg + 7 act = 18.
@@ -118,6 +126,10 @@ export const EVENT_TYPES = [
   'estate.rotation_refused',
   'estate.rotation_requested',
   'estate.rotation_completed',
+  'estate.scoped_reset_refused',
+  'estate.scoped_reset_requested',
+  'estate.scoped_reset_completed',
+  'estate.scoped_reset_failed',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const EventTypeSchema = z.enum(EVENT_TYPES);
@@ -490,6 +502,19 @@ export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;
 export const EstateRotateRequestSchema = z.object({
   schema_version: z.number().int(),
   force: z.boolean().default(false),
+  scope: z.enum(['estate', 'page', 'pane']).default('estate'),
+  page: z.string().min(1).optional(),
+  pane: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if (value.scope === 'estate' && (value.page !== undefined || value.pane !== undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'estate scope accepts no page or pane target' });
+  }
+  if (value.scope === 'page' && (value.page === undefined || value.pane !== undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'page scope requires page and accepts no pane target' });
+  }
+  if (value.scope === 'pane' && (value.pane === undefined || value.page !== undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'pane scope requires pane and accepts no page target' });
+  }
 });
 export type EstateRotateRequest = z.infer<typeof EstateRotateRequestSchema>;
 
@@ -498,6 +523,8 @@ export const EstateRotateResponseSchema = z.object({
   rotation_id: z.string().nullable(),
   accepted: z.boolean(),
   force: z.boolean(),
+  scope: z.enum(['estate', 'page', 'pane']),
+  seats: z.array(z.string()),
   bound_seats: z.array(z.string()),
   foreground_workloads: z.array(z.object({ seat_id: z.string(), command: z.string() })),
   reason: z.string().nullable(),

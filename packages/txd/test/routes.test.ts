@@ -91,6 +91,22 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
   }
 });
 
+test('POST /ctl/estate/rotate resets a page in-process instead of killing the estate server', async () => {
+  const tmux = new FakeTmux();
+  const d = new Daemon(new MemoryEventStore(), tmux);
+  await d.constructEstate();
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/rotate`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: 6, force: true, scope: 'page', page: 'somnium' }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ accepted: true, scope: 'page', seats: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'] });
+    expect(tmux.killed).toBe(false);
+  } finally { srv.stop(true); }
+});
+
 test('comm identity ambiguity is a loud typed refusal with zero communication effects', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
