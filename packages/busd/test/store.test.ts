@@ -150,6 +150,16 @@ describe.skipIf(!endpoint)('PostgresBusStore (live postgres 18)', () => {
     expect(all[0]!.recorded_at).toBe('2026-07-22T00:00:00.000Z');
   });
 
+  test('jsonb columns hold OBJECTS, not double-encoded JSON strings — the ruled psql surface works', async () => {
+    // Regression pin: `JSON.stringify(x)::jsonb` binds an already-encoded
+    // parameter and stores jsonb *strings*, killing payload->>'k' in psql.
+    const rows = (await raw`
+      SELECT jsonb_typeof(payload) AS pay, jsonb_typeof(provenance) AS prov,
+             payload->>'session_id' AS sid, provenance->>'ingress' AS ingress
+      FROM bus.events ORDER BY seq LIMIT 1`) as { pay: string; prov: string; sid: string | null; ingress: string | null }[];
+    expect(rows[0]).toEqual({ pay: 'object', prov: 'object', sid: 's1', ingress: 'hooks' });
+  });
+
   test('LIKE parity: Postgres and the Memory mirror select the same events for the same pattern', async () => {
     for (const pattern of ['hook.%', 'probe.%', '%', 'hook.stop', 'hook.st_p']) {
       const pg = (await store.readSince(0, pattern, 100)).map((e) => e.event_type);
