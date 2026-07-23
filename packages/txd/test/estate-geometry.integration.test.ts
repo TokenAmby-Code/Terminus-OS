@@ -93,6 +93,8 @@ describe('disposable canonical estate geometry', () => {
     await new RealTmux(socket).ensureEstate();
 
     const paths = await tmux(socket, 'list-panes', '-a', '-F', '#{pane_current_path}');
-    expect(new Set(paths.split('\n').filter(Boolean))).toEqual(new Set([process.env.HOME]));
+    const home = process.env.HOME;
+    if (!home) throw new Error('HOME must be set for the pane cwd behavioral pin');
+    expect(new Set(paths.split('\n').filter(Boolean))).toEqual(new Set([home]));
   });
 });
