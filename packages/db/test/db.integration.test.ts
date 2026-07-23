@@ -60,14 +60,34 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
 
   test("the migrations apply and land their ledger rows", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
-    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3]);
+    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3, 4]);
     expect(report.alreadyApplied).toBe(0);
   });
 
   test("re-running the runner is a no-op (idempotence)", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
     expect(report.applied).toEqual([]);
-    expect(report.alreadyApplied).toBe(3);
+    expect(report.alreadyApplied).toBe(4);
+  });
+
+  test("concurrent boot: two connections migrate simultaneously without racing the ledger", async () => {
+    // txd and busd both run runMigrations at boot. The advisory-lock guard
+    // serializes them: exactly one applies each pending id, the other re-plans
+    // under the lock to a no-op — never a duplicate ledger insert.
+    await sql`drop table if exists schema_migrations`;
+    const sql2 = await connectDb(endpoint!);
+    try {
+      const [a, b] = await Promise.all([
+        runMigrations(sql, MIGRATIONS_DIR),
+        runMigrations(sql2, MIGRATIONS_DIR),
+      ]);
+      expect(a.applied.length + b.applied.length).toBe(4);
+      const LedgerRow = z.object({ id: z.number().int() });
+      const rows = await typedRows(sql, LedgerRow)`select id from schema_migrations order by id`;
+      expect(rows.map(r => r.id)).toEqual([1, 2, 3, 4]);
+    } finally {
+      await sql2.close();
+    }
   });
 
   test("checkHealth reports up on server_version 18.x", async () => {
@@ -87,6 +107,7 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
       { id: 1, name: "schema_migrations" },
       { id: 2, name: "txd_events" },
       { id: 3, name: "desktop_telemetry" },
+      { id: 4, name: "bus" },
     ]);
 
     const WrongRow = z.object({ id: z.string() });

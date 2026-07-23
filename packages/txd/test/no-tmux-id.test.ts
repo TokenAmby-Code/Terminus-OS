@@ -32,12 +32,15 @@ test('assertNoTmuxId throws loud on a leak', async () => {
 });
 
 test('mutation ingress recursively rejects raw tmux ids before tmux or persistence', async () => {
-  const paths = ['/agents/launch', '/agents/send', '/agents/close', '/ingress/hooks/stop', '/agents/subscribe'];
+  // The bus door is deliberately absent here: bus deliveries are not agent
+  // mutations, and its membrane semantics (ack-not-consume on a leaking
+  // consumed payload, tolerate %N text in unconsumed payloads) are pinned in
+  // ingress-bus.test.ts.
+  const paths = ['/agents/launch', '/agents/send', '/agents/close', '/agents/subscribe'];
   const valid = [
     { seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' },
     { target: 'palace:W', text: 'hello', schema_version: 6 },
     { target: 'palace:W', schema_version: 6 },
-    { instance_id: 'i1', schema_version: 6 },
     { instance_id: 'i1', schema_version: 6, action: 'close' },
   ];
   const attacks = [
@@ -104,7 +107,7 @@ test('handler errors are sanitized before structured logging', async () => {
   }
 });
 
-test('no tmux id appears in any /agents/*, /ingress/hooks/stop, /tmux/read, or /ctl response', async () => {
+test('no tmux id appears in any /agents/*, /ingress/bus, /tmux/read, or /ctl response', async () => {
   const d = new Daemon(new MemoryEventStore(), new FakeTmux());
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
   try {
@@ -112,7 +115,16 @@ test('no tmux id appears in any /agents/*, /ingress/hooks/stop, /tmux/read, or /
     const bodies: unknown[] = [];
     bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' })).json());
     bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 6 })).json());
-    bodies.push(await (await post('/ingress/hooks/stop', { instance_id: 'i1', schema_version: 6 })).json());
+    bodies.push(await (await post('/ingress/bus', {
+      schema_version: 1,
+      subscription: 'txd',
+      event: {
+        seq: 1, event_type: 'hook.stop', source: 'claude',
+        payload: { instance_id: 'i1', schema_version: 6 },
+        provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'test' },
+        occurred_at: '2026-07-22T00:00:00.000Z', recorded_at: '2026-07-22T00:00:00.100Z',
+      },
+    })).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`)).json());
     bodies.push(await (await post('/ctl/reconcile', {})).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/ctl/health`)).json());

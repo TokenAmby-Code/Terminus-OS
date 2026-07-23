@@ -12,7 +12,7 @@ function setup() {
 
 const FULL = { schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
 
-// Rung 3 PR-B: the generic stop-hook subscription system composes with /ingress/hooks/stop to
+// Rung 3 PR-B: the generic stop-hook subscription system composes with the bus-delivered stop hook to
 // give `final message → auto-close on next stop-hook`. No bespoke latch.
 
 test('subscribe records reg.stop_subscribed for a bound instance', async () => {

@@ -17,7 +17,8 @@
     "./machine-config": "./src/machine-config.ts",
     "./txd": "./src/txd.ts",
     "./hooks": "./src/hooks.ts",
-    "./desktop-telemetry": "./src/desktop-telemetry.ts"
+    "./desktop-telemetry": "./src/desktop-telemetry.ts",
+    "./bus": "./src/bus.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"

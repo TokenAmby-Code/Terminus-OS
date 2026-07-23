@@ -1,0 +1,34 @@
+# busd — Terminus-OS central event bus (journal + subscription fan-out).
+#
+# User-scoped unit (the ruled fleet-wide pattern — root-free CD). Installed by
+# the Token-Fleet apply-busd leg to ~/.config/systemd/user/; lingering is
+# enabled on the boxes.
+#
+# busd boots by connecting to the native Postgres 18 cluster over its peer-auth
+# unix socket and fails loud if it is unreachable (no fallback by ruling). User
+# units cannot order After= the SYSTEM postgresql.service, so ExecStartPre
+# waits on the socket instead — bounded by TimeoutStartSec, then on-failure
+# restart takes over.
+
+[Unit]
+Description=Terminus-OS busd central event bus (journal + subscription fan-out)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The k12 box layout is ~/runtimes/Terminus-OS/{live,battlefield,config,
+# Terminus-OS.git} — the checkout lives under live/.
+WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/busd
+Environment=BUSD_BIND=127.0.0.1
+Environment=IMPERIUM_MACHINE=k12-personal
+ExecStartPre=/bin/sh -c 'until test -S /var/run/postgresql/.s.PGSQL.5432; do sleep 2; done'
+TimeoutStartSec=180
+# Absolute bun path (pinned 1.3.14 on the fleet).
+ExecStart=%h/.bun/bin/bun src/daemon.ts
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

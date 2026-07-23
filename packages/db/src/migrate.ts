@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { SQL } from "bun";
+import type { SQL } from "bun";
 
 const MIGRATION_FILENAME = /^(\d{4})_([a-z0-9_]+)\.sql$/;
 
@@ -65,35 +65,42 @@ export function planMigrations(filenames: string[], appliedIds: number[]): Migra
   return pending;
 }
 
+// One fixed cluster-wide advisory key for the whole migrations home: every
+// daemon that runs `runMigrations` at boot (txd, busd, …) serializes on it.
+// 0x7465726d = ASCII "term" — arbitrary but fixed and greppable.
+export const MIGRATION_LOCK_KEY = 0x7465726d;
+
 async function appliedMigrationIds(sql: SQL): Promise<number[]> {
-  try {
-    const rows = await sql`select id from schema_migrations order by id`;
-    return (rows as { id: number }[]).map(r => r.id);
-  } catch (err) {
-    // 42P01 undefined_table: pristine database — migration 0001 creates the ledger.
-    // Bun 1.3.x surfaces the SQLSTATE on `errno` (`code` holds ERR_POSTGRES_SERVER_ERROR).
-    if (err instanceof SQL.PostgresError && err.errno === "42P01") return [];
-    throw err;
-  }
+  // Existence via to_regclass, NOT by catching 42P01: an error would abort the
+  // enclosing lock-holding transaction, and a pristine database (migration 0001
+  // creates the ledger) is a normal state, not an exception.
+  const probe = (await sql`select to_regclass('public.schema_migrations') is not null as found`) as {
+    found: boolean;
+  }[];
+  if (!probe[0]!.found) return [];
+  const rows = await sql`select id from schema_migrations order by id`;
+  return (rows as { id: number }[]).map(r => r.id);
 }
 
 /**
- * Apply every pending migration, each inside its own transaction alongside its
- * schema_migrations row. Failure throws and rolls back the failing migration;
- * previously applied ones stay applied (forward-only, no down migrations).
+ * Apply every pending migration inside ONE transaction that holds the fixed
+ * migration advisory lock (pg_advisory_xact_lock). Multiple daemons running
+ * this concurrently at boot serialize: the first applies the pending set, the
+ * rest re-plan under the lock and converge to a no-op — the concurrent-boot
+ * ledger race is unrepresentable. Failure throws and rolls the whole pending
+ * set back (forward-only, no down migrations).
  */
 export async function runMigrations(sql: SQL, migrationsDir: string): Promise<MigrationReport> {
   const filenames = await readdir(migrationsDir);
-  const appliedIds = await appliedMigrationIds(sql);
-  const pending = planMigrations(filenames, appliedIds);
-
-  for (const migration of pending) {
-    const text = await Bun.file(join(migrationsDir, migration.filename)).text();
-    await sql.begin(async tx => {
+  return (await sql.begin(async tx => {
+    await tx`select pg_advisory_xact_lock(${MIGRATION_LOCK_KEY})`;
+    const appliedIds = await appliedMigrationIds(tx);
+    const pending = planMigrations(filenames, appliedIds);
+    for (const migration of pending) {
+      const text = await Bun.file(join(migrationsDir, migration.filename)).text();
       await tx.unsafe(text);
       await tx`insert into schema_migrations (id, name) values (${migration.id}, ${migration.name})`;
-    });
-  }
-
-  return { applied: pending, alreadyApplied: appliedIds.length };
+    }
+    return { applied: pending, alreadyApplied: appliedIds.length };
+  })) as MigrationReport;
 }

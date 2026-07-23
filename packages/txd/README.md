@@ -45,16 +45,18 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/send`          | Send chokepoint (enqueue-by-default)             |
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
 | POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
-| POST   | `/ingress/hooks/stop`   | Stop-hook door: record / dedupe / refuse-ghost; fires auto-close |
-| POST   | `/ingress/hooks/<type>` | Every other pinned vendor hook type → 410 Gone (side-effect-free) |
+| POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost; fires auto-close) and `hook.user_prompt_submit`; acks everything else |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, panes, occupancy incl. bindings |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
-- `/ingress/hooks/*` is the **cross-service hook invariant**: a service that
-  accepts hooks must expose an endpoint for EVERY vendor hook type; unused ones
-  quick-return 410. The proxy broadcasts every inbound hook to all hook
-  consumers and ignores 410s. The hook-type enumeration is pinned in
+- `/ingress/bus` is txd's **bus subscription door** (central-bus ruling): hook
+  fan-in terminates at busd (`packages/busd`), which journals every vendor hook
+  type as a `hook.<type>` bus event; txd consumes its two hook types as a
+  normal bus subscriber (subscription `txd`, pattern `hook.%`) and 2xx-acks
+  every other delivered event (ack ≠ consume — bus delivery is head-of-line
+  per subscription). The direct `/ingress/hooks/*` surface and its 410 tail
+  are REMOVED, no crumbs. The hook-type enumeration stays pinned in
   `@terminus-os/contracts/hooks` from the actual claude-code and codex hook
   contracts.
 - `/tmux/read/*` is txd's ONLY public read surface — side-effect-free by

@@ -2,11 +2,13 @@
 // grouped by caller/trust plane:
 //
 //   /ctl/*            daemon ops (health, reconcile)
-//   /ingress/hooks/*  the cross-service hook invariant: an endpoint for EVERY
-//                     vendor hook type; txd consumes `stop`, everything else
-//                     quick-returns 410 Gone (side-effect-free by construction).
-//                     The per-box proxy broadcasts every hook to all consumers
-//                     and ignores 410s — the invariant makes that safe.
+//   /ingress/bus      the central-bus delivery door (central-bus ruling,
+//                     supersedes the direct /ingress/hooks/* surface — REMOVED,
+//                     no crumbs). Hook fan-in terminates at busd; txd consumes
+//                     `hook.stop` / `hook.user_prompt_submit` as a normal bus
+//                     subscriber and MUST 2xx-ack every other delivered event
+//                     (ack ≠ consume) — bus delivery is head-of-line per
+//                     subscription, so a non-2xx would wedge txd's own lane.
 //   /agents/*         the deliberate-action plane: every route directly under
 //                     /agents/ is a deliberate action, one-for-one.
 //   /tmux/read/*      txd's ONLY public read surface: estate observation views
@@ -27,19 +29,18 @@
 // header as the transport receipt woven into event provenance.
 
 import {
+  BUS_SCHEMA_VERSION,
+  BusDeliverySchema,
   CloseRequestSchema,
   CommHookSchema,
   CommRequestSchema,
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
-  HOOK_TYPES,
   LaunchRequestSchema,
   SendRequestSchema,
   StopRequestSchema,
   SubscribeRequestSchema,
   type EstateReadResponse,
-  type HookNotConsumed,
-  type HookType,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
 import { assertNoTmuxId, findTmuxIdDeep, sanitizeTmuxIds } from './ids.ts';
@@ -54,9 +55,9 @@ export type Route = {
   handler: (req: Request, params: Record<string, string>) => Promise<Response>;
 };
 
-// The one hook type txd consumes: the stop-hook door. Every other pinned vendor
-// hook type gets a 410 quick-return endpoint below.
-export const CONSUMED_HOOK_TYPES: readonly HookType[] = ['stop', 'user_prompt_submit'];
+// The bus event types txd consumes off its `hook.%` subscription. Everything
+// else delivered on the lane is acked untouched (ack ≠ consume).
+export const CONSUMED_BUS_EVENT_TYPES = ['hook.stop', 'hook.user_prompt_submit'] as const;
 
 function json(body: unknown, status = 200): Response {
   // Canonical-id membrane enforcement: nothing crosses upward carrying a raw
@@ -109,7 +110,7 @@ async function rejectRawMutation(req: Request, error: string): Promise<Response 
 }
 
 // Ordered route table — the ordering is data so committed route tests can
-// assert it. The consumed hook door is registered before the 410 tail.
+// assert it.
 export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): Route[] {
   const routes: Route[] = [
     // ── /ctl/* — daemon ops ─────────────────────────────────────────────────
@@ -231,31 +232,67 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         return json(res, res.subscribed ? 200 : 409);
       },
     },
-    // ── /ingress/hooks/* — the hook door + the 410 invariant tail ───────────
+    // ── /ingress/bus — the central-bus delivery door ────────────────────────
+    // busd POSTs one full journal row per delivery (BusDeliverySchema) and
+    // retries the SAME event until 2xx — head-of-line, never a skip. So the
+    // honest outcomes here are: 422 ONLY for envelope/contract skew (which
+    // SHOULD block loudly), and 2xx for everything else — with `consumed`
+    // reporting whether txd actually ingested the event. A refused stop
+    // (ghost) or malformed hook payload is acked-not-consumed: exactly the
+    // no-footprint outcome of the old direct door, without wedging the lane.
+    //
+    // NOTE: no whole-body raw-tmux-id pre-scan (unlike parseMutation): the
+    // lane carries all hook.% payloads, and unconsumed ones may legitimately
+    // contain %N-shaped text (tool output). The membrane applies to what txd
+    // actually ingests — the unwrapped consumed payloads — below.
     {
       method: 'POST',
-      match: exact('/ingress/hooks/stop'),
-      label: 'POST /ingress/hooks/stop',
+      match: exact('/ingress/bus'),
+      label: 'POST /ingress/bus',
       handler: async (req) => {
-        const parsed = await parseMutation(req, StopRequestSchema, 'invalid_stop_request');
-        if (parsed instanceof Response) return parsed;
-        const res = await daemon.stop(parsed, receipt(req));
-        if (!('refused' in res) && parsed.content !== undefined) {
-          await daemon.commStop(parsed.instance_id, parsed.content, parsed.stop_event_id ?? null, receipt(req));
+        const parsed = BusDeliverySchema.safeParse(await readJson(req));
+        if (!parsed.success) {
+          return json({ ok: false, error: 'invalid_bus_delivery', field: issuePath(parsed.error.issues[0]?.path ?? []) }, 422);
         }
-        // Ghost/schema refusal fails loud (nothing recorded); recorded/deduped are 200.
-        if ('refused' in res) return json(res, 422);
-        return json(res, 200);
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/ingress/hooks/user_prompt_submit'),
-      label: 'POST /ingress/hooks/user_prompt_submit',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, CommHookSchema, 'invalid_user_prompt_submit_request');
-        if (parsed instanceof Response) return parsed;
-        return json(await daemon.promptSubmitted(parsed, receipt(req)));
+        if (parsed.data.schema_version !== BUS_SCHEMA_VERSION) {
+          return json({ ok: false, error: 'invalid_bus_delivery', field: '$.schema_version' }, 422);
+        }
+        const { event } = parsed.data;
+        // The transport receipt now points into the bus journal row that
+        // delivered this event — attributable straight back to bus.events.seq.
+        const busReceipt = `bus:${event.seq}`;
+        const ack = (consumed: boolean, reason: string | null, extra: Record<string, unknown> = {}) =>
+          json({ ok: true, seq: event.seq, consumed, reason, ...extra });
+        if (event.event_type === 'hook.stop') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const stop = StopRequestSchema.safeParse(event.payload);
+          if (!stop.success) return ack(false, 'invalid_stop_payload');
+          const res = await daemon.stop(stop.data, busReceipt);
+          // Ghost/schema refusal records nothing (the old door's loud refusal),
+          // but the DELIVERY is acked — a ghost must not wedge the lane.
+          if ('refused' in res) return ack(false, res.reason);
+          if (stop.data.content !== undefined) {
+            await daemon.commStop(stop.data.instance_id, stop.data.content, stop.data.stop_event_id ?? null, busReceipt);
+          }
+          return ack(true, null, { receipt: res });
+        }
+        if (event.event_type === 'hook.user_prompt_submit') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const hook = CommHookSchema.safeParse(event.payload);
+          if (!hook.success) return ack(false, 'invalid_user_prompt_submit_payload');
+          try {
+            return ack(true, null, { receipt: await daemon.promptSubmitted(hook.data, busReceipt) });
+          } catch (error) {
+            // Deterministic domain refusal — a natural prompt-submit with no
+            // comm-message context — must not wedge the lane. Anything else
+            // (infra failure) propagates to 500 so busd retries it.
+            if (error instanceof Error && error.message === 'message_target_mismatch') {
+              return ack(false, 'message_target_mismatch');
+            }
+            throw error;
+          }
+        }
+        return ack(false, 'not_consumed');
       },
     },
     // ── /tmux/read/* — the only public read surface ─────────────────────────
@@ -269,24 +306,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       },
     },
   ];
-
-  // Every pinned vendor hook type txd does NOT consume quick-returns 410 Gone.
-  // Generated from the contracts enumeration so a vendor re-pin propagates by
-  // construction — no hand-maintained tail to drift.
-  for (const hook of HOOK_TYPES) {
-    if (CONSUMED_HOOK_TYPES.includes(hook)) continue;
-    routes.push({
-      method: 'POST',
-      match: exact(`/ingress/hooks/${hook}`),
-      label: `POST /ingress/hooks/${hook}`,
-      handler: async (req) => {
-        const rejected = await rejectRawMutation(req, `invalid_${hook}_request`);
-        if (rejected) return rejected;
-        const body: HookNotConsumed = { ok: false, error: 'hook_not_consumed', hook_type: hook };
-        return json(body, 410);
-      },
-    });
-  }
 
   return routes;
 }
