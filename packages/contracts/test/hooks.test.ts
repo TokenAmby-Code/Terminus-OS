@@ -3,7 +3,6 @@ import {
   CLAUDE_HOOK_EVENTS,
   CODEX_HOOK_EVENTS,
   HOOK_TYPES,
-  HookNotConsumedSchema,
   HookTypeSchema,
 } from "../src/hooks.ts";
 
@@ -32,18 +31,10 @@ describe("vendor hook-type enumeration", () => {
     for (const t of HOOK_TYPES) expect(t).toMatch(/^[a-z][a-z0-9_]*$/);
   });
 
-  test("stop — the one hook txd consumes — is in the enumeration", () => {
+  test("the hooks txd consumes off the bus are in the enumeration", () => {
     expect(HOOK_TYPES).toContain("stop");
+    expect(HOOK_TYPES).toContain("user_prompt_submit");
     expect(HookTypeSchema.parse("stop")).toBe("stop");
     expect(() => HookTypeSchema.parse("invented_hook")).toThrow();
-  });
-
-  test("the 410 quick-return body is exact", () => {
-    expect(
-      HookNotConsumedSchema.parse({ ok: false, error: "hook_not_consumed", hook_type: "pre_compact" }),
-    ).toEqual({ ok: false, error: "hook_not_consumed", hook_type: "pre_compact" });
-    expect(() =>
-      HookNotConsumedSchema.parse({ ok: false, error: "hook_not_consumed", hook_type: "stop_hook" }),
-    ).toThrow();
   });
 });

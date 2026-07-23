@@ -9,6 +9,18 @@
         "typescript": "^5.7.0",
       },
     },
+    "packages/busd": {
+      "name": "@terminus-os/busd",
+      "version": "0.1.0",
+      "dependencies": {
+        "@terminus-os/contracts": "workspace:*",
+        "@terminus-os/db": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "^1.3.14",
+        "typescript": "^5.8.0",
+      },
+    },
     "packages/contracts": {
       "name": "@terminus-os/contracts",
       "version": "0.0.0",
@@ -59,6 +71,8 @@
     },
   },
   "packages": {
+    "@terminus-os/busd": ["@terminus-os/busd@workspace:packages/busd"],
+
     "@terminus-os/contracts": ["@terminus-os/contracts@workspace:packages/contracts"],
 
     "@terminus-os/db": ["@terminus-os/db@workspace:packages/db"],

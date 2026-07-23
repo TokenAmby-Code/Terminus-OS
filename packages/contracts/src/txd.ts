@@ -419,8 +419,8 @@ export const StopReceiptSchema = z.object({
 export type StopReceipt = z.infer<typeof StopReceiptSchema>;
 
 // ── Subscribe (rung 3 PR-B) — the generic stop-hook subscription system ──────
-// One day-one action: `close`. Composing `/agents/subscribe` (mark) with `/ingress/hooks/stop` (the
-// hook's door) yields `final message → auto-close on next stop-hook` — no bespoke
+// One day-one action: `close`. Composing `/agents/subscribe` (mark) with the
+// bus-delivered stop hook (`/ingress/bus`, `hook.stop`) yields `final message → auto-close on next stop-hook` — no bespoke
 // latch, no special reflexive fold. BOUND-KEYED by construction: a subscription
 // can only be created for a currently-bound instance, so an orphan/never-bound id
 // can never hold one — the 77f7cfb4 re-firing-subscription class is structurally

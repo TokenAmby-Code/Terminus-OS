@@ -24,6 +24,10 @@ packages/
     src/
     systemd/
     test/
+  busd/                central event bus: append-only journal + subscription HTTP fan-out (transactional outbox)
+    src/
+    systemd/
+    test/
 ```
 
 The foundation is registration / bind / ledger. The `tmuxctld` op envelopes

@@ -687,7 +687,8 @@ export class Daemon {
   // Records a close-on-next-stop subscription. BOUND-KEYED: refuses unless the
   // instance is currently bound, so an orphan/never-bound id can never hold a
   // subscription (the 77f7cfb4 re-firing class is structurally dead). Composing
-  // this with /ingress/hooks/stop yields `final message → auto-close on next stop-hook`.
+  // this with the bus-delivered stop hook (/ingress/bus, hook.stop) yields
+  // `final message → auto-close on next stop-hook`.
   subscribe(req: SubscribeRequest, transportReceipt: string | null = null): Promise<SubscribeResponse> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {
@@ -721,7 +722,7 @@ export class Daemon {
     });
   }
 
-  // ── /ingress/hooks/stop — the stop-hook's door (rung 3) ───────────────────────────────────
+  // ── stop ingestion — the stop-hook's door (rung 3; delivered via /ingress/bus) ─────────────
   // Three honest outcomes, no blind swallow: record a fresh stop (bound + live),
   // dedupe a repeat/late stop (act.receipt_deduped), or REFUSE a ghost — a stop for
   // an id that never walked through /agents/launch. The ghost is refused at admission, so

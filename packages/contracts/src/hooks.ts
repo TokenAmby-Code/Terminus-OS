@@ -1,11 +1,14 @@
 // Vendor hook-type enumeration (`@terminus-os/contracts`).
 //
-// RULED cross-service architecture invariant ([[txd-extraction-spec]] §6): any
-// service that accepts hooks accepts them through `/ingress/hooks/*`, and any
-// service exposing that path MUST have an endpoint for every single hook type —
-// unused ones quick-return 410 Gone. The per-box proxy broadcasts every inbound
-// hook to ALL declared hook consumers and ignores 410s (§3.6); the 410
-// invariant is what makes unconditional broadcast safe.
+// RULED cross-service architecture invariant (central-bus ruling, supersedes
+// [[txd-extraction-spec]] §6's per-consumer fan-out): hook fan-in TERMINATES at
+// busd. The per-box proxy broadcasts every inbound `/ingress/hooks/*` POST to
+// its declared hook consumers — on the ruled topology exactly one, busd — and
+// busd journals EVERY pinned vendor hook type as a `hook.<type>` bus event
+// (see bus.ts). No hook type evaporates: there is no 410 tail anywhere, so the
+// old HookNotConsumed vocabulary is dead. Services that care about a hook
+// (txd: stop / user_prompt_submit) consume it as a normal bus subscriber and
+// MUST 2xx-ack delivered events they do not consume (ack ≠ consume).
 //
 // The enumeration below is PINNED from the actual vendor hook contracts — not
 // invented. Sources (verbatim enum extractions from the shipped binaries):
@@ -23,8 +26,8 @@
 //
 // Route ids are the snake_case forms (codex's own wire encoding; lowercase URL
 // segments). The union is therefore the 30 claude events. Re-pin this list when
-// a vendor contract adds an event: additions here are additive (new 410
-// endpoints), never breaking.
+// a vendor contract adds an event: additions here are additive (a new busd
+// shim endpoint + `hook.<type>` journal id), never breaking.
 
 import { z } from "zod";
 
@@ -113,12 +116,3 @@ export const HOOK_TYPES = [
 ] as const;
 export type HookType = (typeof HOOK_TYPES)[number];
 export const HookTypeSchema = z.enum(HOOK_TYPES);
-
-// The exact quick-return body for a hook type a service does not consume.
-// Status is 410 Gone; the handler MUST be side-effect-free by construction.
-export const HookNotConsumedSchema = z.object({
-  ok: z.literal(false),
-  error: z.literal("hook_not_consumed"),
-  hook_type: HookTypeSchema,
-});
-export type HookNotConsumed = z.infer<typeof HookNotConsumedSchema>;

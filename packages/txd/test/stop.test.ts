@@ -12,7 +12,7 @@ function setup() {
 
 const FULL = { schema_version: 6, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
 
-// Rung 3: /ingress/hooks/stop is the stop-hook's door. Three honest outcomes, no blind swallow.
+// Rung 3: the stop-hook's door (delivered via /ingress/bus, hook.stop). Three honest outcomes, no blind swallow.
 
 test('fresh stop for a bound live instance is recorded → activity stopped', async () => {
   const { store, d } = setup();
