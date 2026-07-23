@@ -98,10 +98,16 @@ export class PostgresBusStore implements BusStore {
   async append(input: BusEventInput): Promise<BusEventRecord> {
     const parsed = BusEventInputSchema.parse(input);
     const recorded_at = this.now();
+    // Objects are passed DIRECTLY so Bun.SQL binds real jsonb objects. The
+    // txd-store idiom (`JSON.stringify(x)::jsonb`) double-encodes: the cast
+    // receives an already-JSON-encoded parameter and stores a jsonb *string*,
+    // which poisons the ruled psql surface (payload->>'k' returns nothing).
+    // The read boundary (rowToRecord/asJson) tolerates both shapes, so the
+    // handful of pre-fix string rows in the live journal replay unchanged.
     const rows = (await this.sql`
       INSERT INTO bus.events (event_type, source, payload, provenance, occurred_at, recorded_at)
       VALUES (${parsed.event_type}, ${parsed.source},
-              ${JSON.stringify(parsed.payload)}::jsonb, ${JSON.stringify(parsed.provenance)}::jsonb,
+              ${parsed.payload}, ${parsed.provenance},
               ${parsed.occurred_at}, ${recorded_at})
       RETURNING seq`) as { seq: number | bigint | string }[];
     return { ...parsed, seq: Number(rows[0]!.seq), recorded_at };
