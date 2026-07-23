@@ -43,9 +43,14 @@ export class ProcessEstateRotationBarrier implements EstateRotationBarrier {
 
   async complete(): Promise<void> {
     if (!(await Bun.file(this.signalFifo).exists())) return;
-    const release = Bun.spawn(['/bin/sh', '-c', 'printf "complete\\n" > "$1"', 'rotation-release', this.signalFifo]);
-    if (await release.exited !== 0) throw new Error('failed to release estate rotation barrier');
+    const signal = Bun.spawn(['/bin/sh', '-c', 'printf "complete\\n" > "$1"', 'rotation-release', this.signalFifo]);
+    if (await signal.exited !== 0) throw new Error('failed to signal estate rotation barrier release');
     await unlink(this.signalFifo);
+    // The FIFO writer completing means the holder received the release, not
+    // that its process has already exited and dropped flock. Block in the
+    // kernel until that exact lock handoff completes before reporting success.
+    const release = Bun.spawn(['/usr/bin/flock', this.lockFile, 'true']);
+    if (await release.exited !== 0) throw new Error('estate rotation barrier lock release failed');
   }
 
   async abort(): Promise<void> {
