@@ -16,9 +16,23 @@ describe('tmux/tx.conf', () => {
     expect(conf).toContain('bind r source-file ~/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf');
   });
 
-  test('contains native navigation and copy-mode traps', () => {
+  test('contains native pane navigation, expansion, and copy-mode traps', () => {
+    const paneUx = conf.slice(conf.indexOf('# Pane navigation and expansion.'), conf.indexOf('bind -r H'));
+
+    expect(paneUx).toContain('bind e resize-pane -Z');
+    for (const [key, direction] of [['h', 'L'], ['j', 'D'], ['k', 'U'], ['l', 'R']]) {
+      expect(paneUx).toContain(`bind ${key} {`);
+      expect(paneUx).toContain(`select-pane -${direction}`);
+      expect(paneUx).toContain(`bind -T pane-select ${key} {`);
+    }
+    expect(paneUx).toContain('switch-client -T pane-select');
+    expect(paneUx).toContain('bind -T pane-select Enter resize-pane -Z');
+    expect(paneUx).toContain('bind -T pane-select Escape display-message "pane-select cancelled"');
+    expect(paneUx).toContain('bind -T pane-select q display-message "pane-select cancelled"');
+    expect(paneUx).not.toContain('run-shell');
+    expect(paneUx).not.toContain('tmuxctld');
+
     for (const binding of [
-      'bind h select-pane -L', 'bind j select-pane -D', 'bind k select-pane -U', 'bind l select-pane -R',
       'bind -r H resize-pane -L 5', 'bind -r J resize-pane -D 3',
       'bind -r K resize-pane -U 3', 'bind -r L resize-pane -R 5',
       'bind -n C-k copy-mode -u', 'unbind -T copy-mode g', 'unbind -T copy-mode f',
