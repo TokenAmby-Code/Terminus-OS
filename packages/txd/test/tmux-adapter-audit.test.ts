@@ -36,3 +36,18 @@ test('adapter failures expose only a stderr category', async () => {
   await expect(tmux.ensureEstate()).rejects.toThrow('tmux server is not externally owned');
   await expect(tmux.ensureEstate()).rejects.not.toThrow(/%91|\$2|permission denied/);
 });
+
+test('scoped reset clears history, replaces the process, and verifies the canonical pane tag', async () => {
+  const operations: string[] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      operations.push(args[0]!);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
+      if (args[0] === 'display-message') return { code: 0, stdout: 'palace:N\n', stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    audit: () => {},
+  });
+  expect(await tmux.resetSeat('palace:N')).toBe(true);
+  expect(operations).toEqual(['list-panes', 'clear-history', 'respawn-pane', 'display-message']);
+});

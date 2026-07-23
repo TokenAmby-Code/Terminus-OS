@@ -50,6 +50,8 @@ export interface TmuxControlPlane {
    * (caller must NOT attest process_reaped/seat_cleared on a failed reap).
    */
   reapSeat(seatId: string): Promise<boolean>;
+  /** Clear pane history, replace its process, and re-verify its canonical tag. */
+  resetSeat(seatId: string): Promise<boolean>;
   /**
    * Canonical ids of seats an attached client is actively on within windowMs —
    * a point-in-time READ of the server-maintained client_activity + active
@@ -345,6 +347,15 @@ export class RealTmux implements TmuxControlPlane {
     return r.code === 0;
   }
 
+  async resetSeat(seatId: string): Promise<boolean> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return false;
+    if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return false;
+    if ((await this.command('reset_seat_process', seatId, ['respawn-pane', '-k', '-t', paneId])).code !== 0) return false;
+    const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
+    return verified.code === 0 && verified.stdout.trim() === seatId;
+  }
+
   async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
     // Active pane (canonical) per session.
     const panes = await this.command('observe_active_seats', 'estate', [
@@ -417,6 +428,7 @@ export class FakeTmux implements TmuxControlPlane {
   private present = new Map<string, number>(); // seat -> last activity epoch ms
   private failCreate = new Set<string>(); // seats whose createSeat is forced to throw
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
+  private resets: string[] = [];
   reachableFlag = true;
   killed = false;
   private commands = new Map<string, string>();
@@ -502,6 +514,15 @@ export class FakeTmux implements TmuxControlPlane {
     s.pane = 'live';
     return true;
   }
+  async resetSeat(seatId: string): Promise<boolean> {
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead') return false;
+    s.pane = 'live';
+    this.commands.delete(seatId);
+    this.resets.push(seatId);
+    return true;
+  }
+  resetSeats(): string[] { return [...this.resets]; }
   /** Test control: force reapSeat(seatId) to fail (simulates a wedged process). */
   failReapSeat(seatId: string): void {
     this.failReap.add(seatId);

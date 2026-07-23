@@ -167,6 +167,10 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       handler: async (req) => {
         const parsed = await parseMutation(req, EstateRotateRequestSchema, 'invalid_estate_rotate_request');
         if (parsed instanceof Response) return parsed;
+        if (parsed.scope !== 'estate') {
+          const result = await daemon.resetEstateScope(parsed, receipt(req));
+          return json(result, result.accepted ? 200 : 409);
+        }
         const result = await daemon.requestEstateRotation(parsed, receipt(req));
         if (!result.accepted) return json(result, 409);
         const encoded = new TextEncoder().encode(JSON.stringify(result));
