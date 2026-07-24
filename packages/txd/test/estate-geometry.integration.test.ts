@@ -85,4 +85,16 @@ describe('disposable canonical estate geometry', () => {
       expectRatio(somnium['somnium:SE']!.height, height, 0.42, 0.51);
     });
   }
+
+  test('starts every canonical estate pane in the user home directory', async () => {
+    const socket = `txd-cwd-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    await new RealTmux(socket).ensureEstate();
+
+    const paths = await tmux(socket, 'list-panes', '-a', '-F', '#{pane_current_path}');
+    const home = process.env.HOME;
+    if (!home) throw new Error('HOME must be set for the pane cwd behavioral pin');
+    expect(new Set(paths.split('\n').filter(Boolean))).toEqual(new Set([home]));
+  });
 });

@@ -194,6 +194,16 @@ export class RealTmux implements TmuxControlPlane {
     return result.stdout.trim();
   }
 
+  private homeDirectory(): string {
+    const home = process.env.HOME;
+    if (!home) throw new Error('txd tmux requires HOME to create panes');
+    return home;
+  }
+
+  private async estateChecked(args: string[], operation: string, target = 'estate'): Promise<string> {
+    return this.checked([...args, '-c', this.homeDirectory()], operation, target);
+  }
+
   private async estateRows(): Promise<Array<{ session: string; window: string; seat: string }>> {
     const result = await this.command('observe_estate', 'estate', [
       'list-panes', '-a', '-F', `#{session_name}\t#{window_name}\t#{${CANON_OPT}}`,
@@ -229,59 +239,59 @@ export class RealTmux implements TmuxControlPlane {
 
     let sessionCreated = false;
     try {
-      const reservistsW = await this.checked(
+      const reservistsW = await this.estateChecked(
         ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', TXD_SESSION, '-n', 'reservists', '-x', '200', '-y', '60'],
         'create canonical session',
       );
       sessionCreated = true;
-      const reservistsN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', reservistsW], 'split reservists center');
-      const reservistsE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '43%', '-t', reservistsN], 'split reservists east');
-      const reservistsS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', reservistsN], 'split reservists south');
+      const reservistsN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', reservistsW], 'split reservists center');
+      const reservistsE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '43%', '-t', reservistsN], 'split reservists east');
+      const reservistsS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', reservistsN], 'split reservists south');
       await Promise.all([
         this.tag(reservistsW, 'reservists:W'), this.tag(reservistsN, 'reservists:N'),
         this.tag(reservistsS, 'reservists:S'), this.tag(reservistsE, 'reservists:E'),
       ]);
 
-      const palaceW = await this.checked(
+      const palaceW = await this.estateChecked(
         ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'palace'],
         'create palace window',
       );
-      const palaceN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', palaceW], 'split palace center');
-      const palaceE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '43%', '-t', palaceN], 'split palace east');
-      const palaceS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', palaceN], 'split palace south');
+      const palaceN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', palaceW], 'split palace center');
+      const palaceE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '43%', '-t', palaceN], 'split palace east');
+      const palaceS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', palaceN], 'split palace south');
       await Promise.all([
         this.tag(palaceW, 'palace:W'), this.tag(palaceN, 'palace:N'),
         this.tag(palaceS, 'palace:S'), this.tag(palaceE, 'palace:E'),
       ]);
 
-      const somniumW = await this.checked(['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'somnium'], 'create somnium window');
-      const somniumN = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', somniumW], 'split somnium grid');
-      const somniumNE = await this.checked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumN], 'split somnium east column');
-      const somniumS = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumN], 'split somnium south');
-      const somniumSE = await this.checked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumNE], 'split somnium southeast');
+      const somniumW = await this.estateChecked(['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'somnium'], 'create somnium window');
+      const somniumN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', somniumW], 'split somnium grid');
+      const somniumNE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumN], 'split somnium east column');
+      const somniumS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumN], 'split somnium south');
+      const somniumSE = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', somniumNE], 'split somnium southeast');
       await Promise.all([
         this.tag(somniumW, 'somnium:W'), this.tag(somniumN, 'somnium:N'),
         this.tag(somniumS, 'somnium:S'), this.tag(somniumNE, 'somnium:NE'), this.tag(somniumSE, 'somnium:SE'),
       ]);
 
-      const council = await this.checked(
+      const council = await this.estateChecked(
         ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'council'],
         'create council window',
       );
       const councilPanes = [council];
       for (let index = 1; index < TXD_WINDOWS.council.length; index += 1) {
-        councilPanes.push(await this.checked(
+        councilPanes.push(await this.estateChecked(
           ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', council],
           `split council seat ${index}`,
         ));
       }
       await Promise.all(TXD_WINDOWS.council.map((seat, index) => this.tag(councilPanes[index]!, seat)));
 
-      const mechanicus = await this.checked(
+      const mechanicus = await this.estateChecked(
         ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'mechanicus'],
         'create mechanicus window',
       );
-      const orchestrator = await this.checked(
+      const orchestrator = await this.estateChecked(
         ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', mechanicus],
         'split mechanicus orchestrator',
       );
@@ -305,7 +315,7 @@ export class RealTmux implements TmuxControlPlane {
     // Sanitized tmux session name (canonical id may contain `:`); the true id
     // lives in the pane option only.
     const safe = `seat_${seatId.replace(/[^A-Za-z0-9_]/g, '_')}`;
-    const created = await this.command('create_seat', seatId, ['new-session', '-d', '-s', safe, '-x', '200', '-y', '50']);
+    const created = await this.command('create_seat', seatId, ['new-session', '-d', '-s', safe, '-x', '200', '-y', '50', '-c', this.homeDirectory()]);
     // Fail loud: if the session didn't come up, do NOT go on to list/retag some
     // other pane and record a seat that was never really created.
     if (created.code !== 0) {
