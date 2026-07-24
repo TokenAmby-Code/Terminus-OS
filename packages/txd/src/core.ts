@@ -890,8 +890,11 @@ export class Daemon {
 
   requestEstateRotation(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
     return this.locked(async () => {
+      if (req.scope !== 'estate') {
+        return { ok: false, rotation_id: null, accepted: false, force: req.force, scope: req.scope, seats: [], bound_seats: [], foreground_workloads: [], reason: 'scoped_reset_requires_in_process_path' };
+      }
       if (req.schema_version !== SCHEMA_VERSION) {
-        return { ok: false, rotation_id: null, accepted: false, force: req.force, bound_seats: [], foreground_workloads: [], reason: 'schema_version_mismatch' };
+        return { ok: false, rotation_id: null, accepted: false, force: req.force, scope: 'estate', seats: [], bound_seats: [], foreground_workloads: [], reason: 'schema_version_mismatch' };
       }
       const proj = await this.projections();
       const bound_seats = proj.currentBindings.map((binding) => binding.seat_id).sort();
@@ -905,7 +908,7 @@ export class Daemon {
       const payload = { force: req.force, bound_seats, foreground_workloads };
       if (blocked && !req.force) {
         await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.rotation_refused', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
-        return { ok: false, rotation_id, accepted: false, force: false, bound_seats, foreground_workloads, reason: 'estate_busy' };
+        return { ok: false, rotation_id, accepted: false, force: false, scope: 'estate', seats: [...TXD_ESTATE], bound_seats, foreground_workloads, reason: 'estate_busy' };
       }
       await this.rotationBarrier.begin();
       try {
@@ -914,8 +917,68 @@ export class Daemon {
         await this.rotationBarrier.abort();
         throw error;
       }
-      return { ok: true, rotation_id, accepted: true, force: req.force, bound_seats, foreground_workloads, reason: null };
+      return { ok: true, rotation_id, accepted: true, force: req.force, scope: 'estate', seats: [...TXD_ESTATE], bound_seats, foreground_workloads, reason: null };
     });
+  }
+
+  /**
+   * Reset a page or canonical pane without killing the tmux server that hosts
+   * txd. Each pane is cleared and respawned below the membrane before its
+   * binding is retired, so a completed reset leaves no live process or binding
+   * from the old generation in the requested scope.
+   */
+  resetEstateScope(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
+    return this.locked(async () => {
+      const scope = req.scope;
+      const empty = (reason: string): EstateRotateResponse => ({
+        ok: false, rotation_id: null, accepted: false, force: req.force, scope, seats: [], bound_seats: [], foreground_workloads: [], reason,
+      });
+      if (req.schema_version !== SCHEMA_VERSION) return empty('schema_version_mismatch');
+      if (scope === 'estate') return empty('estate_scope_requires_rotation_handoff');
+      const seats = scope === 'page'
+        ? TXD_ESTATE.filter((seat) => seat.split(':', 1)[0] === req.page)
+        : TXD_ESTATE.filter((seat) => seat === req.pane);
+      if (seats.length === 0) return empty('scope_absent');
+
+      const proj = await this.projections();
+      const bindings = proj.currentBindings.filter((binding) => seats.includes(binding.seat_id));
+      const bound_seats = bindings.map((binding) => binding.seat_id).sort();
+      const foreground_workloads = (await this.tmux.workloads())
+        .filter((workload) => seats.includes(workload.seat_id) && !workload.idle)
+        .map(({ seat_id, command }) => ({ seat_id, command }))
+        .sort((a, b) => a.seat_id.localeCompare(b.seat_id));
+      const rotation_id = crypto.randomUUID();
+      const occurred_at = this.now();
+      const payload = { scope, seats, force: req.force, bound_seats, foreground_workloads };
+      if ((bound_seats.length > 0 || foreground_workloads.length > 0) && !req.force) {
+        await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_refused', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
+        return { ok: false, rotation_id, accepted: false, force: false, scope, seats, bound_seats, foreground_workloads, reason: 'estate_busy' };
+      }
+      await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_requested', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
+      for (const seat of seats) {
+        if (!(await this.tmux.resetSeat(seat))) {
+          await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_failed', payload: { ...payload, failed_seat: seat }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+          return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
+        }
+        const binding = bindings.find((candidate) => candidate.seat_id === seat);
+        if (binding && !(await this.recordResetBinding(binding, transportReceipt))) {
+          throw new Error(`scoped reset attestation failed for ${seat}`);
+        }
+      }
+      await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_completed', payload, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
+    });
+  }
+
+  private async recordResetBinding(binding: CurrentBinding, transportReceipt: string | null): Promise<boolean> {
+    const occurred_at = this.now();
+    const prov = this.prov('observer', transportReceipt);
+    const inputs: EventInput[] = [];
+    if (binding.instance_id) inputs.push({ entity_type: 'instance', entity_id: binding.instance_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
+    inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { instance_id: binding.instance_id }, provenance: prov, occurred_at });
+    inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
+    await this.store.appendAll(inputs);
+    return true;
   }
 
   async executeEstateRotation(): Promise<void> {

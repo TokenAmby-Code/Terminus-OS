@@ -88,14 +88,31 @@ export const COMMANDS: readonly Command[] = [
   },
   {
     path: ['estate', 'rotate'],
-    summary: 'Explicitly rotate the local estate generation',
+    summary: 'Explicitly reset the whole estate, one page, or one pane',
     run: async ({ args, request, write }) => {
-      if (args.some((arg) => arg !== '--force') || args.filter((arg) => arg === '--force').length > 1) {
-        throw new Error('usage: tx estate rotate [--force]');
+      let force = false;
+      let page: string | undefined;
+      let pane: string | undefined;
+      for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index]!;
+        if (arg === '--force' && !force) force = true;
+        else if (arg === '--page' && page === undefined) {
+          page = args[++index];
+          if (!page) throw new Error('--page requires a page name');
+        } else if (arg === '--pane' && pane === undefined) {
+          pane = args[++index];
+          if (!pane) throw new Error('--pane requires a canonical pane name');
+        } else {
+          throw new Error('usage: tx estate rotate [--force] [--page <page> | --pane <canonical-pane>]');
+        }
       }
+      if (page && pane) throw new Error('usage: tx estate rotate [--force] [--page <page> | --pane <canonical-pane>]');
       write(await request('POST', '/ctl/estate/rotate', {
         schema_version: SCHEMA_VERSION,
-        force: args.includes('--force'),
+        force,
+        scope: page ? 'page' : pane ? 'pane' : 'estate',
+        ...(page ? { page } : {}),
+        ...(pane ? { pane } : {}),
       }));
       return 0;
     },
