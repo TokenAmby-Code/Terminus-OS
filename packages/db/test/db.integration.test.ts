@@ -60,14 +60,14 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
 
   test("the migrations apply and land their ledger rows", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
-    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3, 4]);
+    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3, 4, 5]);
     expect(report.alreadyApplied).toBe(0);
   });
 
   test("re-running the runner is a no-op (idempotence)", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
     expect(report.applied).toEqual([]);
-    expect(report.alreadyApplied).toBe(4);
+    expect(report.alreadyApplied).toBe(5);
   });
 
   test("concurrent boot: two connections migrate simultaneously without racing the ledger", async () => {
@@ -81,10 +81,10 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
         runMigrations(sql, MIGRATIONS_DIR),
         runMigrations(sql2, MIGRATIONS_DIR),
       ]);
-      expect(a.applied.length + b.applied.length).toBe(4);
+      expect(a.applied.length + b.applied.length).toBe(5);
       const LedgerRow = z.object({ id: z.number().int() });
       const rows = await typedRows(sql, LedgerRow)`select id from schema_migrations order by id`;
-      expect(rows.map(r => r.id)).toEqual([1, 2, 3, 4]);
+      expect(rows.map(r => r.id)).toEqual([1, 2, 3, 4, 5]);
     } finally {
       await sql2.close();
     }
@@ -108,6 +108,7 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
       { id: 2, name: "txd_events" },
       { id: 3, name: "desktop_telemetry" },
       { id: 4, name: "bus" },
+      { id: 5, name: "txd_events_jsonb_normalize" },
     ]);
 
     const WrongRow = z.object({ id: z.string() });
