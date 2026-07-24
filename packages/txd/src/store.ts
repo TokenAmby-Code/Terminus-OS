@@ -87,10 +87,16 @@ export class PostgresEventStore implements EventStore {
     assertNoTmuxId(input, 'event_input');
     const parsed = EventInputSchema.parse(input);
     const recorded_at = this.now();
+    // Objects are passed DIRECTLY so Bun.SQL binds real jsonb objects. The
+    // old idiom (`JSON.stringify(x)::jsonb`) double-encodes: the cast
+    // receives an already-JSON-encoded parameter and stores a jsonb *string*,
+    // which poisons the ruled psql surface (payload->>'k' returns nothing).
+    // Same defect and fix as busd #34 (af8088e9); migration 0005 normalized
+    // the historical string rows in place.
     const rows = (await sql`
       INSERT INTO txd.events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
       VALUES (${parsed.entity_type}, ${parsed.entity_id}, ${parsed.event_type},
-              ${JSON.stringify(parsed.payload)}::jsonb, ${JSON.stringify(parsed.provenance)}::jsonb,
+              ${parsed.payload}, ${parsed.provenance},
               ${parsed.occurred_at}, ${recorded_at})
       RETURNING seq`) as { seq: number | bigint | string }[];
     return { ...parsed, seq: Number(rows[0]!.seq), recorded_at };

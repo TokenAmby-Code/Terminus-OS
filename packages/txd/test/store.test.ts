@@ -183,4 +183,36 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     expect(await again.count()).toBe(before);
     await again.close();
   });
+
+  test('jsonb columns hold OBJECTS, not double-encoded JSON strings — the ruled psql surface works', async () => {
+    // Regression pin (busd #34 mirrored): `JSON.stringify(x)::jsonb` binds an
+    // already-encoded parameter and stores jsonb *strings*, killing payload->>'k' in psql.
+    const rows = (await raw`
+      SELECT jsonb_typeof(payload) AS pay, jsonb_typeof(provenance) AS prov,
+             payload->>'pane_state' AS state, provenance->>'source' AS src
+      FROM txd.events ORDER BY seq LIMIT 1`) as { pay: string; prov: string; state: string | null; src: string | null }[];
+    expect(rows[0]).toEqual({ pay: 'object', prov: 'object', state: 'live', src: 'wrapper' });
+  });
+
+  test('migration 0005 normalizes historical double-encoded string rows in place', async () => {
+    // Plant a pre-fix row (jsonb strings, the old stringify::jsonb shape) via
+    // raw INSERT — append is allowed; only UPDATE/DELETE/TRUNCATE are fenced.
+    await raw`
+      INSERT INTO txd.events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
+      VALUES ('seat', 'legacy:double-encoded', 'reg.pane_created',
+              to_jsonb('{"pane_state":"live"}'::text), to_jsonb('{"source":"wrapper"}'::text),
+              '2026-07-12T00:00:00.000Z', '2026-07-12T00:00:00.000Z')`;
+    // Rewind the ledger for 0005 only and reconnect: the runner re-applies it.
+    await raw`DELETE FROM schema_migrations WHERE id = 5`;
+    const again = await PostgresEventStore.connect(endpoint!);
+    await again.close();
+    const rows = (await raw`
+      SELECT jsonb_typeof(payload) AS pay, jsonb_typeof(provenance) AS prov,
+             payload->>'pane_state' AS state
+      FROM txd.events WHERE entity_id = 'legacy:double-encoded'`) as { pay: string; prov: string; state: string | null }[];
+    expect(rows[0]).toEqual({ pay: 'object', prov: 'object', state: 'live' });
+    // The append-only fence is back up after the migration's scoped trigger disable.
+    const driven = async (q: PromiseLike<unknown>) => { await q; };
+    await expect(driven(raw`update txd.events set entity_id = 'x' where entity_id = 'legacy:double-encoded'`)).rejects.toThrow(/append-only/);
+  });
 });
