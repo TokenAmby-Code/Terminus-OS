@@ -11,6 +11,7 @@ import {
   REG_EVENT_NAMES,
   SCHEMA_VERSION,
   SendReceiptSchema,
+  TmuxLifecycleEventRequestSchema,
   eventDomain,
 } from "../src/txd.ts";
 
@@ -51,6 +52,13 @@ describe("txd lifecycle vocabulary", () => {
       occurred_at: "2026-07-20T00:00:00.000Z",
     });
     expect(parsed.event_type).toBe("reg.pane_created");
+  });
+
+  test('tmux lifecycle ingress accepts only typed pane events with canonical page input', () => {
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 6, event: 'pane-exited', page: 'palace' })).toEqual({
+      schema_version: 6, event: 'pane-exited', page: 'palace',
+    });
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 6, event: 'pane-vanished', page: 'palace' })).toThrow();
   });
 
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {

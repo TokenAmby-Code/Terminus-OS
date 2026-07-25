@@ -52,6 +52,8 @@ export interface TmuxControlPlane {
   reapSeat(seatId: string): Promise<boolean>;
   /** Clear pane history, replace its process, and re-verify its canonical tag. */
   resetSeat(seatId: string): Promise<boolean>;
+  /** Reconstruct every terminal process and the declared geometry inside one page border. */
+  rebuildPage(page: string): Promise<boolean>;
   /**
    * Canonical ids of seats an attached client is actively on within windowMs —
    * a point-in-time READ of the server-maintained client_activity + active
@@ -227,14 +229,122 @@ export class RealTmux implements TmuxControlPlane {
     await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`, seatId);
   }
 
+  private async clearPaneUserOptions(paneId: string, page: string): Promise<void> {
+    const options = await this.command('observe_page_options', page, ['show-options', '-p', '-t', paneId]);
+    if (options.code !== 0) throw new Error(`txd tmux page option observation failed: ${this.stderrCategory(options)}`);
+    for (const line of options.stdout.split('\n')) {
+      const name = line.trim().split(/\s+/, 1)[0];
+      if (name?.startsWith('@')) await this.checked(['set-option', '-p', '-u', '-t', paneId, name], `clear ${page} option`, page);
+    }
+  }
+
+  private async clearWindowUserOptions(target: string, page: string): Promise<void> {
+    const options = await this.command('observe_page_window_options', page, ['show-options', '-w', '-t', target]);
+    if (options.code !== 0) throw new Error(`txd tmux page window option observation failed: ${this.stderrCategory(options)}`);
+    for (const line of options.stdout.split('\n')) {
+      const name = line.trim().split(/\s+/, 1)[0];
+      if (name?.startsWith('@')) await this.checked(['set-option', '-w', '-u', '-t', target, name], `clear ${page} window option`, page);
+    }
+  }
+
+  private async constructPage(page: string, seed?: string): Promise<string[]> {
+    const first = seed ?? await this.estateChecked(
+      ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', page],
+      `create ${page} window`,
+      page,
+    );
+    let panes: string[];
+    if (page === 'reservists' || page === 'palace') {
+      const center = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', first], `split ${page} center`, page);
+      const east = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '43%', '-t', center], `split ${page} east`, page);
+      const south = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', center], `split ${page} south`, page);
+      panes = [first, center, south, east];
+    } else if (page === 'somnium') {
+      const north = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '70%', '-t', first], 'split somnium grid', page);
+      const northeast = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', north], 'split somnium east column', page);
+      const south = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', north], 'split somnium south', page);
+      const southeast = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', northeast], 'split somnium southeast', page);
+      panes = [first, north, south, northeast, southeast];
+    } else if (page === 'council') {
+      panes = [first];
+      for (let index = 1; index < TXD_WINDOWS.council.length; index += 1) {
+        panes.push(await this.estateChecked(['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', first], `split council seat ${index}`, page));
+      }
+    } else if (page === 'mechanicus') {
+      const orchestrator = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', first], 'split mechanicus orchestrator', page);
+      panes = [first, orchestrator];
+    } else {
+      throw new Error(`txd refused unknown page ${page}`);
+    }
+    const seats = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS];
+    await Promise.all(seats.map((seat, index) => this.tag(panes[index]!, seat)));
+    return panes;
+  }
+
+  async rebuildPage(page: string): Promise<boolean> {
+    if (!Object.hasOwn(TXD_WINDOWS, page)) return false;
+    const target = `${TXD_SESSION}:${page}`;
+    try {
+      const listed = await this.command('observe_page_panes', page, ['list-panes', '-t', target, '-F', '#{pane_id}']);
+      let seed: string | undefined;
+      if (listed.code === 0) {
+        seed = listed.stdout.trim().split('\n').filter(Boolean)[0];
+        if (seed) {
+          const zoomed = await this.command('observe_page_zoom', page, ['display-message', '-p', '-t', seed, '#{window_zoomed_flag}']);
+          if (zoomed.code !== 0) return false;
+          if (zoomed.stdout.trim() === '1' && (await this.command('clear_page_zoom', page, ['resize-pane', '-Z', '-t', seed])).code !== 0) return false;
+          if ((await this.command('clear_page_to_seed', page, ['kill-pane', '-a', '-t', seed])).code !== 0) return false;
+          if ((await this.command('clear_page_history', page, ['clear-history', '-t', seed])).code !== 0) return false;
+          await this.clearPaneUserOptions(seed, page);
+          await this.clearWindowUserOptions(target, page);
+          if ((await this.command('reset_page_seed', page, ['respawn-pane', '-k', '-c', this.homeDirectory(), '-t', seed])).code !== 0) return false;
+        }
+      } else if (this.stderrCategory(listed) !== 'not_found') {
+        return false;
+      }
+      await this.constructPage(page, seed);
+      const verified = await this.command('verify_rebuilt_page', page, [
+        'list-panes', '-t', target, '-F', `#{session_name}\t#{window_name}\t#{${CANON_OPT}}\t#{pane_dead}`,
+      ]);
+      if (verified.code !== 0) return false;
+      const expected = [...TXD_WINDOWS[page as keyof typeof TXD_WINDOWS]].sort();
+      const actual = verified.stdout.trim().split('\n').filter(Boolean).flatMap((line) => {
+        const [session, window, seat, dead] = line.split('\t');
+        return session === TXD_SESSION && window === page && dead === '0' && seat ? [seat] : [];
+      }).sort();
+      return actual.length === expected.length && actual.every((seat, index) => seat === expected[index]);
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', event: 'page_rebuild_failed', page, error: String(error) }));
+      return false;
+    }
+  }
+
   async ensureEstate(): Promise<'created' | 'existing'> {
     if (!(await this.reachable())) {
       throw new Error('txd tmux server is not externally owned; tx-estate.service must start it before txd');
     }
     const rows = await this.estateRows();
     if (rows.length > 0) {
-      if (this.isCanonicalEstate(rows)) return 'existing';
-      throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      const recoverable = rows.every((row) => {
+        const seats = TXD_WINDOWS[row.window as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
+        return row.session === TXD_SESSION && seats !== undefined && (row.seat === '' || seats.includes(row.seat));
+      });
+      if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      const observed = await this.listSeats();
+      const observedByPage = new Map<string, SeatObservation[]>();
+      for (const seat of observed) {
+        const page = seat.seat_id.split(':', 1)[0]!;
+        observedByPage.set(page, [...(observedByPage.get(page) ?? []), seat]);
+      }
+      for (const [page, expectedSeats] of Object.entries(TXD_WINDOWS)) {
+        const pageSeats = observedByPage.get(page) ?? [];
+        const live = pageSeats.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id).sort();
+        const expected = [...expectedSeats].sort();
+        const healthy = live.length === expected.length && live.every((seat, index) => seat === expected[index]);
+        if (!healthy && !(await this.rebuildPage(page))) throw new Error(`txd failed to reconstruct damaged canonical page ${page}`);
+      }
+      if (this.isCanonicalEstate(await this.estateRows())) return 'existing';
+      throw new Error('txd canonical estate recovery postcondition failed');
     }
 
     let sessionCreated = false;
@@ -439,6 +549,7 @@ export class FakeTmux implements TmuxControlPlane {
   private failCreate = new Set<string>(); // seats whose createSeat is forced to throw
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
   private resets: string[] = [];
+  private pageRebuilds: string[] = [];
   reachableFlag = true;
   killed = false;
   private commands = new Map<string, string>();
@@ -465,7 +576,20 @@ export class FakeTmux implements TmuxControlPlane {
     if (this.shape.sessions.length > 0) {
       const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && JSON.stringify(this.shape.windows) === JSON.stringify(TXD_WINDOWS);
-      if (!canonical) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      const allLive = TXD_ESTATE.every((seat) => this.seats.get(seat)?.pane === 'live');
+      if (canonical && allLive) return 'existing';
+      const recoverable = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
+        && Object.entries(this.shape.windows).every(([page, seats]) => {
+          const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
+          return expected !== undefined && seats.every((seat) => expected.includes(seat));
+        });
+      if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      for (const [page, expectedSeats] of Object.entries(TXD_WINDOWS)) {
+        const shaped = this.shape.windows[page] ?? [];
+        const healthy = shaped.length === expectedSeats.length
+          && expectedSeats.every((seat) => shaped.includes(seat) && this.seats.get(seat)?.pane === 'live');
+        if (!healthy && !(await this.rebuildPage(page))) throw new Error(`FakeTmux: failed page reconstruction ${page}`);
+      }
       return 'existing';
     }
     this.shape = {
@@ -533,6 +657,20 @@ export class FakeTmux implements TmuxControlPlane {
     return true;
   }
   resetSeats(): string[] { return [...this.resets]; }
+  async rebuildPage(page: string): Promise<boolean> {
+    if (!Object.hasOwn(TXD_WINDOWS, page)) return false;
+    const seats = [...TXD_WINDOWS[page as keyof typeof TXD_WINDOWS]];
+    this.shape.sessions = [TXD_SESSION];
+    this.shape.windows[page] = seats;
+    for (const [seat] of this.seats) if (seat.startsWith(`${page}:`)) this.seats.delete(seat);
+    for (const seat of seats) {
+      this.seats.set(seat, { pane: 'live' });
+      this.commands.delete(seat);
+    }
+    this.pageRebuilds.push(page);
+    return true;
+  }
+  rebuiltPages(): string[] { return [...this.pageRebuilds]; }
   /** Test control: force reapSeat(seatId) to fail (simulates a wedged process). */
   failReapSeat(seatId: string): void {
     this.failReap.add(seatId);
@@ -541,6 +679,14 @@ export class FakeTmux implements TmuxControlPlane {
   killOutOfBand(seatId: string): void {
     const s = this.seats.get(seatId);
     if (s) s.pane = 'dead';
+  }
+  /** Test control: remove a pane out-of-band (simulates tmux deleting a terminal). */
+  deleteOutOfBand(seatId: string): void {
+    this.seats.delete(seatId);
+    const [page] = seatId.split(':', 1);
+    if (!page) return;
+    const seats = this.shape.windows[page];
+    if (seats) this.shape.windows[page] = seats.filter((seat) => seat !== seatId);
   }
   /** Test control: mark an operator active on a seat as of nowMs. */
   setPresence(seatId: string, atMs: number): void {

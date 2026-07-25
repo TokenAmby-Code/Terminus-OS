@@ -97,4 +97,25 @@ describe('disposable canonical estate geometry', () => {
     if (!home) throw new Error('HOME must be set for the pane cwd behavioral pin');
     expect(new Set(paths.split('\n').filter(Boolean))).toEqual(new Set([home]));
   });
+
+  test('page reconstruction restores a deleted terminal and wipes every page process and pane option', async () => {
+    const socket = `txd-page-rebuild-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    const before = (await tmux(socket, 'list-panes', '-t', 'main:palace', '-F', '#{pane_pid}')).split('\n');
+    await tmux(socket, 'set-option', '-p', '-t', 'main:palace.0', '@scratch', 'must-die');
+    await tmux(socket, 'set-option', '-w', '-t', 'main:palace', '@page_scratch', 'must-die');
+    await tmux(socket, 'resize-pane', '-Z', '-t', 'main:palace.0');
+    await tmux(socket, 'kill-pane', '-t', 'main:palace.3');
+
+    expect(await control.rebuildPage('palace')).toBe(true);
+
+    const rows = await tmux(socket, 'list-panes', '-t', 'main:palace', '-F', '#{@canonical_id}\t#{pane_pid}\t#{@scratch}\t#{pane_dead}');
+    const rebuilt = rows.split('\n').map((row) => row.split('\t'));
+    expect(rebuilt.map(([seat]) => seat).sort()).toEqual([...TXD_WINDOWS.palace].sort());
+    expect(rebuilt.every(([, pid, scratch, dead]) => !before.includes(pid!) && scratch === '' && dead === '0')).toBe(true);
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{window_zoomed_flag}\t#{@page_scratch}')).toBe('0');
+  });
 });

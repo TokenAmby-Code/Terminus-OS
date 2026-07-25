@@ -9,6 +9,8 @@
 //                     subscriber and MUST 2xx-ack every other delivered event
 //                     (ack ≠ consume) — bus delivery is head-of-line per
 //                     subscription, so a non-2xx would wedge txd's own lane.
+//   /ingress/tmux     managed tmux lifecycle witness events; txd resolves the
+//                     page against its declaration and reconstructs if damaged.
 //   /agents/*         the deliberate-action plane: every route directly under
 //                     /agents/ is a deliberate action, one-for-one.
 //   /tmux/read/*      txd's ONLY public read surface: estate observation views
@@ -40,6 +42,7 @@ import {
   SendRequestSchema,
   StopRequestSchema,
   SubscribeRequestSchema,
+  TmuxLifecycleEventRequestSchema,
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
@@ -184,6 +187,17 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
             queueMicrotask(() => void daemon.executeEstateRotation());
           },
         }), { status: 202, headers: { 'content-type': 'application/json' } });
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ingress/tmux'),
+      label: 'POST /ingress/tmux',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, TmuxLifecycleEventRequestSchema, 'invalid_tmux_lifecycle_event');
+        if (parsed instanceof Response) return parsed;
+        const result = await daemon.handleTmuxLifecycleEvent(parsed, receipt(req));
+        return json(result, result.ok ? 200 : 409);
       },
     },
     // ── /agents/* — the deliberate-action plane ─────────────────────────────
