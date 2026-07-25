@@ -41,6 +41,8 @@ each route is the ruled daemon behavior, unchanged.
 |--------|-------------------------|--------------------------------------------------|
 | GET    | `/ctl/health`           | Honest liveness + build + tmux reachability      |
 | POST   | `/ctl/reconcile`        | Replay-driven reconcile; p0 on contradiction     |
+| POST   | `/ctl/estate/rotate`    | Explicit estate, border-total page, or pane reset |
+| POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` event ingress; reconstructs a damaged canonical page |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/send`          | Send chokepoint (enqueue-by-default)             |
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
@@ -59,6 +61,12 @@ each route is the ruled daemon behavior, unchanged.
   are REMOVED, no crumbs. The hook-type enumeration stays pinned in
   `@terminus-os/contracts/hooks` from the actual claude-code and codex hook
   contracts.
+- `/ingress/tmux` is the tmux witness door. The managed estate keeps exited
+  panes observable and forwards their canonical page through the thin `tx`
+  client. `txd` compares that observation to `TXD_WINDOWS`; only `txd` decides
+  whether to reconstruct. A page reconstruction wipes every process, history,
+  pane-local option, and split inside that page border, then rebuilds the full
+  declared geometry before retiring the old bindings in event truth.
 - `/tmux/read/*` is txd's ONLY public read surface — side-effect-free by
   construction. "entities" is dead as public API vocabulary, and the old
   per-entity event-history endpoint is REMOVED: agent-biography serving is not

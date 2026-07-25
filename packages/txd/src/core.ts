@@ -42,11 +42,13 @@ import {
   type StopRequest,
   type SubscribeRequest,
   type SubscribeResponse,
+  type TmuxLifecycleEventRequest,
+  type TmuxLifecycleEventResponse,
 } from '@terminus-os/contracts';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections } from './projections.ts';
-import { TXD_ESTATE } from './estate.ts';
+import { isTxdPage, TXD_ESTATE, TXD_WINDOWS } from './estate.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 
@@ -922,17 +924,25 @@ export class Daemon {
   }
 
   /**
-   * Reset a page or canonical pane without killing the tmux server that hosts
-   * txd. Each pane is cleared and respawned below the membrane before its
-   * binding is retired, so a completed reset leaves no live process or binding
-   * from the old generation in the requested scope.
+   * Reset a page or canonical pane without killing the estate server. Pane
+   * scope replaces one process in place. Page scope is border-total: the tmux
+   * adapter wipes every terminal process, history, user option, and split in
+   * the window, then stands the full declared geometry before txd retires all
+   * old bindings in the page.
    */
   resetEstateScope(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
-    return this.locked(async () => {
-      const scope = req.scope;
-      const empty = (reason: string): EstateRotateResponse => ({
+    return this.locked(() => this.resetEstateScopeUnlocked(req, transportReceipt));
+  }
+
+  private async resetEstateScopeUnlocked(
+    req: EstateRotateRequest,
+    transportReceipt: string | null,
+    trigger: 'operator' | 'pane-died' | 'pane-exited' = 'operator',
+  ): Promise<EstateRotateResponse> {
+    const scope = req.scope;
+    const empty = (reason: string): EstateRotateResponse => ({
         ok: false, rotation_id: null, accepted: false, force: req.force, scope, seats: [], bound_seats: [], foreground_workloads: [], reason,
-      });
+    });
       if (req.schema_version !== SCHEMA_VERSION) return empty('schema_version_mismatch');
       if (scope === 'estate') return empty('estate_scope_requires_rotation_handoff');
       const seats = scope === 'page'
@@ -949,24 +959,63 @@ export class Daemon {
         .sort((a, b) => a.seat_id.localeCompare(b.seat_id));
       const rotation_id = crypto.randomUUID();
       const occurred_at = this.now();
-      const payload = { scope, seats, force: req.force, bound_seats, foreground_workloads };
+      const payload = { scope, seats, force: req.force, bound_seats, foreground_workloads, trigger };
       if ((bound_seats.length > 0 || foreground_workloads.length > 0) && !req.force) {
         await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_refused', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
         return { ok: false, rotation_id, accepted: false, force: false, scope, seats, bound_seats, foreground_workloads, reason: 'estate_busy' };
       }
-      await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_requested', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
-      for (const seat of seats) {
+      const provenance = this.prov(trigger === 'operator' ? 'wrapper' : 'observer', transportReceipt);
+      await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_requested', payload, provenance, occurred_at });
+      if (scope === 'page') {
+        if (!(await this.tmux.rebuildPage(req.page!))) {
+          await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_failed', payload: { ...payload, failed_page: req.page }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+          return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
+        }
+      } else {
+        const seat = seats[0]!;
         if (!(await this.tmux.resetSeat(seat))) {
           await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_failed', payload: { ...payload, failed_seat: seat }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
         }
-        const binding = bindings.find((candidate) => candidate.seat_id === seat);
-        if (binding && !(await this.recordResetBinding(binding, transportReceipt))) {
-          throw new Error(`scoped reset attestation failed for ${seat}`);
-        }
+      }
+      for (const binding of bindings) {
+        if (!(await this.recordResetBinding(binding, transportReceipt))) throw new Error(`scoped reset attestation failed for ${binding.seat_id}`);
       }
       await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_completed', payload, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
-      return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
+    return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
+  }
+
+  handleTmuxLifecycleEvent(
+    req: TmuxLifecycleEventRequest,
+    transportReceipt: string | null = null,
+  ): Promise<TmuxLifecycleEventResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) {
+        return { ok: false, event: req.event, page: req.page, reconstructed: false, rotation_id: null, reason: 'schema_version_mismatch' };
+      }
+      if (!isTxdPage(req.page)) {
+        return { ok: false, event: req.event, page: req.page, reconstructed: false, rotation_id: null, reason: 'page_absent' };
+      }
+      const expected = [...TXD_WINDOWS[req.page]].sort();
+      const observed = (await this.tmux.listSeats()).filter((seat) => seat.seat_id.startsWith(`${req.page}:`));
+      const live = observed.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id).sort();
+      const canonical = live.length === expected.length && live.every((seat, index) => seat === expected[index]);
+      if (canonical) {
+        return { ok: true, event: req.event, page: req.page, reconstructed: false, rotation_id: null, reason: 'page_already_canonical' };
+      }
+      const reset = await this.resetEstateScopeUnlocked(
+        { schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: req.page },
+        transportReceipt,
+        req.event,
+      );
+      return {
+        ok: reset.ok,
+        event: req.event,
+        page: req.page,
+        reconstructed: reset.accepted,
+        rotation_id: reset.rotation_id,
+        reason: reset.reason,
+      };
     });
   }
 

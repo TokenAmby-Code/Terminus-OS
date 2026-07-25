@@ -17,6 +17,12 @@ export const TXD_WINDOWS = {
   mechanicus: ['mechanicus:fabricator-general', 'mechanicus:orchestrator'],
 } as const;
 
+export type TxdPage = keyof typeof TXD_WINDOWS;
+
+export function isTxdPage(value: string): value is TxdPage {
+  return Object.hasOwn(TXD_WINDOWS, value);
+}
+
 export const TXD_ESTATE: readonly string[] = [
   // ── Workspace grids (build_workspace stack panes) ──────────────────────────
   // reservists: the reserve 4-pane stack (W/N/S/E), deliberately at window 0.

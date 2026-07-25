@@ -19,6 +19,7 @@ const RATIFIED = [
   'GET /ctl/health',
   'POST /ctl/reconcile',
   'POST /ctl/estate/rotate',
+  'POST /ingress/tmux',
   'POST /agents/launch',
   'POST /agents/send',
   'POST /agents/close',
@@ -104,6 +105,22 @@ test('POST /ctl/estate/rotate resets a page in-process instead of killing the es
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ accepted: true, scope: 'page', seats: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'] });
     expect(tmux.killed).toBe(false);
+  } finally { srv.stop(true); }
+});
+
+test('POST /ingress/tmux reconstructs the canonical page after a pane exits', async () => {
+  const tmux = new FakeTmux();
+  const d = new Daemon(new MemoryEventStore(), tmux);
+  await d.constructEstate();
+  tmux.deleteOutOfBand('palace:E');
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: 6, event: 'pane-exited', page: 'palace' }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, reconstructed: true, page: 'palace' });
   } finally { srv.stop(true); }
 });
 

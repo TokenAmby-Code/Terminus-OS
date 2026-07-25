@@ -71,16 +71,41 @@ test('forced rotation holds the lifecycle barrier from durable request through r
   expect(calls).toEqual(['begin', 'complete']);
 });
 
-test('forced page reset kills every scoped process, clears each binding, and leaves the daemon alive', async () => {
+test('forced page reset reconstructs the whole page border, clears every binding, and leaves the daemon alive', async () => {
   const { store, tmux, daemon } = await setup();
   await daemon.launch({ seat_id: 'somnium:N', schema_version: SCHEMA_VERSION, identity: 'n', persona: 'n', tint: '#1' });
   await daemon.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'ne', persona: 'ne', tint: '#2' });
   const result = await daemon.resetEstateScope({ schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: 'somnium' });
   expect(result).toMatchObject({ ok: true, accepted: true, scope: 'page', seats: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'] });
   expect(tmux.killed).toBe(false);
-  expect(tmux.resetSeats()).toEqual(['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE']);
+  expect(tmux.rebuiltPages()).toEqual(['somnium']);
+  expect(tmux.resetSeats()).toEqual([]);
   expect((await daemon.estateRows()).filter((row) => row.seat_id?.startsWith('somnium:')).every((row) => row.binding === 'unbound')).toBe(true);
   expect((await store.readAll()).at(-1)?.event_type).toBe('estate.scoped_reset_completed');
+});
+
+test('forced page reset reconstructs a deleted canonical terminal instead of partially resetting survivors', async () => {
+  const { tmux, daemon } = await setup();
+  tmux.deleteOutOfBand('palace:E');
+  const result = await daemon.resetEstateScope({ schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: 'palace' });
+  expect(result).toMatchObject({ ok: true, accepted: true, scope: 'page' });
+  expect(tmux.estateShape().windows.palace).toEqual(['palace:W', 'palace:N', 'palace:S', 'palace:E']);
+  expect(tmux.rebuiltPages()).toEqual(['palace']);
+});
+
+test('tmux pane lifecycle event immediately reconstructs only a damaged page and resolves its binding into event truth', async () => {
+  const { store, tmux, daemon } = await setup();
+  await daemon.launch({ seat_id: 'palace:E', schema_version: SCHEMA_VERSION, identity: 'east', persona: 'astartes', tint: '#1' });
+  tmux.deleteOutOfBand('palace:E');
+  const recovered = await daemon.handleTmuxLifecycleEvent({ schema_version: SCHEMA_VERSION, event: 'pane-exited', page: 'palace' });
+  expect(recovered).toMatchObject({ ok: true, reconstructed: true, page: 'palace', event: 'pane-exited' });
+  expect(tmux.rebuiltPages()).toEqual(['palace']);
+  expect((await daemon.estateRows()).find((row) => row.seat_id === 'palace:E')).toMatchObject({ binding: 'unbound', pane: 'live' });
+  const requested = (await store.readAll()).findLast((event) => event.event_type === 'estate.scoped_reset_requested');
+  expect(requested).toMatchObject({ payload: { trigger: 'pane-exited' }, provenance: { source: 'observer' } });
+  const duplicate = await daemon.handleTmuxLifecycleEvent({ schema_version: SCHEMA_VERSION, event: 'pane-exited', page: 'palace' });
+  expect(duplicate).toMatchObject({ ok: true, reconstructed: false, reason: 'page_already_canonical' });
+  expect(tmux.rebuiltPages()).toEqual(['palace']);
 });
 
 test('scoped reset refuses busy targets until force is explicit and never widens to another pane', async () => {

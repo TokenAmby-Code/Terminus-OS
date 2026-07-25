@@ -71,8 +71,17 @@ describe('tmux/tx.conf', () => {
   test('excludes retired tmuxctld and popup policy', () => {
     for (const retired of [
       'tmuxctld-ping', 'bind -n Any', 'tmux-plan-menu', 'tmux-legion-prompt-popup',
-      'tmux-mark-for-close', 'tmux-grid-expand', 'remain-on-exit', 'pane-died',
+      'tmux-mark-for-close', 'tmux-grid-expand',
       'client-lease', '@PERSONA', '@SESSION_DOC', 'goto-spoken',
     ]) expect(conf).not.toContain(retired);
+  });
+
+  test('keeps panes observable through exit and forwards lifecycle events to txd', () => {
+    expect(conf).toContain('%if "#{==:#{TXD_TMUX_SOCKET},k12}"');
+    expect(conf).toContain('set -g remain-on-exit on');
+    expect(conf).toContain('set-hook -g pane-died');
+    expect(conf).toContain('set-hook -g pane-exited');
+    expect(conf).toContain('$HOME/.local/bin/tx estate event pane-died --page');
+    expect(conf).toContain('$HOME/.local/bin/tx estate event pane-exited --page');
   });
 });

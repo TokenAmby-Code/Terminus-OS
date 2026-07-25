@@ -531,6 +531,23 @@ export const EstateRotateResponseSchema = z.object({
 });
 export type EstateRotateResponse = z.infer<typeof EstateRotateResponseSchema>;
 
+export const TmuxLifecycleEventRequestSchema = z.object({
+  schema_version: z.number().int(),
+  event: z.enum(['pane-died', 'pane-exited']),
+  page: z.string().min(1),
+});
+export type TmuxLifecycleEventRequest = z.infer<typeof TmuxLifecycleEventRequestSchema>;
+
+export const TmuxLifecycleEventResponseSchema = z.object({
+  ok: z.boolean(),
+  event: z.enum(['pane-died', 'pane-exited']),
+  page: z.string(),
+  reconstructed: z.boolean(),
+  rotation_id: z.string().nullable(),
+  reason: z.string().nullable(),
+});
+export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventResponseSchema>;
+
 // Communications are admitted as one atomic request.  `message` is opaque;
 // txd never parses or normalizes it.  Pages are resolved to an immutable list
 // before the accepted event is appended.

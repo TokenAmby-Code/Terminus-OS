@@ -55,3 +55,18 @@ test('estate rotate rejects ambiguous or incomplete scoped options', async () =>
   expect(await runCli(['estate', 'rotate', '--pane', 'somnium:NE', '--page', 'somnium'], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
 });
+
+test('tmux lifecycle events enter txd through a typed page event', async () => {
+  const h = harness();
+  expect(await runCli(['estate', 'event', 'pane-exited', '--page', 'palace'], h.deps)).toBe(0);
+  expect(h.calls).toEqual([
+    { method: 'POST', path: '/ingress/tmux', body: { schema_version: SCHEMA_VERSION, event: 'pane-exited', page: 'palace' } },
+  ]);
+});
+
+test('tmux lifecycle event input rejects unknown events and incomplete pages', async () => {
+  const h = harness();
+  expect(await runCli(['estate', 'event', 'mystery', '--page', 'palace'], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'event', 'pane-died', '--page'], h.deps)).toBe(1);
+  expect(h.calls).toEqual([]);
+});

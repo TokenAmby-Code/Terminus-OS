@@ -113,6 +113,17 @@ test('refuses the legacy decomposed estate without mutation or events', async ()
   expect(tmux.estateShape().windows).not.toHaveProperty('reservists');
 });
 
+test('boot constructor reconstructs a damaged canonical page from the declaration', async () => {
+  const { store, tmux, d } = setup();
+  await d.constructEstate();
+  tmux.deleteOutOfBand('palace:E');
+  const result = await d.constructEstate();
+  expect(result.failed).toEqual([]);
+  expect(tmux.rebuiltPages()).toEqual(['palace']);
+  expect(tmux.estateShape().windows.palace).toEqual(['palace:W', 'palace:N', 'palace:S', 'palace:E']);
+  expect(await store.count()).toBe(TXD_ESTATE.length);
+});
+
 test('keeps attested seats and backfills missing facts for an existing canonical estate', async () => {
   const { store, tmux, d } = setup();
   const pre = [TXD_ESTATE[0]!, TXD_ESTATE[5]!, TXD_ESTATE[10]!];
