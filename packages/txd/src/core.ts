@@ -363,6 +363,19 @@ export class Daemon {
       // Construction is all-or-nothing below the membrane: create on an empty
       // socket, accept the exact canonical shape, refuse every other estate.
       const estate = await this.tmux.ensureEstate();
+      // A repaired page contains entirely new terminal processes, even when tmux
+      // reused one pane object as the reconstruction seed. Resolve every binding
+      // in that border into event truth before the fresh bare seats are exposed.
+      const rebuiltPages = new Set(estate.rebuilt_pages);
+      const bindings = (await this.projections()).currentBindings.filter((binding) => {
+        const page = binding.seat_id.split(':', 1)[0];
+        return page !== undefined && isTxdPage(page) && rebuiltPages.has(page);
+      });
+      for (const binding of bindings) {
+        if (!(await this.recordResetBinding(binding, null))) {
+          throw new Error(`boot page reconstruction attestation failed for ${binding.seat_id}`);
+        }
+      }
       // Seats that already carry a `reg.pane_created` fact. A prior boot could
       // have torn (createSeat committed, its append did not) — the pane persists
       // but the fact was lost. Presence WITHOUT attestation is that torn state.
@@ -391,7 +404,7 @@ export class Daemon {
           continue;
         }
         await recordCreated(seat);
-        (estate === 'created' ? created : backfilled).push(seat);
+        (estate.state === 'created' ? created : backfilled).push(seat);
       }
 
       return { created, existing, backfilled, failed };

@@ -10,10 +10,14 @@
 // The interface is injectable so tests run against an in-memory fake with zero
 // tmux dependency; on-box acceptance exercises the real plane.
 
-import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS } from './estate.ts';
+import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
+export type EstateEnsureResult = {
+  state: 'created' | 'existing';
+  rebuilt_pages: TxdPage[];
+};
 
 export type SendTraceEvent = {
   kind: 'literal_insert' | 'submit_enter' | 'submit_verify';
@@ -36,8 +40,8 @@ export interface TmuxControlPlane {
   killServer(): Promise<boolean>;
   /** Live seats as canonical ids + pane liveness. Never exposes %id. */
   listSeats(): Promise<SeatObservation[]>;
-  /** Create the declared estate on an empty server, validate it if present, or refuse loud. */
-  ensureEstate(): Promise<'created' | 'existing'>;
+  /** Create/repair the declared estate and report every page whose processes were reconstructed. */
+  ensureEstate(): Promise<EstateEnsureResult>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
   /** Kill the seat's pane (teardown). Idempotent. */
@@ -319,7 +323,7 @@ export class RealTmux implements TmuxControlPlane {
     }
   }
 
-  async ensureEstate(): Promise<'created' | 'existing'> {
+  async ensureEstate(): Promise<EstateEnsureResult> {
     if (!(await this.reachable())) {
       throw new Error('txd tmux server is not externally owned; tx-estate.service must start it before txd');
     }
@@ -332,6 +336,7 @@ export class RealTmux implements TmuxControlPlane {
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
       const observed = await this.listSeats();
       const observedByPage = new Map<string, SeatObservation[]>();
+      const rebuilt_pages: TxdPage[] = [];
       for (const seat of observed) {
         const page = seat.seat_id.split(':', 1)[0]!;
         observedByPage.set(page, [...(observedByPage.get(page) ?? []), seat]);
@@ -342,8 +347,9 @@ export class RealTmux implements TmuxControlPlane {
         const expected = [...expectedSeats].sort();
         const healthy = live.length === expected.length && live.every((seat, index) => seat === expected[index]);
         if (!healthy && !(await this.rebuildPage(page))) throw new Error(`txd failed to reconstruct damaged canonical page ${page}`);
+        if (!healthy) rebuilt_pages.push(page as TxdPage);
       }
-      if (this.isCanonicalEstate(await this.estateRows())) return 'existing';
+      if (this.isCanonicalEstate(await this.estateRows())) return { state: 'existing', rebuilt_pages };
       throw new Error('txd canonical estate recovery postcondition failed');
     }
 
@@ -411,7 +417,7 @@ export class RealTmux implements TmuxControlPlane {
       ]);
 
       if (!this.isCanonicalEstate(await this.estateRows())) throw new Error('txd canonical estate postcondition failed');
-      return 'created';
+      return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
     } catch (error) {
       if (sessionCreated) await this.command('rollback_estate', 'estate', ['kill-session', '-t', TXD_SESSION]);
       throw error;
@@ -572,32 +578,34 @@ export class FakeTmux implements TmuxControlPlane {
   async listSeats(): Promise<SeatObservation[]> {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));
   }
-  async ensureEstate(): Promise<'created' | 'existing'> {
+  async ensureEstate(): Promise<EstateEnsureResult> {
     if (this.shape.sessions.length > 0) {
       const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && JSON.stringify(this.shape.windows) === JSON.stringify(TXD_WINDOWS);
       const allLive = TXD_ESTATE.every((seat) => this.seats.get(seat)?.pane === 'live');
-      if (canonical && allLive) return 'existing';
+      if (canonical && allLive) return { state: 'existing', rebuilt_pages: [] };
       const recoverable = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && Object.entries(this.shape.windows).every(([page, seats]) => {
           const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
           return expected !== undefined && seats.every((seat) => expected.includes(seat));
         });
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      const rebuilt_pages: TxdPage[] = [];
       for (const [page, expectedSeats] of Object.entries(TXD_WINDOWS)) {
         const shaped = this.shape.windows[page] ?? [];
         const healthy = shaped.length === expectedSeats.length
           && expectedSeats.every((seat) => shaped.includes(seat) && this.seats.get(seat)?.pane === 'live');
         if (!healthy && !(await this.rebuildPage(page))) throw new Error(`FakeTmux: failed page reconstruction ${page}`);
+        if (!healthy) rebuilt_pages.push(page as TxdPage);
       }
-      return 'existing';
+      return { state: 'existing', rebuilt_pages };
     }
     this.shape = {
       sessions: [TXD_SESSION],
       windows: Object.fromEntries(Object.entries(TXD_WINDOWS).map(([window, seats]) => [window, [...seats]])),
     };
     for (const seat of TXD_ESTATE) this.seats.set(seat, { pane: 'live' });
-    return 'created';
+    return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
   }
   estateShape(): { sessions: string[]; windows: Record<string, string[]> } {
     return structuredClone(this.shape);

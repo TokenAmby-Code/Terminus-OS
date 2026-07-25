@@ -113,15 +113,51 @@ test('refuses the legacy decomposed estate without mutation or events', async ()
   expect(tmux.estateShape().windows).not.toHaveProperty('reservists');
 });
 
-test('boot constructor reconstructs a damaged canonical page from the declaration', async () => {
+test('boot constructor reconstructs a damaged canonical page and retires bindings whose processes were wiped', async () => {
   const { store, tmux, d } = setup();
   await d.constructEstate();
+  await d.launch({
+    seat_id: 'palace:E',
+    schema_version: SCHEMA_VERSION,
+    identity: 'boot-wiped',
+    persona: 'astartes',
+    tint: '#1',
+  });
   tmux.deleteOutOfBand('palace:E');
   const result = await d.constructEstate();
   expect(result.failed).toEqual([]);
   expect(tmux.rebuiltPages()).toEqual(['palace']);
   expect(tmux.estateShape().windows.palace).toEqual(['palace:W', 'palace:N', 'palace:S', 'palace:E']);
-  expect(await store.count()).toBe(TXD_ESTATE.length);
+  expect((await d.estateRows()).find((row) => row.seat_id === 'palace:E')).toMatchObject({
+    binding: 'unbound',
+    pane: 'live',
+  });
+  expect((await store.readAll()).slice(-3).map((event) => event.event_type)).toEqual([
+    'reg.retired',
+    'reg.process_reaped',
+    'reg.seat_cleared',
+  ]);
+});
+
+test('boot constructor clears all old bindings when a fresh estate server rebuilds every page', async () => {
+  const store = new MemoryEventStore();
+  const original = new Daemon(store, new FakeTmux());
+  await original.constructEstate();
+  await original.launch({
+    seat_id: 'somnium:NE',
+    schema_version: SCHEMA_VERSION,
+    identity: 'volatile-wiped',
+    persona: 'astartes',
+    tint: '#2',
+  });
+
+  const rebuilt = new Daemon(store, new FakeTmux());
+  await rebuilt.constructEstate();
+
+  expect((await rebuilt.estateRows()).find((row) => row.seat_id === 'somnium:NE')).toMatchObject({
+    binding: 'unbound',
+    pane: 'live',
+  });
 });
 
 test('keeps attested seats and backfills missing facts for an existing canonical estate', async () => {
