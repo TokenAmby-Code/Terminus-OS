@@ -37,6 +37,12 @@ test('real tmux read aborts an oversized buffer', async () => {
   loaded.stdin.write(oversized);
   loaded.stdin.end();
   expect(await loaded.exited).toBe(0);
-  const tmux = new RealTmux(socket, { audit: () => {} });
+  const audits: Array<Record<string, unknown>> = [];
+  const tmux = new RealTmux(socket, { audit: (record) => audits.push(record) });
   await expect(tmux.readClipboard()).rejects.toThrow('exceeds 1 MiB');
+  expect(audits).toContainEqual(expect.objectContaining({
+    operation: 'clipboard_push',
+    target: 'tx-clipboard',
+    outcome: 'failed',
+  }));
 });

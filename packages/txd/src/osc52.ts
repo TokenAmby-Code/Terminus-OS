@@ -54,12 +54,15 @@ export function validateAttachedClientTty(requested: string, attached: readonly 
 
 type RunResult = { code: number; stdout: string; stderr: string };
 type Run = (args: string[], stdin?: Uint8Array) => Promise<RunResult>;
+const TMUX_COMMAND_TIMEOUT_MS = 5_000;
 
 async function runTmux(socket: string, args: string[], stdin?: Uint8Array): Promise<RunResult> {
   const proc = Bun.spawn(['tmux', '-L', socket, ...args], {
     stdin: stdin === undefined ? undefined : 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
+    timeout: TMUX_COMMAND_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   });
   if (stdin !== undefined) {
     proc.stdin!.write(stdin);
@@ -103,7 +106,11 @@ export async function pushSelectionToClient(
     await run(['display-message', '-c', target, `clipboard push succeeded (${bytes.byteLength} bytes)`]);
     return bytes.byteLength;
   } catch (error) {
-    await run(['display-message', '-c', target, `clipboard push failed (${bytes.byteLength} bytes)`]);
+    try {
+      await run(['display-message', '-c', target, `clipboard push failed (${bytes.byteLength} bytes)`]);
+    } catch {
+      // Reporting is best-effort; the delivery error is the authoritative failure.
+    }
     throw error;
   }
 }

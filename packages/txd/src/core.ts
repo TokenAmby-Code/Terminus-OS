@@ -123,22 +123,26 @@ export class Daemon {
   }
 
   async clipboardPull(req: ClipboardPullRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number }> {
-    if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-    const bytes = await this.tmux.loadClipboard(req.content);
-    return { buffer_name: CLIPBOARD_BUFFER_NAME, bytes };
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const bytes = await this.tmux.loadClipboard(req.content);
+      return { buffer_name: CLIPBOARD_BUFFER_NAME, bytes };
+    });
   }
 
   async clipboardPush(req: ClipboardPushRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number; content_base64: string }> {
-    if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-    const bytes = await this.tmux.readClipboard();
-    if (bytes.byteLength > MAX_CLIPBOARD_BYTES) throw new Error('clipboard payload exceeds 1 MiB');
-    try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
-    catch { throw new Error('clipboard payload is not valid UTF-8'); }
-    return {
-      buffer_name: CLIPBOARD_BUFFER_NAME,
-      bytes: bytes.byteLength,
-      content_base64: Buffer.from(bytes).toString('base64'),
-    };
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const bytes = await this.tmux.readClipboard();
+      if (bytes.byteLength > MAX_CLIPBOARD_BYTES) throw new Error('clipboard payload exceeds 1 MiB');
+      try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+      catch { throw new Error('clipboard payload is not valid UTF-8'); }
+      return {
+        buffer_name: CLIPBOARD_BUFFER_NAME,
+        bytes: bytes.byteLength,
+        content_base64: Buffer.from(bytes).toString('base64'),
+      };
+    });
   }
 
   private commTargets(identity: string, proj: Projections): CommTarget[] {

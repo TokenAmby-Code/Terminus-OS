@@ -1,6 +1,9 @@
 // One-shot OSC 52 bridge — behavioral-pin lane.
 
-import { describe, expect, test } from 'bun:test';
+import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { MAX_CLIPBOARD_BYTES } from '@terminus-os/contracts';
 import {
   osc52Sequence,
@@ -97,5 +100,71 @@ describe('client-scoped delivery', () => {
     const report = calls.at(-1)?.join(' ') ?? '';
     expect(report).toContain(`clipboard push failed (${secret.byteLength} bytes)`);
     expect(report).not.toContain('secret-content');
+  });
+
+  test('reporting failure cannot replace the original delivery error', async () => {
+    await expect(pushSelectionToClient(
+      new TextEncoder().encode('secret'),
+      '/dev/pts/7',
+      'test',
+      {
+        run: async (args) => {
+          if (args[0] === 'list-clients') return { code: 0, stdout: '/dev/pts/7\n', stderr: '' };
+          if (args[0] === 'display-message') throw new Error('reporting failed');
+          return { code: 1, stdout: '', stderr: 'load failed' };
+        },
+      },
+    )).rejects.toThrow('could not load tx-clipboard');
+  });
+});
+
+describe('default OSC 52 delivery path', () => {
+  const socket = `tx-osc52-default-${process.pid}`;
+  const channel = `tx-osc52-attached-${process.pid}`;
+  let directory = '';
+
+  afterAll(async () => {
+    Bun.spawnSync(['tmux', '-L', socket, 'kill-server']);
+    if (directory) await rm(directory, { recursive: true, force: true });
+  });
+
+  test('uses real tmux stdin and writes only the attached pseudo-tty', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'tx-osc52-default-'));
+    const transcript = join(directory, 'tty.log');
+    expect(Bun.spawnSync([
+      'tmux', '-L', socket, '-f', '/dev/null',
+      'new-session', '-d', '-s', 'main',
+    ]).exitCode).toBe(0);
+    expect(Bun.spawnSync([
+      'tmux', '-L', socket, 'set-hook', '-g', 'client-attached',
+      `wait-for -S ${channel}`,
+    ]).exitCode).toBe(0);
+
+    const attached = Bun.spawn([
+      'script', '-qefc', `tmux -L ${socket} attach-session -t main`, transcript,
+    ], {
+      stdout: 'ignore',
+      stderr: 'pipe',
+      env: { ...process.env, TERM: 'xterm-256color' },
+    });
+    const observed = Bun.spawn(['tmux', '-L', socket, 'wait-for', channel], {
+      stdout: 'ignore',
+      stderr: 'pipe',
+      timeout: 5_000,
+      killSignal: 'SIGKILL',
+    });
+    expect(await observed.exited).toBe(0);
+
+    const listed = Bun.spawnSync(['tmux', '-L', socket, 'list-clients', '-F', '#{client_tty}']);
+    expect(listed.exitCode).toBe(0);
+    const tty = new TextDecoder().decode(listed.stdout).trim();
+    const bytes = new TextEncoder().encode('real path\n雪 😀');
+    expect(await pushSelectionToClient(bytes, tty, socket)).toBe(bytes.byteLength);
+
+    expect(Bun.spawnSync(['tmux', '-L', socket, 'save-buffer', '-b', 'tx-clipboard', '-']).stdout)
+      .toEqual(Buffer.from(bytes));
+    Bun.spawnSync(['tmux', '-L', socket, 'kill-server']);
+    await attached.exited;
+    expect((await readFile(transcript)).includes(osc52Sequence(bytes))).toBe(true);
   });
 });

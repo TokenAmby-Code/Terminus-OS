@@ -279,8 +279,17 @@ export class RealTmux implements TmuxControlPlane {
     } catch {
       result = { code: 1, stdout: new Uint8Array(), stderr: 'transport failure' };
     }
-    if (result.overflow) throw new Error('clipboard payload exceeds 1 MiB');
     const classified = { code: result.code, stdout: '', stderr: result.stderr };
+    if (result.overflow) {
+      this.audit({
+        operation: 'clipboard_push',
+        target: 'tx-clipboard',
+        outcome: 'failed',
+        duration_ms: Math.max(0, performance.now() - started),
+        stderr_category: this.stderrCategory(classified),
+      });
+      throw new Error('clipboard payload exceeds 1 MiB');
+    }
     this.audit({
       operation: 'clipboard_push',
       target: 'tx-clipboard',

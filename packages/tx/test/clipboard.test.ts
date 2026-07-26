@@ -3,7 +3,7 @@
 import { expect, test } from 'bun:test';
 import { CLIPBOARD_BUFFER_NAME, SCHEMA_VERSION } from '@terminus-os/contracts';
 import { runCli, type CliDependencies } from '../src/cli.ts';
-import { createLocalClipboard, type LocalClipboard } from '../src/clipboard.ts';
+import { createLocalClipboard, runProcess, type LocalClipboard } from '../src/clipboard.ts';
 
 function harness(response: unknown, clipboard: LocalClipboard) {
   const stdout: string[] = [];
@@ -110,4 +110,12 @@ test('malformed service responses cannot mutate the local clipboard', async () =
   expect(writes).toBe(0);
   expect(h.stderr.join('\n')).toContain('invalid clipboard response');
   expect(h.stderr.join('\n')).not.toContain('secret');
+});
+
+test('local clipboard subprocess stderr is bounded', async () => {
+  await expect(runProcess([
+    '/bin/sh',
+    '-c',
+    'head -c 1048577 /dev/zero >&2',
+  ])).rejects.toThrow('local clipboard exceeds 1 MiB');
 });

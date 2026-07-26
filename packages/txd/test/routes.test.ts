@@ -140,6 +140,37 @@ test('clipboard pull/push preserves opaque UTF-8 without persistence or executio
   }
 });
 
+test('clipboard RPC operations are serialized through the daemon writer lock', async () => {
+  let releasePull!: () => void;
+  let enteredPull!: () => void;
+  const pullBlocked = new Promise<void>((resolve) => { releasePull = resolve; });
+  const pullEntered = new Promise<void>((resolve) => { enteredPull = resolve; });
+  const order: string[] = [];
+  class SerializedTmux extends FakeTmux {
+    override async loadClipboard(text: string): Promise<number> {
+      order.push('pull-start');
+      enteredPull();
+      await pullBlocked;
+      order.push('pull-end');
+      return new TextEncoder().encode(text).byteLength;
+    }
+
+    override async readClipboard(): Promise<Uint8Array> {
+      order.push('push');
+      return new TextEncoder().encode('remote');
+    }
+  }
+  const d = new Daemon(new MemoryEventStore(), new SerializedTmux());
+  const pull = d.clipboardPull({ schema_version: SCHEMA_VERSION, content: 'local' });
+  await pullEntered;
+  const push = d.clipboardPush({ schema_version: SCHEMA_VERSION, buffer_name: CLIPBOARD_BUFFER_NAME });
+  await Promise.resolve();
+  expect(order).toEqual(['pull-start']);
+  releasePull();
+  await Promise.all([pull, push]);
+  expect(order).toEqual(['pull-start', 'pull-end', 'push']);
+});
+
 test('clipboard validation errors redact sensitive payloads', async () => {
   const secret = 'never-log-this-secret';
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test' });

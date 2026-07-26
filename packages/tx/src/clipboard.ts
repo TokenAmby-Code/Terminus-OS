@@ -33,7 +33,7 @@ async function readLimited(stream: ReadableStream<Uint8Array>, limit: number): P
   return out;
 }
 
-async function runProcess(argv: string[], stdin?: Uint8Array): Promise<ProcessResult> {
+export async function runProcess(argv: string[], stdin?: Uint8Array): Promise<ProcessResult> {
   let proc: ReturnType<typeof Bun.spawn>;
   try {
     proc = Bun.spawn(argv, {
@@ -52,7 +52,8 @@ async function runProcess(argv: string[], stdin?: Uint8Array): Promise<ProcessRe
   try {
     const [stdout, stderr, code] = await Promise.all([
       readLimited(proc.stdout as ReadableStream<Uint8Array>, MAX_CLIPBOARD_BYTES),
-      new Response(proc.stderr as ReadableStream<Uint8Array>).text(),
+      readLimited(proc.stderr as ReadableStream<Uint8Array>, MAX_CLIPBOARD_BYTES)
+        .then((bytes) => new TextDecoder().decode(bytes)),
       proc.exited,
     ]);
     return { code, stdout, stderr };
