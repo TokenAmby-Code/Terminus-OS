@@ -1,0 +1,18 @@
+#!/usr/bin/env bun
+
+import { pushSelectionToClient, readBoundedClipboard } from '../src/osc52.ts';
+
+const ttyIndex = process.argv.indexOf('--tty');
+const tty = ttyIndex >= 0 ? process.argv[ttyIndex + 1] : undefined;
+if (!tty || process.argv.length !== 4) {
+  console.error('tx-osc52: usage: tx-osc52 --tty <attached-client-tty>');
+  process.exit(2);
+}
+
+try {
+  const bytes = await readBoundedClipboard(Bun.stdin.stream());
+  await pushSelectionToClient(bytes, tty, process.env.TXD_TMUX_SOCKET ?? 'k12');
+} catch (error) {
+  console.error(`tx-osc52: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}

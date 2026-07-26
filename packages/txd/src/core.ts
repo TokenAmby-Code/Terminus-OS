@@ -11,6 +11,8 @@ import {
   type ActivityBoardRow,
   type CloseRequest,
   type CloseResponse,
+  type ClipboardPullRequest,
+  type ClipboardPushRequest,
   type CommAccepted,
   type CommCallback,
   type CommHook,
@@ -46,6 +48,8 @@ import {
   type SubscribeResponse,
   type TmuxLifecycleEventRequest,
   type TmuxLifecycleEventResponse,
+  CLIPBOARD_BUFFER_NAME,
+  MAX_CLIPBOARD_BYTES,
 } from '@terminus-os/contracts';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
@@ -116,6 +120,29 @@ export class Daemon {
   private wakeAsk(askId: string): void {
     for (const wake of this.commWaiters.get(askId) ?? []) wake();
     this.commWaiters.delete(askId);
+  }
+
+  async clipboardPull(req: ClipboardPullRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number }> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const bytes = await this.tmux.loadClipboard(req.content);
+      return { buffer_name: CLIPBOARD_BUFFER_NAME, bytes };
+    });
+  }
+
+  async clipboardPush(req: ClipboardPushRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number; content_base64: string }> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const bytes = await this.tmux.readClipboard();
+      if (bytes.byteLength > MAX_CLIPBOARD_BYTES) throw new Error('clipboard payload exceeds 1 MiB');
+      try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+      catch { throw new Error('clipboard payload is not valid UTF-8'); }
+      return {
+        buffer_name: CLIPBOARD_BUFFER_NAME,
+        bytes: bytes.byteLength,
+        content_base64: Buffer.from(bytes).toString('base64'),
+      };
+    });
   }
 
   private commTargets(identity: string, proj: Projections): CommTarget[] {
