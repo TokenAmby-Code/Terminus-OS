@@ -20,6 +20,10 @@ export type DaemonConfig = {
   rotationLockFile: string;
   /** Private handoff FIFO between the retiring and reconstructed daemon generations. */
   rotationSignalFifo: string;
+  /** Sanctioned Fleet wrapper executable. Identity remains compiled into txd. */
+  agentWrapper: string;
+  /** Machine-local root containing rendered persona workspaces. */
+  personaWorkspaceRoot: string;
 };
 
 // Partial with explicit undefined: the root tsconfig pins
@@ -62,6 +66,8 @@ function envDefaults(): PartialConfig {
     tmuxSocket: process.env.TXD_TMUX_SOCKET,
     rotationLockFile: process.env.TXD_ROTATION_LOCK_FILE,
     rotationSignalFifo: process.env.TXD_ROTATION_SIGNAL_FIFO,
+    agentWrapper: process.env.TXD_AGENT_WRAPPER,
+    personaWorkspaceRoot: process.env.TXD_PERSONA_WORKSPACE_ROOT,
   };
 }
 
@@ -75,6 +81,8 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     tmuxSocket: raw.tmuxSocket ?? env.tmuxSocket ?? HARD_DEFAULTS.tmuxSocket,
     rotationLockFile: raw.rotationLockFile ?? env.rotationLockFile ?? HARD_DEFAULTS.rotationLockFile,
     rotationSignalFifo: raw.rotationSignalFifo ?? env.rotationSignalFifo ?? HARD_DEFAULTS.rotationSignalFifo,
+    agentWrapper: raw.agentWrapper ?? env.agentWrapper,
+    personaWorkspaceRoot: raw.personaWorkspaceRoot ?? env.personaWorkspaceRoot,
   };
 
   if (!cfg.bind) throw new Error('txd config error: bind is required');
@@ -90,6 +98,8 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
   if (!cfg.tmuxSocket) throw new Error('txd config error: tmuxSocket is required');
   if (!cfg.rotationLockFile) throw new Error('txd config error: rotationLockFile is required');
   if (!cfg.rotationSignalFifo) throw new Error('txd config error: rotationSignalFifo is required');
+  if (!cfg.agentWrapper) throw new Error('txd config error: agentWrapper is required');
+  if (!cfg.personaWorkspaceRoot) throw new Error('txd config error: personaWorkspaceRoot is required');
 
   return cfg as DaemonConfig;
 }

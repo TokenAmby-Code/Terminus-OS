@@ -18,6 +18,14 @@ export type EstateEnsureResult = {
   state: 'created' | 'existing';
   rebuilt_pages: TxdPage[];
 };
+export type EstateGeneration = 'empty' | 'canonical' | 'council-mechanicus' | 'migration-interrupted' | 'recoverable' | 'foreign';
+export type StaticAgentLaunch = {
+  seatId: string;
+  engine: 'claude' | 'codex';
+  wrapper: string;
+  workspace: string;
+  environment: Record<string, string>;
+};
 
 export type SendTraceEvent = {
   kind: 'literal_insert' | 'submit_enter' | 'submit_verify';
@@ -42,6 +50,10 @@ export interface TmuxControlPlane {
   listSeats(): Promise<SeatObservation[]>;
   /** Create/repair the declared estate and report every page whose processes were reconstructed. */
   ensureEstate(): Promise<EstateEnsureResult>;
+  /** Classify only exact known generations before any topology mutation. */
+  estateGeneration(): Promise<EstateGeneration>;
+  /** Execute/resume the one approved Council topology migration. */
+  migrateCouncil(pending: boolean): Promise<boolean>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
   /** Kill the seat's pane (teardown). Idempotent. */
@@ -58,6 +70,10 @@ export interface TmuxControlPlane {
   resetSeat(seatId: string): Promise<boolean>;
   /** Reconstruct every terminal process and the declared geometry inside one page border. */
   rebuildPage(page: string): Promise<boolean>;
+  /** Start through the sanctioned wrapper in the already-declared physical seat. */
+  startStaticAgent(launch: StaticAgentLaunch): Promise<boolean>;
+  /** Prove the wrapper/engine process pair belongs to the expected physical seat. */
+  attestStaticAgent(seatId: string, wrapperPid: number, enginePid: number, engine: 'claude' | 'codex'): Promise<boolean>;
   /**
    * Canonical ids of seats an attached client is actively on within windowMs —
    * a point-in-time READ of the server-maintained client_activity + active
@@ -69,6 +85,24 @@ export interface TmuxControlPlane {
 }
 
 const CANON_OPT = '@canonical_id';
+type EstateRow = {
+  session: string;
+  window: string;
+  seat: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  windowWidth: number;
+  windowHeight: number;
+};
+const PREVIOUS_WINDOWS = {
+  reservists: ['reservists:W', 'reservists:N', 'reservists:S', 'reservists:E'],
+  palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
+  somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
+  council: ['council:custodes', 'council:pax', 'council:malcador', 'council:true-terminal', 'council:administratum'],
+  mechanicus: ['mechanicus:fabricator-general', 'mechanicus:orchestrator'],
+} as const;
 
 export type TmuxCommandResult = { code: number; stdout: string; stderr: string };
 type TmuxRunner = (socket: string, args: string[]) => Promise<TmuxCommandResult>;
@@ -210,23 +244,114 @@ export class RealTmux implements TmuxControlPlane {
     return this.checked([...args, '-c', this.homeDirectory()], operation, target);
   }
 
-  private async estateRows(): Promise<Array<{ session: string; window: string; seat: string }>> {
+  private async estateRows(): Promise<EstateRow[]> {
     const result = await this.command('observe_estate', 'estate', [
-      'list-panes', '-a', '-F', `#{session_name}\t#{window_name}\t#{${CANON_OPT}}`,
+      'list-panes', '-a', '-F',
+      `#{session_name}\t#{window_name}\t#{${CANON_OPT}}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}`,
     ]);
     if (result.code !== 0) return [];
     return result.stdout.trim().split('\n').filter(Boolean).map((line) => {
-      const [session = '', window = '', seat = ''] = line.split('\t');
-      return { session, window, seat };
+      const [
+        session = '', window = '', seat = '', left = '', top = '', width = '',
+        height = '', windowWidth = '', windowHeight = '',
+      ] = line.split('\t');
+      return {
+        session,
+        window,
+        seat,
+        left: Number(left),
+        top: Number(top),
+        width: Number(width),
+        height: Number(height),
+        windowWidth: Number(windowWidth),
+        windowHeight: Number(windowHeight),
+      };
     });
   }
 
-  private isCanonicalEstate(rows: Array<{ session: string; window: string; seat: string }>): boolean {
-    const expected = Object.entries(TXD_WINDOWS)
+  private pageGeometryMatches(window: string, seats: readonly string[], rows: EstateRow[]): boolean {
+    const panes = rows.filter((row) => row.session === TXD_SESSION && row.window === window);
+    if (panes.length !== seats.length) return false;
+    const bySeat = new Map(panes.map((row) => [row.seat, row]));
+    if (seats.some((seat) => !bySeat.has(seat))) return false;
+
+    if (window === 'council' && seats.length === 4) {
+      const nw = bySeat.get(seats[0]!)!;
+      const sw = bySeat.get(seats[1]!)!;
+      const ne = bySeat.get(seats[2]!)!;
+      const se = bySeat.get(seats[3]!)!;
+      const originTop = Math.min(...panes.map((pane) => pane.top));
+      return nw.left === 0 && nw.top === originTop
+        && sw.left === 0 && sw.top === nw.top + nw.height + 1
+        && ne.left === nw.width + 1 && ne.top === originTop
+        && se.left === ne.left && se.top === ne.top + ne.height + 1
+        && nw.width === sw.width && ne.width === se.width
+        && nw.height === ne.height && sw.height === se.height
+        && ne.left + ne.width === nw.windowWidth
+        && sw.top + sw.height === nw.windowHeight
+        && se.top + se.height === nw.windowHeight;
+    }
+    if (window === 'council' && seats.length === 5) {
+      // The preceding constructor repeatedly split the original top pane.
+      // Declaration order records creation/tag order; physical top-to-bottom
+      // order is first, then newest-to-oldest split.
+      const physicalOrder = [seats[0]!, seats[4]!, seats[3]!, seats[2]!, seats[1]!];
+      const stack = physicalOrder.map((seat) => bySeat.get(seat)!);
+      const originTop = Math.min(...panes.map((pane) => pane.top));
+      return stack.every((pane, index) =>
+        pane.left === 0
+        && pane.width === pane.windowWidth
+        && pane.top === (index === 0 ? originTop : stack[index - 1]!.top + stack[index - 1]!.height + 1),
+      ) && stack.at(-1)!.top + stack.at(-1)!.height === stack[0]!.windowHeight;
+    }
+    if (window === 'mechanicus' && seats.length === 2) {
+      const west = bySeat.get(seats[0]!)!;
+      const east = bySeat.get(seats[1]!)!;
+      const originTop = Math.min(...panes.map((pane) => pane.top));
+      return west.left === 0 && west.top === originTop && east.top === originTop
+        && west.top + west.height === west.windowHeight
+        && east.top + east.height === west.windowHeight
+        && east.left === west.width + 1
+        && east.left + east.width === west.windowWidth;
+    }
+    return true;
+  }
+
+  private exactShape(rows: EstateRow[], windows: Record<string, readonly string[]>): boolean {
+    const expected = Object.entries(windows)
       .flatMap(([window, seats]) => seats.map((seat) => `${TXD_SESSION}\t${window}\t${seat}`))
       .sort();
     const actual = rows.map((row) => `${row.session}\t${row.window}\t${row.seat}`).sort();
-    return actual.length === expected.length && actual.every((row, index) => row === expected[index]);
+    return actual.length === expected.length
+      && actual.every((row, index) => row === expected[index])
+      && Object.entries(windows).every(([window, seats]) => this.pageGeometryMatches(window, seats, rows));
+  }
+
+  private isCanonicalEstate(rows: EstateRow[]): boolean {
+    return this.exactShape(rows, TXD_WINDOWS);
+  }
+
+  async estateGeneration(): Promise<EstateGeneration> {
+    const rows = await this.estateRows();
+    if (rows.length === 0) return 'empty';
+    if (this.isCanonicalEstate(rows)) return 'canonical';
+    if (this.exactShape(rows, PREVIOUS_WINDOWS)) return 'council-mechanicus';
+    if (this.exactShape(rows, { ...TXD_WINDOWS, mechanicus: PREVIOUS_WINDOWS.mechanicus })) return 'migration-interrupted';
+    const recoverable = rows.every((row) => {
+      const seats = TXD_WINDOWS[row.window as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
+      return row.session === TXD_SESSION && seats !== undefined && (row.seat === '' || seats.includes(row.seat));
+    });
+    return recoverable ? 'recoverable' : 'foreign';
+  }
+
+  async migrateCouncil(pending: boolean): Promise<boolean> {
+    const generation = await this.estateGeneration();
+    if (generation === 'canonical') return pending;
+    if (generation !== 'council-mechanicus' && !(pending && generation === 'migration-interrupted')) return false;
+    if (generation === 'council-mechanicus' && !(await this.rebuildPage('council'))) return false;
+    const mechanicus = await this.command('retire_page', 'mechanicus', ['kill-window', '-t', `${TXD_SESSION}:mechanicus`]);
+    if (mechanicus.code !== 0 && this.stderrCategory(mechanicus) !== 'not_found') return false;
+    return this.isCanonicalEstate(await this.estateRows());
   }
 
   private async tag(paneId: string, seatId: string): Promise<void> {
@@ -270,13 +395,22 @@ export class RealTmux implements TmuxControlPlane {
       const southeast = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', northeast], 'split somnium southeast', page);
       panes = [first, north, south, northeast, southeast];
     } else if (page === 'council') {
-      panes = [first];
-      for (let index = 1; index < TXD_WINDOWS.council.length; index += 1) {
-        panes.push(await this.estateChecked(['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', first], `split council seat ${index}`, page));
-      }
-    } else if (page === 'mechanicus') {
-      const orchestrator = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', first], 'split mechanicus orchestrator', page);
-      panes = [first, orchestrator];
+      const northeast = await this.estateChecked(
+        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', first],
+        'split council east column',
+        page,
+      );
+      const southwest = await this.estateChecked(
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', first],
+        'split council southwest',
+        page,
+      );
+      const southeast = await this.estateChecked(
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', northeast],
+        'split council southeast',
+        page,
+      );
+      panes = [first, southwest, northeast, southeast];
     } else {
       throw new Error(`txd refused unknown page ${page}`);
     }
@@ -307,16 +441,12 @@ export class RealTmux implements TmuxControlPlane {
         return false;
       }
       await this.constructPage(page, seed);
-      const verified = await this.command('verify_rebuilt_page', page, [
-        'list-panes', '-t', target, '-F', `#{session_name}\t#{window_name}\t#{${CANON_OPT}}\t#{pane_dead}`,
-      ]);
-      if (verified.code !== 0) return false;
-      const expected = [...TXD_WINDOWS[page as keyof typeof TXD_WINDOWS]].sort();
-      const actual = verified.stdout.trim().split('\n').filter(Boolean).flatMap((line) => {
-        const [session, window, seat, dead] = line.split('\t');
-        return session === TXD_SESSION && window === page && dead === '0' && seat ? [seat] : [];
-      }).sort();
-      return actual.length === expected.length && actual.every((seat, index) => seat === expected[index]);
+      const rows = await this.estateRows();
+      const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS];
+      const observed = await this.listSeats();
+      const live = new Set(observed.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id));
+      return expected.every((seat) => live.has(seat))
+        && this.pageGeometryMatches(page, expected, rows);
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'page_rebuild_failed', page, error: String(error) }));
       return false;
@@ -394,27 +524,20 @@ export class RealTmux implements TmuxControlPlane {
         ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'council'],
         'create council window',
       );
-      const councilPanes = [council];
-      for (let index = 1; index < TXD_WINDOWS.council.length; index += 1) {
-        councilPanes.push(await this.estateChecked(
-          ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', council],
-          `split council seat ${index}`,
-        ));
-      }
+      const councilNE = await this.estateChecked(
+        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', council],
+        'split council east column',
+      );
+      const councilSW = await this.estateChecked(
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', council],
+        'split council southwest',
+      );
+      const councilSE = await this.estateChecked(
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', '-l', '50%', '-t', councilNE],
+        'split council southeast',
+      );
+      const councilPanes = [council, councilSW, councilNE, councilSE];
       await Promise.all(TXD_WINDOWS.council.map((seat, index) => this.tag(councilPanes[index]!, seat)));
-
-      const mechanicus = await this.estateChecked(
-        ['new-window', '-d', '-P', '-F', '#{pane_id}', '-t', TXD_SESSION, '-n', 'mechanicus'],
-        'create mechanicus window',
-      );
-      const orchestrator = await this.estateChecked(
-        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', mechanicus],
-        'split mechanicus orchestrator',
-      );
-      await Promise.all([
-        this.tag(mechanicus, TXD_WINDOWS.mechanicus[0]),
-        this.tag(orchestrator, TXD_WINDOWS.mechanicus[1]),
-      ]);
 
       if (!this.isCanonicalEstate(await this.estateRows())) throw new Error('txd canonical estate postcondition failed');
       return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
@@ -480,6 +603,45 @@ export class RealTmux implements TmuxControlPlane {
     if ((await this.command('reset_seat_process', seatId, ['respawn-pane', '-k', '-t', paneId])).code !== 0) return false;
     const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
     return verified.code === 0 && verified.stdout.trim() === seatId;
+  }
+
+  private shellQuote(value: string): string {
+    return `'${value.replaceAll("'", "'\"'\"'")}'`;
+  }
+
+  async startStaticAgent(launch: StaticAgentLaunch): Promise<boolean> {
+    const paneId = await this.resolvePane(launch.seatId);
+    if (!paneId) return false;
+    const environment = Object.entries(launch.environment).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+    const command = `${this.shellQuote(launch.wrapper)} ${launch.engine}`;
+    const result = await this.command('start_static_agent', launch.seatId, [
+      'respawn-pane', '-k', '-c', launch.workspace, ...environment, '-t', paneId, command,
+    ]);
+    return result.code === 0;
+  }
+
+  async attestStaticAgent(
+    seatId: string,
+    wrapperPid: number,
+    enginePid: number,
+    engine: 'claude' | 'codex',
+  ): Promise<boolean> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return false;
+    const pane = await this.command('attest_static_agent', seatId, [
+      'display-message', '-p', '-t', paneId, '#{pane_pid}\t#{pane_dead}',
+    ]);
+    if (pane.code !== 0) return false;
+    const [observedPid, dead] = pane.stdout.trim().split('\t');
+    if (Number(observedPid) !== wrapperPid || dead !== '0') return false;
+    const stat = Bun.file(`/proc/${enginePid}/stat`);
+    const comm = Bun.file(`/proc/${enginePid}/comm`);
+    if (!(await stat.exists()) || !(await comm.exists())) return false;
+    const rawStat = await stat.text();
+    const afterName = rawStat.slice(rawStat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    const parentPid = Number(afterName[1]);
+    const processName = (await comm.text()).trim();
+    return parentPid === wrapperPid && (processName === engine || processName.startsWith(engine));
   }
 
   async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
@@ -559,6 +721,8 @@ export class FakeTmux implements TmuxControlPlane {
   reachableFlag = true;
   killed = false;
   private commands = new Map<string, string>();
+  private staticAgents = new Map<string, { wrapperPid: number; enginePid: number; engine: 'claude' | 'codex'; launch: StaticAgentLaunch }>();
+  private staticStartFailures = new Set<string>();
   private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
 
   async reachable(): Promise<boolean> {
@@ -607,6 +771,26 @@ export class FakeTmux implements TmuxControlPlane {
     for (const seat of TXD_ESTATE) this.seats.set(seat, { pane: 'live' });
     return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
   }
+  async estateGeneration(): Promise<EstateGeneration> {
+    if (this.shape.sessions.length === 0) return 'empty';
+    if (JSON.stringify(this.shape.windows) === JSON.stringify(TXD_WINDOWS)) return 'canonical';
+    if (JSON.stringify(this.shape.windows) === JSON.stringify(PREVIOUS_WINDOWS)) return 'council-mechanicus';
+    if (JSON.stringify(this.shape.windows) === JSON.stringify({ ...TXD_WINDOWS, mechanicus: [...PREVIOUS_WINDOWS.mechanicus] })) return 'migration-interrupted';
+    const recoverable = Object.entries(this.shape.windows).every(([page, seats]) => {
+      const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
+      return expected !== undefined && seats.every((seat) => expected.includes(seat));
+    });
+    return recoverable ? 'recoverable' : 'foreign';
+  }
+  async migrateCouncil(pending: boolean): Promise<boolean> {
+    const generation = await this.estateGeneration();
+    if (generation === 'canonical') return pending;
+    if (generation !== 'council-mechanicus' && !(pending && generation === 'migration-interrupted')) return false;
+    if (generation === 'council-mechanicus' && !(await this.rebuildPage('council'))) return false;
+    delete this.shape.windows.mechanicus;
+    for (const seat of PREVIOUS_WINDOWS.mechanicus) this.seats.delete(seat);
+    return (await this.estateGeneration()) === 'canonical';
+  }
   estateShape(): { sessions: string[]; windows: Record<string, string[]> } {
     return structuredClone(this.shape);
   }
@@ -627,6 +811,27 @@ export class FakeTmux implements TmuxControlPlane {
         'council:administratum': ['council:administratum'],
         'mechanicus:fabricator-general': ['mechanicus:fabricator-general'],
         'mechanicus:orchestrator': ['mechanicus:orchestrator'],
+      },
+    };
+    for (const seats of Object.values(this.shape.windows)) {
+      for (const seat of seats) this.seats.set(seat, { pane: 'live' });
+    }
+  }
+  seedCouncilMechanicusEstate(): void {
+    this.shape = {
+      sessions: [TXD_SESSION],
+      windows: Object.fromEntries(Object.entries(PREVIOUS_WINDOWS).map(([page, seats]) => [page, [...seats]])),
+    };
+    for (const seats of Object.values(this.shape.windows)) {
+      for (const seat of seats) this.seats.set(seat, { pane: 'live' });
+    }
+  }
+  seedInterruptedCouncilMigration(): void {
+    this.shape = {
+      sessions: [TXD_SESSION],
+      windows: {
+        ...Object.fromEntries(Object.entries(TXD_WINDOWS).map(([page, seats]) => [page, [...seats]])),
+        mechanicus: [...PREVIOUS_WINDOWS.mechanicus],
       },
     };
     for (const seats of Object.values(this.shape.windows)) {
@@ -671,12 +876,35 @@ export class FakeTmux implements TmuxControlPlane {
     this.shape.sessions = [TXD_SESSION];
     this.shape.windows[page] = seats;
     for (const [seat] of this.seats) if (seat.startsWith(`${page}:`)) this.seats.delete(seat);
+    for (const [seat] of this.staticAgents) if (seat.startsWith(`${page}:`)) this.staticAgents.delete(seat);
     for (const seat of seats) {
       this.seats.set(seat, { pane: 'live' });
       this.commands.delete(seat);
     }
     this.pageRebuilds.push(page);
     return true;
+  }
+  async startStaticAgent(launch: StaticAgentLaunch): Promise<boolean> {
+    if (this.staticStartFailures.has(launch.seatId)) return false;
+    const seat = this.seats.get(launch.seatId);
+    if (!seat || seat.pane === 'dead') return false;
+    const ordinal = this.staticAgents.size + 1;
+    this.staticAgents.set(launch.seatId, {
+      wrapperPid: 10_000 + ordinal,
+      enginePid: 20_000 + ordinal,
+      engine: launch.engine,
+      launch,
+    });
+    this.commands.set(launch.seatId, launch.engine);
+    return true;
+  }
+  failStaticAgentStart(seatId: string): void { this.staticStartFailures.add(seatId); }
+  staticAgent(seatId: string) {
+    return this.staticAgents.get(seatId);
+  }
+  async attestStaticAgent(seatId: string, wrapperPid: number, enginePid: number, engine: 'claude' | 'codex'): Promise<boolean> {
+    const agent = this.staticAgents.get(seatId);
+    return agent?.wrapperPid === wrapperPid && agent.enginePid === enginePid && agent.engine === engine;
   }
   rebuiltPages(): string[] { return [...this.pageRebuilds]; }
   /** Test control: force reapSeat(seatId) to fail (simulates a wedged process). */

@@ -32,6 +32,7 @@
 
 import {
   BUS_SCHEMA_VERSION,
+  SCHEMA_VERSION,
   BusDeliverySchema,
   CloseRequestSchema,
   CommHookSchema,
@@ -41,6 +42,7 @@ import {
   LaunchRequestSchema,
   SendRequestSchema,
   StopRequestSchema,
+  StaticLaunchHandshakeSchema,
   SubscribeRequestSchema,
   TmuxLifecycleEventRequestSchema,
   type EstateReadResponse,
@@ -200,6 +202,17 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         return json(result, result.ok ? 200 : 409);
       },
     },
+    {
+      method: 'POST',
+      match: exact('/ingress/static-launch'),
+      label: 'POST /ingress/static-launch',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, StaticLaunchHandshakeSchema, 'invalid_static_launch_handshake');
+        if (parsed instanceof Response) return parsed;
+        const result = await daemon.acknowledgeStaticLaunch(parsed);
+        return json(result, result.acknowledged ? 200 : 409);
+      },
+    },
     // ── /agents/* — the deliberate-action plane ─────────────────────────────
     {
       method: 'POST',
@@ -319,7 +332,11 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/tmux/read/estate'),
       label: 'GET /tmux/read/estate',
       handler: async () => {
-        const body: EstateReadResponse = { schema_version: 1, rows: await daemon.estateRows() };
+        const body: EstateReadResponse = {
+          schema_version: SCHEMA_VERSION,
+          rows: await daemon.estateRows(),
+          static_personas: await daemon.staticPersonaReadiness(),
+        };
         return json(body);
       },
     },

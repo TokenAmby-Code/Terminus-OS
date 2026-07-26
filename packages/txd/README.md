@@ -25,11 +25,19 @@ contracts source, and the public route shape.
   silently synthesized lifecycle.
 - **Boot-time estate constructor.** `constructEstate()` stands one persistent
   tmux session (`main`) at boot: `reservists` (W/N/S/E), `palace` (W/N/S/E),
-  `somnium` (W/N/S/NE/SE), one five-pane `council` window, and one two-pane
-  `mechanicus` window. Every pane is resolved only through `@canonical_id`.
-  Construction is idempotent; an existing non-canonical estate is refused
-  loudly and must be cleared out-of-band before a later boot. txd is the
-  constructor; tx never constructs.
+  `somnium` (W/N/S/NE/SE), and one four-pane `council` window. Council is an
+  explicit 2×2 grid: Custodes NW, Fabricator-General SW, Pax NE, and
+  Orchestrator SE. Every pane is resolved only through `@canonical_id`.
+  Construction is idempotent. The exact preceding five-seat Council plus
+  two-seat Mechanicus generation is migrated once; arbitrary or foreign
+  shapes are refused before mutation. txd is the constructor; tx never
+  constructs.
+- **Static Council singletons.** Custodes (Claude) and Fabricator-General
+  (Codex) are compile-time declarations launched through the Fleet wrapper.
+  A private one-time handshake binds each fresh instance only after txd
+  attests the expected engine process in the expected physical seat. Pax and
+  Orchestrator remain live, unbound shells. Any Council reconstruction wipes
+  all four panes and launches fresh Custodes and Fabricator-General instances.
 
 ## HTTP surface — the RATIFIED planes
 
@@ -43,6 +51,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/reconcile`        | Replay-driven reconcile; p0 on contradiction     |
 | POST   | `/ctl/estate/rotate`    | Explicit estate, border-total page, or pane reset |
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` event ingress; reconstructs a damaged canonical page |
+| POST   | `/ingress/static-launch`| Private wrapper attestation for a pending static launch |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/send`          | Send chokepoint (enqueue-by-default)             |
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
@@ -67,6 +76,9 @@ each route is the ruled daemon behavior, unchanged.
   whether to reconstruct. A page reconstruction wipes every process, history,
   pane-local option, and split inside that page border, then rebuilds the full
   declared geometry before retiring the old bindings in event truth.
+- `/ingress/static-launch` is a private, one-time wrapper door. A request must
+  match a pending launch's token, instance, engine, and physical Council seat.
+  Forged, duplicated, stale, or mismatched handshakes create no binding.
 - `/tmux/read/*` is txd's ONLY public read surface — side-effect-free by
   construction. "entities" is dead as public API vocabulary, and the old
   per-entity event-history endpoint is REMOVED: agent-biography serving is not
@@ -85,13 +97,15 @@ Env/config-driven — no hardcoded machine values. A JSON file pointed at by
 `TXD_CONFIG` wins; otherwise env vars; otherwise localhost-safe defaults. Keys
 (see `txd.config.example.json`):
 
-| Key          | Env                                     | Default                                    |
-|--------------|-----------------------------------------|--------------------------------------------|
-| `bind`       | `TXD_BIND`                              | `127.0.0.1`                                |
-| `port`       | `TXD_PORT`                              | `7781`                                     |
-| `machine`    | `IMPERIUM_MACHINE`                      | **none — fail loud** (never guess the box) |
-| `db`         | `TXD_DB_SOCKET_DIR` / `TXD_DB_DATABASE` | socket `/var/run/postgresql`, db `terminus`|
-| `tmuxSocket` | `TXD_TMUX_SOCKET`                       | `k12`                                      |
+| Key                   | Env                                | Default                                    |
+|-----------------------|------------------------------------|--------------------------------------------|
+| `bind`                | `TXD_BIND`                         | `127.0.0.1`                                |
+| `port`                | `TXD_PORT`                         | `7781`                                     |
+| `machine`             | `IMPERIUM_MACHINE`                 | **none — fail loud** (never guess the box) |
+| `db`                  | `TXD_DB_SOCKET_DIR` / `TXD_DB_DATABASE` | socket `/var/run/postgresql`, db `terminus`|
+| `tmuxSocket`          | `TXD_TMUX_SOCKET`                  | `k12`                                      |
+| `agentWrapper`        | `TXD_AGENT_WRAPPER`                | **none — fail loud**                       |
+| `personaWorkspaceRoot`| `TXD_PERSONA_WORKSPACE_ROOT`       | **none — fail loud**                       |
 
 `machine` has **no default**: a daemon that guesses its own box identity is a
 bug, so config load fails loud when it is unset.
@@ -173,18 +187,16 @@ ExecStart, and PrivateTmp absence) are pinned in `test/systemd-unit.test.ts`.
 
 ### Migrating an existing estate
 
-The previous decomposed estate is intentionally non-canonical and txd refuses
-to reshape it in place. During an approved maintenance window, the operator
-must clear the socket and reconstruct it out-of-band, in this order:
+At boot, txd recognizes only the exact preceding generation: the ruled
+five-seat Council and two-seat Mechanicus windows alongside the unchanged
+estate pages. It persists `estate.topology_migration_requested` before any
+tmux mutation, rebuilds Council as the ruled 2×2 page, retires Mechanicus,
+decommissions the five displaced canonical seats in event truth, and records
+completion. A boot interrupted after the request resumes deterministically.
+Any unrequested partial migration or foreign shape fails before mutation.
 
-```bash
-tmux -L k12 kill-server
-systemctl --user restart tx-estate.service
-systemctl --user restart txd.service
-```
-
-This destroys every process on that tmux socket. Never run it as part of normal
-daemon startup or against an estate that has not been cleared for maintenance.
+The migration is page-scoped: non-Council panes and processes are preserved.
+Do not kill the tmux server or clear the estate socket for this migration.
 
 ## Develop
 

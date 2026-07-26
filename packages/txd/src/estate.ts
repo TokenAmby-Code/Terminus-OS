@@ -13,8 +13,8 @@ export const TXD_WINDOWS = {
   reservists: ['reservists:W', 'reservists:N', 'reservists:S', 'reservists:E'],
   palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
   somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
-  council: ['council:custodes', 'council:pax', 'council:malcador', 'council:true-terminal', 'council:administratum'],
-  mechanicus: ['mechanicus:fabricator-general', 'mechanicus:orchestrator'],
+  // Positional declaration: NW, SW, NE, SE.
+  council: ['council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator'],
 } as const;
 
 export type TxdPage = keyof typeof TXD_WINDOWS;
@@ -42,14 +42,51 @@ export const TXD_ESTATE: readonly string[] = [
   'somnium:NE',
   'somnium:SE',
 
-  // ── Perpetual singleton windows (build_workspace fixed persona seats) ──────
-  // council: the five ruling-body singletons.
+  // ── Fixed Council command page (NW, SW, NE, SE) ───────────────────────────
   'council:custodes',
+  'council:fabricator-general',
   'council:pax',
+  'council:orchestrator',
+];
+
+export const DECOMMISSIONED_COUNCIL_SEATS = [
   'council:malcador',
   'council:true-terminal',
   'council:administratum',
-  // mechanicus: the forge singletons.
   'mechanicus:fabricator-general',
   'mechanicus:orchestrator',
-];
+] as const;
+
+export type StaticPersonaDeclaration = {
+  seat: 'council:custodes' | 'council:fabricator-general';
+  engine: 'claude' | 'codex';
+  persona: 'custodes' | 'fabricator-general';
+  rank: 'overseer';
+  commander: string | null;
+  authority_principal: string;
+  continuity_kind: 'daily_note';
+  workspace: 'custodes' | 'fabricator-general';
+};
+
+export const STATIC_PERSONAS = [
+  {
+    seat: 'council:custodes',
+    engine: 'claude',
+    persona: 'custodes',
+    rank: 'overseer',
+    commander: null,
+    authority_principal: 'emperor',
+    continuity_kind: 'daily_note',
+    workspace: 'custodes',
+  },
+  {
+    seat: 'council:fabricator-general',
+    engine: 'codex',
+    persona: 'fabricator-general',
+    rank: 'overseer',
+    commander: 'council:custodes',
+    authority_principal: 'council:custodes',
+    continuity_kind: 'daily_note',
+    workspace: 'fabricator-general',
+  },
+] as const satisfies readonly StaticPersonaDeclaration[];

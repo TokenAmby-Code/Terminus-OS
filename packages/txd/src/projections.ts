@@ -41,10 +41,23 @@ export type Projections = {
   // whose next act.stop_reported has not yet folded (satiated-once). The stop
   // door reads this to fire the reflexive auto-close.
   openStopSubscriptions: Set<string>;
+  staticLaunches: Map<string, {
+    launch_id: string;
+    seat_id: string;
+    instance_id: string;
+    engine: 'claude' | 'codex';
+    token_hash: string;
+    state: 'awaiting_ack' | 'failed' | 'bound';
+  }>;
+  decommissionedSeats: Set<string>;
 };
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+function positiveInt(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null;
 }
 
 // Only accept a declared PaneState; an unexpected/typo'd payload string must not
@@ -68,6 +81,15 @@ export function buildProjections(events: EventRecord[]): Projections {
   const lastSeqByEntity = new Map<string, number>();
   const entityKey = (type: string, id: string): string => `${type}\x00${id}`;
   const contradictions: OpenContradiction[] = [];
+  const staticLaunches = new Map<string, {
+    launch_id: string;
+    seat_id: string;
+    instance_id: string;
+    engine: 'claude' | 'codex';
+    token_hash: string;
+    state: 'awaiting_ack' | 'failed' | 'bound';
+  }>();
+  const decommissionedSeats = new Set<string>();
 
   for (const e of events) {
     lastSeqByEntity.set(entityKey(e.entity_type, e.entity_id), e.seq);
@@ -75,6 +97,28 @@ export function buildProjections(events: EventRecord[]): Projections {
       case 'reg.pane_created':
         paneBySeat.set(e.entity_id, paneState(e.payload.pane_state));
         break;
+      case 'reg.static_launch_requested': {
+        const seat_id = str(e.payload.seat_id);
+        const instance_id = str(e.payload.instance_id);
+        const engine = e.payload.engine;
+        const token_hash = str(e.payload.token_hash);
+        if (seat_id && instance_id && token_hash && (engine === 'claude' || engine === 'codex')) {
+          staticLaunches.set(e.entity_id, {
+            launch_id: e.entity_id,
+            seat_id,
+            instance_id,
+            engine,
+            token_hash,
+            state: 'awaiting_ack',
+          });
+        }
+        break;
+      }
+      case 'reg.static_launch_failed': {
+        const launch = staticLaunches.get(e.entity_id);
+        if (launch) launch.state = 'failed';
+        break;
+      }
       case 'reg.teardown_started':
         // A real pane teardown kills the pane. Process death (process_reaped) is a
         // SEPARATE axis: reaping an agent respawns the estate pane bare (still live),
@@ -94,10 +138,25 @@ export function buildProjections(events: EventRecord[]): Projections {
           rank: str(e.payload.rank),
           commander: str(e.payload.commander),
           tint: str(e.payload.tint),
+          engine: e.payload.engine === 'claude' || e.payload.engine === 'codex' ? e.payload.engine : null,
+          static_launch_id: str(e.payload.static_launch_id),
+          wrapper_pid: positiveInt(e.payload.wrapper_pid),
+          engine_pid: positiveInt(e.payload.engine_pid),
+          authority_principal: str(e.payload.authority_principal),
+          continuity_kind: e.payload.continuity_kind === 'daily_note' ? 'daily_note' : null,
           bound_seq: e.seq,
         });
+        if (str(e.payload.static_launch_id)) {
+          const launch = staticLaunches.get(str(e.payload.static_launch_id)!);
+          if (launch) launch.state = 'bound';
+        }
         break;
       case 'reg.seat_cleared':
+        bindingBySeat.delete(e.entity_id);
+        break;
+      case 'reg.seat_decommissioned':
+        decommissionedSeats.add(e.entity_id);
+        paneBySeat.delete(e.entity_id);
         bindingBySeat.delete(e.entity_id);
         break;
       case 'act.prompt_submitted':
@@ -193,5 +252,7 @@ export function buildProjections(events: EventRecord[]): Projections {
     activityByInstance,
     everBoundInstances,
     openStopSubscriptions,
+    staticLaunches,
+    decommissionedSeats,
   };
 }

@@ -33,7 +33,9 @@ import { z } from 'zod';
 // A frozen seat generation that changes before delivery terminates without a
 // tmux call, with `binding_changed` recorded as the cancellation reason.
 // v6: additive — explicit estate rotation request/refusal/completion lifecycle.
-export const SCHEMA_VERSION = 6;
+// v7: additive — Council topology migration, canonical seat decommissioning,
+// and authenticated static-persona launch facts/readiness.
+export const SCHEMA_VERSION = 7;
 
 // ── Entities ────────────────────────────────────────────────────────────────
 // The four entity kinds the daemon tracks. `send` is a first-class entity: a
@@ -55,6 +57,8 @@ export const REG_EVENT_NAMES = [
   'pane_created',
   'wrapper_started',
   'session_started',
+  'static_launch_requested',
+  'static_launch_failed',
   'bound',
   'stop_subscribed', // v2: a close-on-next-stop subscription (bound-keyed, satiated-once)
   'comm_accepted',
@@ -64,6 +68,7 @@ export const REG_EVENT_NAMES = [
   'process_reaped',
   'retired',
   'seat_cleared',
+  'seat_decommissioned',
 ] as const;
 
 // act.* — agent behavior (feeds the `activity` axis) + send activity.
@@ -94,6 +99,8 @@ export const ESTATE_EVENT_NAMES = [
   'scoped_reset_requested',
   'scoped_reset_completed',
   'scoped_reset_failed',
+  'topology_migration_requested',
+  'topology_migration_completed',
 ] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
@@ -103,6 +110,8 @@ export const EVENT_TYPES = [
   'reg.pane_created',
   'reg.wrapper_started',
   'reg.session_started',
+  'reg.static_launch_requested',
+  'reg.static_launch_failed',
   'reg.bound',
   'reg.stop_subscribed',
   'reg.comm_accepted',
@@ -112,6 +121,7 @@ export const EVENT_TYPES = [
   'reg.process_reaped',
   'reg.retired',
   'reg.seat_cleared',
+  'reg.seat_decommissioned',
   'act.prompt_submitted',
   'act.stop_reported',
   'act.send_enqueued',
@@ -130,6 +140,8 @@ export const EVENT_TYPES = [
   'estate.scoped_reset_requested',
   'estate.scoped_reset_completed',
   'estate.scoped_reset_failed',
+  'estate.topology_migration_requested',
+  'estate.topology_migration_completed',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const EventTypeSchema = z.enum(EVENT_TYPES);
@@ -235,6 +247,12 @@ export const CurrentBindingSchema = z.object({
   rank: z.string().nullable(),
   commander: z.string().nullable(),
   tint: z.string().nullable(),
+  engine: z.enum(['claude', 'codex']).nullable(),
+  static_launch_id: z.string().nullable(),
+  wrapper_pid: z.number().int().positive().nullable(),
+  engine_pid: z.number().int().positive().nullable(),
+  authority_principal: z.string().nullable(),
+  continuity_kind: z.literal('daily_note').nullable(),
   // The bound-event seq the binding resolved against — receipts and drains
   // resolve against this exact seq (stale-target-at-drain unrepresentable).
   bound_seq: z.number().int(),
@@ -287,6 +305,11 @@ export const HealthSchema = z.object({
   // Honest-only: bring-up mode reports ok=false while any contradiction is open.
   open_contradictions: z.number().int(),
   tmux_reachable: z.boolean(),
+  static_personas: z.array(z.object({
+    seat_id: z.string(),
+    state: z.enum(['ready', 'missing', 'mismatched', 'awaiting_ack']),
+    instance_id: z.string().nullable(),
+  })),
 });
 export type Health = z.infer<typeof HealthSchema>;
 
@@ -496,6 +519,7 @@ export type ReconcileResponse = z.infer<typeof ReconcileResponseSchema>;
 export const EstateReadResponseSchema = z.object({
   schema_version: z.number().int(),
   rows: z.array(ActivityBoardRowSchema),
+  static_personas: HealthSchema.shape.static_personas,
 });
 export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;
 
@@ -547,6 +571,24 @@ export const TmuxLifecycleEventResponseSchema = z.object({
   reason: z.string().nullable(),
 });
 export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventResponseSchema>;
+
+export const StaticLaunchHandshakeSchema = z.object({
+  launch_id: z.string().uuid(),
+  token: z.string().min(32),
+  instance_id: z.string().uuid(),
+  seat_id: z.string().min(1),
+  engine: z.enum(['claude', 'codex']),
+  wrapper_pid: z.number().int().positive(),
+  engine_pid: z.number().int().positive(),
+});
+export type StaticLaunchHandshake = z.infer<typeof StaticLaunchHandshakeSchema>;
+
+export const StaticLaunchHandshakeResponseSchema = z.object({
+  ok: z.boolean(),
+  acknowledged: z.boolean(),
+  reason: z.string().nullable(),
+});
+export type StaticLaunchHandshakeResponse = z.infer<typeof StaticLaunchHandshakeResponseSchema>;
 
 // Communications are admitted as one atomic request.  `message` is opaque;
 // txd never parses or normalizes it.  Pages are resolved to an immutable list
