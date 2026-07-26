@@ -119,6 +119,9 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
   beforeAll(async () => {
     raw = await connectDb(endpoint!);
     // Clean slate: connect() re-applies the forward-only migrations from zero.
+    await raw`drop schema if exists replay cascade`;
+    await raw`drop schema if exists bus cascade`;
+    await raw`drop schema if exists telemetry cascade`;
     await raw`drop schema if exists txd cascade`;
     await raw`drop table if exists schema_migrations`;
     store = await PostgresEventStore.connect(endpoint!, () => `2026-07-12T00:00:0${tick++}.000Z`);
@@ -202,10 +205,13 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
       VALUES ('seat', 'legacy:double-encoded', 'reg.pane_created',
               to_jsonb('{"pane_state":"live"}'::text), to_jsonb('{"source":"wrapper"}'::text),
               '2026-07-12T00:00:00.000Z', '2026-07-12T00:00:00.000Z')`;
-    // Rewind the ledger for 0005 only and reconnect: the runner re-applies it.
-    await raw`DELETE FROM schema_migrations WHERE id = 5`;
-    const again = await PostgresEventStore.connect(endpoint!);
-    await again.close();
+    // Exercise the migration SQL directly. Rewinding a single ledger row below
+    // later applied migrations would violate the runner's forward-only
+    // contract and is not a valid production state.
+    const migration = await Bun.file(
+      new URL("../../db/migrations/0005_txd_events_jsonb_normalize.sql", import.meta.url),
+    ).text();
+    await raw.unsafe(migration);
     const rows = (await raw`
       SELECT jsonb_typeof(payload) AS pay, jsonb_typeof(provenance) AS prov,
              payload->>'pane_state' AS state

@@ -1,165 +1,269 @@
-// Dispatcher — per-subscription cursored HTTP fan-out (transactional outbox).
-//
-// busd is the journal's single writer, so no LISTEN/NOTIFY machinery exists:
-// every append wakes the dispatcher in-process, and a repair tick (30s) covers
-// what a wake cannot see — out-of-band psql inserts (a one-writer-doctrine
-// violation, but repaired anyway), revived subscribers, restored connectivity.
-//
-// Per subscription, deliveries are STRICTLY SERIAL and IN SEQ ORDER: one full
-// journal row per POST, 2xx advances the durable cursor, anything else retries
-// the SAME event with full-jitter exponential backoff — head-of-line by design,
-// never a skip. Lanes are independent: one dead subscriber never stalls
-// another. Retry state is in-memory only; a busd restart resumes from the
-// durable cursor (at-least-once delivery is the contract — subscribers dedupe).
-//
-// A subscription whose cursor was never seeded is SKIPPED LOUD: seeding is a
-// deliberate runbook step (0 = full replay, max(seq) = from-now), never a
-// silent default.
+// Durable delivery uses wakeups only. Every append enters through busd and
+// wakes in-process; startup and explicit reconciliation recover a lost wake.
+// Durable cursors/outbox attempts are authority; a wake may be
+// lost or duplicated without changing event identity or correctness.
 
-import { BUS_SCHEMA_VERSION, type BusDelivery, type BusEventRecord, type BusSubscriptionRow } from '@terminus-os/contracts';
-import type { BusStore } from './store.ts';
+import {
+  BUS_SCHEMA_VERSION,
+  REPLAY_SCHEMA_VERSION,
+  type BusDelivery,
+  type BusEventRecord,
+  type BusSubscriptionRow,
+} from "@terminus-os/contracts";
+import {
+  type ReplayStore,
+} from "./replay-store.ts";
+import type { BusStore } from "./store.ts";
 
 export type DispatcherOpts = {
-  repairIntervalMs: number;
   deliveryTimeoutMs: number;
   batchSize: number;
-  backoffBaseMs: number;
-  backoffCapMs: number;
-  /** Test seams — real defaults: global fetch, Bun.sleep, Math.random. */
   fetchImpl?: typeof fetch;
-  sleep?: (ms: number) => Promise<void>;
-  random?: () => number;
 };
-
-/** Full-jitter exponential backoff: uniform in [0, min(cap, base·2^(failures−1))]. */
-export function backoffDelayMs(failures: number, baseMs: number, capMs: number, random: () => number): number {
-  const ceiling = Math.min(capMs, baseMs * 2 ** Math.max(0, failures - 1));
-  return Math.floor(random() * ceiling);
-}
 
 type Lane = { running: boolean; wakeRequested: boolean };
 
 export class Dispatcher {
   private lanes = new Map<string, Lane>();
+  private inFlight = new Set<Promise<void>>();
   private stopped = false;
-  private timer: ReturnType<typeof setInterval> | null = null;
   private fetchImpl: typeof fetch;
-  private sleep: (ms: number) => Promise<void>;
-  private random: () => number;
 
-  constructor(
-    private store: BusStore,
-    private opts: DispatcherOpts,
-  ) {
+  constructor(private store: BusStore, private opts: DispatcherOpts) {
     this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.sleep = opts.sleep ?? ((ms) => Bun.sleep(ms));
-    this.random = opts.random ?? Math.random;
   }
 
-  /** Begin the repair tick and run an immediate catch-up pass. */
   start(): void {
-    this.timer = setInterval(() => this.wake(), this.opts.repairIntervalMs);
     this.wake();
   }
 
-  /** In-process wake — called after every journal append (and by the repair tick). */
   wake(): void {
-    void this.pass();
+    if (this.stopped) return;
+    this.track(this.pass());
   }
 
-  /**
-   * Stop scheduling new work. A lane mid-backoff finishes its current sleep
-   * before observing the flag; daemon shutdown does not wait for that (the
-   * cursor is durable, so an interrupted retry simply re-runs after restart).
-   */
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    await this.settled();
+  }
+
+  async settled(): Promise<void> {
+    while (this.inFlight.size) {
+      await Promise.all([...this.inFlight]);
+    }
+  }
+
+  private track(promise: Promise<void>): void {
+    this.inFlight.add(promise);
+    void promise.then(
+      () => { this.inFlight.delete(promise); },
+      () => { this.inFlight.delete(promise); },
+    );
   }
 
   private async pass(): Promise<void> {
     if (this.stopped) return;
-    let subs: BusSubscriptionRow[];
+    let subscriptions: BusSubscriptionRow[];
     try {
-      subs = await this.store.activeSubscriptions();
-    } catch (err) {
-      // DB down: 5xx posture, no fallback — the repair tick retries.
-      console.error(JSON.stringify({ level: 'error', event: 'subscriptions_unreadable', error: String(err) }));
+      subscriptions = await this.store.activeSubscriptions();
+    } catch {
+      console.error(JSON.stringify({ level: "error", event: "subscriptions_unreadable", error_code: "store_unavailable" }));
       return;
     }
-    for (const sub of subs) this.runLane(sub);
+    if (this.stopped) return;
+    for (const subscription of subscriptions) this.runLane(subscription);
   }
 
-  private runLane(sub: BusSubscriptionRow): void {
-    const lane = this.lanes.get(sub.name) ?? { running: false, wakeRequested: false };
-    this.lanes.set(sub.name, lane);
+  private runLane(subscription: BusSubscriptionRow): void {
+    if (this.stopped) return;
+    const lane = this.lanes.get(subscription.name) ?? { running: false, wakeRequested: false };
+    this.lanes.set(subscription.name, lane);
     if (lane.running) {
       lane.wakeRequested = true;
       return;
     }
     lane.running = true;
-    void this.drain(sub)
-      .catch((err) => {
-        // Store failure mid-drain (fail-loud, no fallback): the repair tick re-runs the lane.
-        console.error(JSON.stringify({ level: 'error', event: 'lane_error', subscription: sub.name, error: String(err) }));
+    const task = this.drain(subscription)
+      .catch(() => {
+        console.error(JSON.stringify({
+          level: "error",
+          event: "lane_error",
+          subscription: subscription.name,
+          error_code: "delivery_lane_failed",
+        }));
       })
       .finally(() => {
         lane.running = false;
         if (lane.wakeRequested && !this.stopped) {
           lane.wakeRequested = false;
-          this.runLane(sub);
+          this.runLane(subscription);
         }
       });
+    this.track(task);
   }
 
-  private async drain(sub: BusSubscriptionRow): Promise<void> {
-    const seeded = await this.store.cursor(sub.name);
+  private async drain(subscription: BusSubscriptionRow): Promise<void> {
+    const seeded = await this.store.cursor(subscription.name);
     if (seeded === null) {
-      console.error(JSON.stringify({ level: 'error', event: 'subscription_unseeded', subscription: sub.name, hint: 'seed bus.cursors deliberately: 0 = full replay, max(seq) = from-now' }));
+      console.error(JSON.stringify({
+        level: "error",
+        event: "subscription_unseeded",
+        subscription: subscription.name,
+      }));
       return;
     }
-    let acked = seeded;
-    let failures = 0;
+    let acknowledged = seeded;
     while (!this.stopped) {
-      const batch = await this.store.readSince(acked, sub.event_pattern, this.opts.batchSize);
-      if (batch.length === 0) return;
+      const batch = await this.store.readSince(acknowledged, subscription.event_pattern, this.opts.batchSize);
+      if (!batch.length) return;
       for (const event of batch) {
-        while (!this.stopped) {
-          const outcome = await this.deliver(sub, event);
-          if (outcome.ok) {
-            await this.store.advanceCursor(sub.name, event.seq);
-            acked = event.seq;
-            failures = 0;
-            console.log(JSON.stringify({ level: 'info', event: 'bus_delivered', subscription: sub.name, seq: event.seq, event_type: event.event_type }));
-            break;
-          }
-          failures += 1;
-          const delay = backoffDelayMs(failures, this.opts.backoffBaseMs, this.opts.backoffCapMs, this.random);
-          console.error(JSON.stringify({ level: 'error', event: 'delivery_failed', subscription: sub.name, seq: event.seq, event_type: event.event_type, detail: outcome.detail, failures, next_delay_ms: delay }));
-          await this.sleep(delay);
+        const outcome = await this.deliver(subscription, event);
+        if (!outcome.ok) {
+          console.error(JSON.stringify({
+            level: "error",
+            event: "delivery_failed",
+            subscription: subscription.name,
+            event_id: event.seq,
+            detail: outcome.detail,
+            state: "externally_blocked",
+          }));
+          return;
         }
-        if (this.stopped) return;
+        await this.store.advanceCursor(subscription.name, event.seq);
+        acknowledged = event.seq;
+        console.info(JSON.stringify({
+          level: "info",
+          event: "bus_delivered",
+          subscription: subscription.name,
+          event_id: event.seq,
+          event_type: event.event_type,
+        }));
       }
     }
   }
 
   private async deliver(
-    sub: BusSubscriptionRow,
+    subscription: BusSubscriptionRow,
     event: BusEventRecord,
   ): Promise<{ ok: true } | { ok: false; detail: string }> {
-    const body: BusDelivery = { schema_version: BUS_SCHEMA_VERSION, subscription: sub.name, event };
-    try {
-      const resp = await this.fetchImpl(sub.delivery_url, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(this.opts.deliveryTimeoutMs),
-      });
-      if (resp.ok) return { ok: true };
-      return { ok: false, detail: `status_${resp.status}` };
-    } catch (err) {
-      return { ok: false, detail: String(err) };
+    const body: BusDelivery = { schema_version: BUS_SCHEMA_VERSION, subscription: subscription.name, event };
+    return deliver(this.fetchImpl, subscription.delivery_url, body, this.opts.deliveryTimeoutMs);
+  }
+}
+
+export class ReplayDispatcher {
+  private current: Promise<void> | null = null;
+  private wakeRequested = false;
+  private stopped = false;
+  private fetchImpl: typeof fetch;
+
+  constructor(private store: ReplayStore, private opts: DispatcherOpts) {
+    this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  start(): void {
+    this.wake();
+  }
+
+  wake(): void {
+    if (this.stopped) return;
+    if (this.current) {
+      this.wakeRequested = true;
+      return;
     }
+    const task = this.reconcile()
+      .catch(() => {
+        console.error(JSON.stringify({ level: "error", event: "replay_delivery_error", error_code: "store_unavailable" }));
+      })
+      .finally(() => {
+        this.current = null;
+        if (this.wakeRequested && !this.stopped) {
+          this.wakeRequested = false;
+          this.wake();
+        }
+      });
+    this.current = task;
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    await this.settled();
+  }
+
+  async settled(): Promise<void> {
+    while (this.current) await this.current;
+  }
+
+  private async reconcile(): Promise<void> {
+    const attemptWatermark = await this.store.deliveryAttemptWatermark();
+    while (!this.stopped) {
+      const tasks = await this.store.pendingDeliveries(this.opts.batchSize, attemptWatermark);
+      if (!tasks.length) return;
+      for (const task of tasks) {
+        const outcome = await deliver(this.fetchImpl, task.delivery_url, {
+          schema_version: REPLAY_SCHEMA_VERSION,
+          subscription: task.subscription,
+          event: task.event,
+        }, this.opts.deliveryTimeoutMs);
+        await this.store.recordDelivery(
+          task.event.event_id,
+          task.subscription,
+          outcome.ok,
+          outcome.ok ? null : outcome.detail,
+        );
+        if (!outcome.ok) {
+          console.error(JSON.stringify({
+            level: "error",
+            event: "replay_delivery_failed",
+            replay_id: task.event.replay_id,
+            event_id: task.event.event_id,
+            subscription: task.subscription,
+            detail: outcome.detail,
+            state: "externally_blocked",
+          }));
+        } else {
+          console.info(JSON.stringify({
+            level: "info",
+            event: "replay_delivered",
+            replay_id: task.event.replay_id,
+            event_id: task.event.event_id,
+            subscription: task.subscription,
+            event_type: task.event.event_type,
+          }));
+        }
+      }
+    }
+  }
+}
+
+async function deliver(
+  fetchImpl: typeof fetch,
+  url: string,
+  body: unknown,
+  timeoutMs: number,
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  try {
+    const target = new URL(url);
+    const unix = target.protocol === "http+unix:" ? decodeURIComponent(target.hostname) : null;
+    const requestUrl = unix
+      ? `http://localhost${target.pathname}${target.search}`
+      : url;
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+      ...(unix ? { unix } : {}),
+    };
+    const response = await fetchImpl(requestUrl, init as RequestInit);
+    if (response.body) await response.body.cancel();
+    return response.ok ? { ok: true } : { ok: false, detail: `status_${response.status}` };
+  } catch (error) {
+    return {
+      ok: false,
+      detail: error instanceof DOMException && error.name === "TimeoutError"
+        ? "transport_timeout"
+        : "transport_unavailable",
+    };
   }
 }
