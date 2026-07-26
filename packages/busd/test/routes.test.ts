@@ -1,23 +1,30 @@
 import { expect, test } from 'bun:test';
 import { HOOK_TYPES } from '@terminus-os/contracts';
 import { MemoryBusStore } from '../src/store.ts';
+import { MemoryReplayStore } from '../src/replay-store.ts';
 import { buildRoutes, makeServer } from '../src/server.ts';
 
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
 function deps(store = new MemoryBusStore()) {
-  return { store, onAppend: () => {}, build, machine: 'test' };
+  return { store, replayStore: new MemoryReplayStore(), onAppend: () => {}, build, machine: 'test' };
 }
 
 // The busd surface — pinned exactly. Behavioral pin: the surface is the
 // contract; a route appearing or vanishing here must be a deliberate change.
 
-test('the route table is exactly /ctl/health + /ingress/events + one door per pinned vendor hook type', () => {
+test('the route table includes replay authority, health, generic ingress, and pinned hook doors', () => {
   const labels = buildRoutes(deps()).map((r) => r.label);
   expect(labels).toContain('GET /ctl/health');
+  expect(labels).toContain('POST /ctl/reconcile');
   expect(labels).toContain('POST /ingress/events');
+  expect(labels).toContain('POST /ingress/github');
+  expect(labels).toContain('GET /v1/replays');
+  expect(labels).toContain('POST /v1/replays/admit');
+  expect(labels).toContain('GET /v1/replays/:replay_id');
+  expect(labels).toContain('POST /v1/replays/:replay_id/events');
   for (const hook of HOOK_TYPES) expect(labels).toContain(`POST /ingress/hooks/${hook}`);
-  expect(labels).toHaveLength(2 + HOOK_TYPES.length);
+  expect(labels).toHaveLength(8 + HOOK_TYPES.length);
 });
 
 test('ALL 30 hook doors consume and journal — the 410 tail does not exist on the bus', async () => {

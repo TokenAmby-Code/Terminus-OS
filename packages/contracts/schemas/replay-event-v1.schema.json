@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://terminus.local/schemas/replay-event-v1.schema.json",
+  "title": "ReplayEventV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "replay_id", "event_id", "sequence", "event_type", "schema_version",
+    "source", "provenance", "causation_event_id", "occurred_at",
+    "recorded_at", "payload"
+  ],
+  "properties": {
+    "replay_id": { "$ref": "#/$defs/lowercaseUuid" },
+    "event_id": { "$ref": "#/$defs/lowercaseUuid" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "event_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+    },
+    "schema_version": { "const": 1 },
+    "source": { "type": "string", "minLength": 1 },
+    "provenance": {
+      "allOf": [
+        { "$ref": "#/$defs/safeObject" },
+        {
+          "required": ["machine", "ingress"],
+          "properties": {
+            "machine": { "type": "string", "minLength": 1 },
+            "ingress": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "causation_event_id": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/lowercaseUuid" }
+      ]
+    },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "payload": { "$ref": "#/$defs/safeObject" }
+  },
+  "$defs": {
+    "lowercaseUuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "safeObject": {
+      "type": "object",
+      "propertyNames": {
+        "not": {
+          "pattern": "[Aa][Uu][Tt][Hh](?:[Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Ee][Nn][Tt][Ii][Cc][Aa][Tt][Ii][Oo][Nn])|(^|[_-])[Aa][Uu][Tt][Hh]($|[_-])|auth[A-Z]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Pp][Aa][Ss][Ss](?:[Ww][Oo][Rr][Dd])?|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy]|[Cc][Ll][Ii][Ee][Nn][Tt][_-]?[Kk][Ee][Yy]|[Ss][Ii][Gg][Nn][Ii][Nn][Gg][_-]?[Kk][Ee][Yy]"
+        }
+      },
+      "additionalProperties": { "$ref": "#/$defs/safeValue" }
+    },
+    "safeValue": {
+      "anyOf": [
+        { "$ref": "#/$defs/safeObject" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/safeValue" }
+        },
+        {
+          "type": "string",
+          "not": {
+            "anyOf": [
+              { "pattern": "^[Bb][Ee][Aa][Rr][Ee][Rr]\\s+\\S+" },
+              { "pattern": "-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----" },
+              { "pattern": "\\bgh[opusr]_[A-Za-z0-9_]{20,}\\b" },
+              { "pattern": "\\bgithub_pat_[A-Za-z0-9_]{20,}\\b" }
+              ,
+              { "pattern": "\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b" }
+            ]
+          }
+        },
+        { "type": ["number", "integer", "boolean", "null"] }
+      ]
+    }
+  }
+}

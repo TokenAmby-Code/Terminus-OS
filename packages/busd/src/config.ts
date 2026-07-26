@@ -12,17 +12,14 @@ export type DaemonConfig = {
   bind: string;
   port: number;
   machine: string;
+  /** systemd credential path; the secret itself is never config or event data. */
+  githubWebhookSecretFile: string | null;
   /** Postgres endpoint for the bus journal (peer-auth unix socket on fleet boxes). */
   db: DbEndpointT;
-  /** Fallback dispatch tick: repairs out-of-band inserts and revived subscribers. */
-  repairIntervalMs: number;
   /** Per-delivery HTTP timeout. */
   deliveryTimeoutMs: number;
   /** Journal rows read per delivery batch. */
   batchSize: number;
-  /** Full-jitter exponential backoff: base and cap. */
-  backoffBaseMs: number;
-  backoffCapMs: number;
 };
 
 // Partial with explicit undefined: the root tsconfig pins
@@ -42,11 +39,9 @@ const HARD_DEFAULTS = {
     database: 'terminus',
     application_name: 'busd',
   }),
-  repairIntervalMs: 30_000,
+  githubWebhookSecretFile: null,
   deliveryTimeoutMs: 10_000,
   batchSize: 100,
-  backoffBaseMs: 500,
-  backoffCapMs: 60_000,
 } as const;
 
 function envDefaults(): PartialConfig {
@@ -56,6 +51,7 @@ function envDefaults(): PartialConfig {
     bind: process.env.BUSD_BIND,
     port: process.env.BUSD_PORT ? Number(process.env.BUSD_PORT) : undefined,
     machine: process.env.IMPERIUM_MACHINE,
+    githubWebhookSecretFile: process.env.BUSD_GITHUB_WEBHOOK_SECRET_FILE,
     db:
       socket_dir || database
         ? DbEndpoint.parse({
@@ -73,12 +69,11 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     bind: raw.bind ?? env.bind ?? HARD_DEFAULTS.bind,
     port: raw.port ?? env.port ?? HARD_DEFAULTS.port,
     machine: raw.machine ?? env.machine, // NO hard default — must be known
+    githubWebhookSecretFile:
+      raw.githubWebhookSecretFile ?? env.githubWebhookSecretFile ?? HARD_DEFAULTS.githubWebhookSecretFile,
     db: raw.db ?? env.db ?? HARD_DEFAULTS.db,
-    repairIntervalMs: raw.repairIntervalMs ?? HARD_DEFAULTS.repairIntervalMs,
     deliveryTimeoutMs: raw.deliveryTimeoutMs ?? HARD_DEFAULTS.deliveryTimeoutMs,
     batchSize: raw.batchSize ?? HARD_DEFAULTS.batchSize,
-    backoffBaseMs: raw.backoffBaseMs ?? HARD_DEFAULTS.backoffBaseMs,
-    backoffCapMs: raw.backoffCapMs ?? HARD_DEFAULTS.backoffCapMs,
   };
 
   if (!cfg.bind) throw new Error('busd config error: bind is required');
@@ -86,18 +81,18 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     throw new Error(`busd config error: invalid port ${cfg.port}`);
   if (!cfg.machine)
     throw new Error('busd config error: machine is required (set IMPERIUM_MACHINE or config.machine — the daemon must never guess its box identity)');
+  if (cfg.githubWebhookSecretFile !== null && !cfg.githubWebhookSecretFile?.startsWith('/')) {
+    throw new Error('busd config error: githubWebhookSecretFile must be an absolute credential path');
+  }
   // Strict endpoint validation: unknown fields inside `db` are rejected loud.
   const db = DbEndpoint.safeParse(cfg.db);
   if (!db.success)
     throw new Error(`busd config error: invalid db endpoint — ${db.error.message}`);
   cfg.db = db.data;
-  for (const knob of ['repairIntervalMs', 'deliveryTimeoutMs', 'batchSize', 'backoffBaseMs', 'backoffCapMs'] as const) {
+  for (const knob of ['deliveryTimeoutMs', 'batchSize'] as const) {
     if (!Number.isInteger(cfg[knob]) || cfg[knob]! < 1)
       throw new Error(`busd config error: ${knob} must be a positive integer (got ${cfg[knob]})`);
   }
-  if (cfg.backoffCapMs! < cfg.backoffBaseMs!)
-    throw new Error('busd config error: backoffCapMs must be >= backoffBaseMs');
-
   return cfg as DaemonConfig;
 }
 

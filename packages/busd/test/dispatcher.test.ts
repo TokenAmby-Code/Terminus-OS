@@ -1,229 +1,187 @@
-// Dispatcher behavior under a fake fetch + fake clock: strict in-seq-order
-// delivery, head-of-line blocking (never a skip), full-jitter backoff values,
-// per-subscription independence, unseeded-cursor skip, and cursor-durable
-// catch-up across a dispatcher "restart".
+import { expect, test } from "bun:test";
+import type { BusEventInput, ReplayAdmission } from "@terminus-os/contracts";
+import { Dispatcher, ReplayDispatcher } from "../src/dispatcher.ts";
+import { MemoryReplayStore } from "../src/replay-store.ts";
+import { MemoryBusStore } from "../src/store.ts";
 
-import { expect, test } from 'bun:test';
-import type { BusDelivery, BusEventInput } from '@terminus-os/contracts';
-import { MemoryBusStore } from '../src/store.ts';
-import { backoffDelayMs, Dispatcher } from '../src/dispatcher.ts';
+const URL = "http://127.0.0.1:7999/event";
 
-function ev(over: Partial<BusEventInput> = {}): BusEventInput {
+function busEvent(eventType = "hook.stop"): BusEventInput {
   return {
-    event_type: 'hook.stop',
-    source: 'claude',
-    payload: { session_id: 's1' },
-    provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'test' },
-    occurred_at: '2026-07-22T00:00:00.000Z',
-    ...over,
+    event_type: eventType,
+    source: "test",
+    payload: {},
+    provenance: { ingress: "hooks", transport_receipt: null, machine: "test" },
+    occurred_at: "2026-07-26T17:00:00.000Z",
   };
 }
 
-type Call = { url: string; delivery: BusDelivery };
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
 
-/** Programmable fake subscriber network: per-URL failure budgets, full call log. */
-function fakeNet() {
-  const calls: Call[] = [];
-  const failuresLeft = new Map<string, number>();
-  const fetchImpl = (async (input: unknown, init?: RequestInit) => {
-    const url = String(input);
-    calls.push({ url, delivery: JSON.parse(String(init?.body)) as BusDelivery });
-    const left = failuresLeft.get(url) ?? 0;
-    if (left !== 0) {
-      failuresLeft.set(url, left - 1);
-      return new Response('boom', { status: 500 });
-    }
-    return new Response('{}', { status: 200 });
+test("legacy bus delivery is ordered and an outage becomes blocked until a new wake", async () => {
+  const store = new MemoryBusStore();
+  store.setSubscription({ name: "consumer", delivery_url: URL, event_pattern: "hook.%", active: true });
+  store.seedCursor("consumer", 0);
+  await store.append(busEvent());
+  await store.append(busEvent("hook.notification"));
+  const delivered: number[] = [];
+  let available = false;
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as { event: { seq: number } };
+    delivered.push(body.event.seq);
+    return new Response("{}", { status: available ? 200 : 503 });
   }) as typeof fetch;
-  return {
-    calls,
-    fetchImpl,
-    fail: (url: string, times: number) => failuresLeft.set(url, times),
-  };
-}
+  const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
+  dispatcher.start();
+  await settle();
+  expect(delivered).toEqual([1]);
+  expect(await store.cursor("consumer")).toBe(0);
 
-// Records the REQUESTED backoff (the assertion surface) but sleeps 1ms of real
-// time — a zero-delay fake turns a gated-outage retry loop into a hot spin
-// that floods logs and starves the test's polling.
-const sleeps: number[] = [];
-const instantSleep = async (ms: number) => {
-  sleeps.push(ms);
-  await Bun.sleep(1);
-};
-
-function dispatcher(store: MemoryBusStore, fetchImpl: typeof fetch, random: () => number = () => 1) {
-  sleeps.length = 0;
-  return new Dispatcher(store, {
-    repairIntervalMs: 3_600_000, // effectively off — tests drive wake() directly
-    deliveryTimeoutMs: 10_000,
-    batchSize: 100,
-    backoffBaseMs: 500,
-    backoffCapMs: 60_000,
-    fetchImpl,
-    sleep: instantSleep,
-    random,
-  });
-}
-
-async function until(cond: () => boolean, ms = 2_000): Promise<void> {
-  const start = Date.now();
-  while (!cond()) {
-    if (Date.now() - start > ms) throw new Error('condition never held');
-    await Bun.sleep(5);
-  }
-}
-
-const TXD_URL = 'http://127.0.0.1:7781/ingress/bus';
-const PROBE_URL = 'http://127.0.0.1:7999/';
-
-function seedTxd(store: MemoryBusStore, from = 0) {
-  store.setSubscription({ name: 'txd', delivery_url: TXD_URL, event_pattern: 'hook.%', active: true });
-  store.seedCursor('txd', from);
-}
-
-test('backoffDelayMs is full-jitter exponential: uniform under min(cap, base·2^(failures−1))', () => {
-  // random()=1 exposes the ceiling exactly: 500, 1000, 2000, ... capped at 60000.
-  expect(backoffDelayMs(1, 500, 60_000, () => 1)).toBe(500);
-  expect(backoffDelayMs(2, 500, 60_000, () => 1)).toBe(1_000);
-  expect(backoffDelayMs(3, 500, 60_000, () => 1)).toBe(2_000);
-  expect(backoffDelayMs(8, 500, 60_000, () => 1)).toBe(60_000); // 64000 → cap
-  expect(backoffDelayMs(20, 500, 60_000, () => 1)).toBe(60_000); // stays capped
-  // The jitter is FULL: the floor of the range is 0, not base.
-  expect(backoffDelayMs(5, 500, 60_000, () => 0)).toBe(0);
-  expect(backoffDelayMs(2, 500, 60_000, () => 0.5)).toBe(500);
+  available = true;
+  dispatcher.wake();
+  await settle();
+  expect(delivered).toEqual([1, 1, 2]);
+  expect(await store.cursor("consumer")).toBe(2);
+  dispatcher.stop();
 });
 
-test('delivers matching events strictly in seq order, one full journal row per POST, and advances the cursor', async () => {
-  const store = new MemoryBusStore(() => '2026-07-22T00:00:00.000Z');
-  seedTxd(store);
-  await store.append(ev());
-  await store.append(ev({ event_type: 'probe.ping' })); // NOT matched by hook.%
-  await store.append(ev({ event_type: 'hook.notification' }));
-  const net = fakeNet();
-  const d = dispatcher(store, net.fetchImpl);
-  d.wake();
-  await until(() => net.calls.length === 2);
-  expect(net.calls.map((c) => c.delivery.event.seq)).toEqual([1, 3]);
-  expect(net.calls[0]!.delivery).toEqual({
-    schema_version: 1,
-    subscription: 'txd',
+test("startup reconciliation resumes from the durable cursor without a standing checker", async () => {
+  const store = new MemoryBusStore();
+  store.setSubscription({ name: "consumer", delivery_url: URL, event_pattern: "hook.%", active: true });
+  store.seedCursor("consumer", 1);
+  await store.append(busEvent());
+  await store.append(busEvent("hook.notification"));
+  const delivered: number[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    delivered.push((JSON.parse(String(init?.body)) as { event: { seq: number } }).event.seq);
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
+  dispatcher.start();
+  await settle();
+  expect(delivered).toEqual([2]);
+  dispatcher.stop();
+});
+
+test("replay outbox records failure durably and retries the same event identity only on a wake", async () => {
+  const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
+  store.setSubscription({ name: "manager", delivery_url: URL, event_pattern: "githubd.%", active: true });
+  const admission: ReplayAdmission = {
+    replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+    request_hash: "a".repeat(64),
     event: {
-      seq: 1,
-      event_type: 'hook.stop',
-      source: 'claude',
-      payload: { session_id: 's1' },
-      provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'test' },
-      occurred_at: '2026-07-22T00:00:00.000Z',
-      recorded_at: '2026-07-22T00:00:00.000Z',
+      replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+      event_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      event_type: "githubd.command_accepted",
+      schema_version: 1,
+      source: "githubd",
+      provenance: { machine: "test", ingress: "command" },
+      causation_event_id: null,
+      occurred_at: "2026-07-26T17:00:00.000Z",
+      payload: {},
     },
-  });
-  await until(() => sleeps.length === 0 && net.calls.length === 2);
-  expect(await store.cursor('txd')).toBe(3);
-  d.stop();
-});
-
-test('head-of-line: a failing event is retried with backoff and NEVER skipped; later events wait', async () => {
-  const store = new MemoryBusStore();
-  seedTxd(store);
-  await store.append(ev());
-  await store.append(ev({ event_type: 'hook.notification' }));
-  const net = fakeNet();
-  net.fail(TXD_URL, 3);
-  const d = dispatcher(store, net.fetchImpl);
-  d.wake();
-  await until(() => net.calls.length === 5); // 3 failures + retry success + seq2
-  // seq 1 four times (3 fails + success), THEN seq 2 — order held, nothing skipped.
-  expect(net.calls.map((c) => c.delivery.event.seq)).toEqual([1, 1, 1, 1, 2]);
-  // The three recorded backoffs are the deterministic ceilings (random()=1).
-  expect(sleeps).toEqual([500, 1_000, 2_000]);
-  expect(await store.cursor('txd')).toBe(2);
-  d.stop();
-});
-
-test('per-subscription independence: one wedged subscriber never stalls another lane', async () => {
-  const store = new MemoryBusStore();
-  seedTxd(store);
-  store.setSubscription({ name: 'probe', delivery_url: PROBE_URL, event_pattern: 'hook.%', active: true });
-  store.seedCursor('probe', 0);
-  await store.append(ev());
-  await store.append(ev({ event_type: 'hook.notification' }));
-  const calls: Call[] = [];
-  let probeDown = true; // gated (not a counted budget) so the outage cannot end by accident
-  const fetchImpl = (async (input: unknown, init?: RequestInit) => {
-    const url = String(input);
-    calls.push({ url, delivery: JSON.parse(String(init?.body)) as BusDelivery });
-    if (url === PROBE_URL && probeDown) return new Response('boom', { status: 500 });
-    return new Response('{}', { status: 200 });
+  };
+  await store.admit(admission);
+  const identities: string[] = [];
+  let available = false;
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    identities.push((JSON.parse(String(init?.body)) as { event: { event_id: string } }).event.event_id);
+    return new Response("{}", { status: available ? 200 : 429 });
   }) as typeof fetch;
-  const d = dispatcher(store, fetchImpl);
-  d.wake();
-  // txd finishes both deliveries while probe is still head-of-line on seq 1.
-  await until(() => calls.filter((c) => c.url === TXD_URL).length === 2);
-  await Bun.sleep(10);
-  expect(await store.cursor('txd')).toBe(2);
-  expect(await store.cursor('probe')).toBe(0);
-  const probeSeqs = calls.filter((c) => c.url === PROBE_URL).map((c) => c.delivery.event.seq);
-  expect(new Set(probeSeqs)).toEqual(new Set([1])); // still retrying seq 1, never skipped ahead
-  // The outage ends: probe drains in order and catches up.
-  probeDown = false;
-  await until(() => calls.some((c) => c.url === PROBE_URL && c.delivery.event.seq === 2));
-  await Bun.sleep(10); // let the final advanceCursor land
-  expect(await store.cursor('probe')).toBe(2);
-  const probeOrder = calls.filter((c) => c.url === PROBE_URL).map((c) => c.delivery.event.seq);
-  expect(probeOrder).toEqual([...Array(probeOrder.length - 1).fill(1), 2]);
-  d.stop();
+  const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
+  dispatcher.start();
+  await settle();
+  expect(identities).toEqual([admission.event.event_id]);
+  expect((await store.projection(admission.replay_id))?.deliveries[0]?.status).toBe("failed");
+
+  available = true;
+  dispatcher.wake();
+  await settle();
+  expect(identities).toEqual([admission.event.event_id, admission.event.event_id]);
+  expect((await store.projection(admission.replay_id))?.deliveries[0]).toMatchObject({
+    status: "delivered",
+    attempts: 2,
+  });
+  dispatcher.stop();
 });
 
-test('an unseeded subscription is skipped loud — no delivery, no invented cursor', async () => {
-  const store = new MemoryBusStore();
-  store.setSubscription({ name: 'txd', delivery_url: TXD_URL, event_pattern: 'hook.%', active: true });
-  // deliberately NOT seeded
-  await store.append(ev());
-  const net = fakeNet();
-  const d = dispatcher(store, net.fetchImpl);
-  d.wake();
-  await Bun.sleep(25);
-  expect(net.calls).toHaveLength(0);
-  expect(await store.cursor('txd')).toBeNull();
-  d.stop();
+test("one blocked replay delivery does not strand an unrelated batch", async () => {
+  const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
+  store.setSubscription({ name: "blocked", delivery_url: "http://blocked/event", event_pattern: "githubd.%", active: true });
+  store.setSubscription({ name: "healthy", delivery_url: "http://healthy/event", event_pattern: "githubd.%", active: true });
+  const admission: ReplayAdmission = {
+    replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+    request_hash: "a".repeat(64),
+    event: {
+      replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+      event_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      event_type: "githubd.command_accepted",
+      schema_version: 1,
+      source: "githubd",
+      provenance: { machine: "test", ingress: "command" },
+      causation_event_id: null,
+      occurred_at: "2026-07-26T17:00:00.000Z",
+      payload: {},
+    },
+  };
+  await store.admit(admission);
+  const delivered: string[] = [];
+  const fetchImpl = (async (url: unknown) => {
+    delivered.push(String(url));
+    return new Response("{}", { status: String(url).includes("blocked") ? 503 : 200 });
+  }) as typeof fetch;
+  const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 1, fetchImpl });
+  dispatcher.start();
+  await settle();
+  expect(delivered).toEqual(["http://blocked/event", "http://healthy/event"]);
+  const projection = await store.projection(admission.replay_id);
+  expect(projection?.deliveries.find((item) => item.subscription === "blocked")?.status).toBe("failed");
+  expect(projection?.deliveries.find((item) => item.subscription === "healthy")?.status).toBe("delivered");
+  dispatcher.stop();
 });
 
-test('catch-up across restart: retry state is in-memory, the cursor is durable', async () => {
-  const store = new MemoryBusStore();
-  seedTxd(store);
-  await store.append(ev());
-  const net = fakeNet();
-  const d1 = dispatcher(store, net.fetchImpl);
-  d1.wake();
-  await until(() => net.calls.length === 1);
-  d1.stop(); // "busd restart" mid-stream: the cursor (1) survives in the store
-  expect(await store.cursor('txd')).toBe(1);
-
-  await store.append(ev({ event_type: 'hook.notification' }));
-  await store.append(ev({ event_type: 'hook.session_end' }));
-  const d2 = dispatcher(store, net.fetchImpl);
-  d2.wake();
-  await until(() => net.calls.length === 3);
-  // The new dispatcher resumed from the durable cursor: no re-delivery of seq 1.
-  expect(net.calls.map((c) => c.delivery.event.seq)).toEqual([1, 2, 3]);
-  expect(await store.cursor('txd')).toBe(3);
-  d2.stop();
-});
-
-test('a wake during an active drain re-runs the lane instead of racing it (single serial lane)', async () => {
-  const store = new MemoryBusStore();
-  seedTxd(store);
-  await store.append(ev());
-  const net = fakeNet();
-  const d = dispatcher(store, net.fetchImpl);
-  d.wake();
-  d.wake(); // concurrent wake while lane 1 may still be running
-  await store.append(ev({ event_type: 'hook.notification' }));
-  d.wake();
-  await until(() => net.calls.length >= 2);
-  await Bun.sleep(25);
-  // Every event delivered exactly once, in order — no duplicate concurrent lanes.
-  expect(net.calls.map((c) => c.delivery.event.seq)).toEqual([1, 2]);
-  expect(await store.cursor('txd')).toBe(2);
-  d.stop();
+test("worker loss after an external 2xx redelivers the same immutable event identity", async () => {
+  const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
+  store.setSubscription({ name: "manager", delivery_url: URL, event_pattern: "githubd.%", active: true });
+  const admission: ReplayAdmission = {
+    replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+    request_hash: "a".repeat(64),
+    event: {
+      replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+      event_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      event_type: "githubd.command_accepted",
+      schema_version: 1,
+      source: "githubd",
+      provenance: { machine: "test", ingress: "command" },
+      causation_event_id: null,
+      occurred_at: "2026-07-26T17:00:00.000Z",
+      payload: {},
+    },
+  };
+  await store.admit(admission);
+  const originalRecord = store.recordDelivery.bind(store);
+  let loseWorker = true;
+  store.recordDelivery = async (...args) => {
+    if (loseWorker) {
+      loseWorker = false;
+      throw new Error("injected worker loss after 2xx");
+    }
+    await originalRecord(...args);
+  };
+  const identities: string[] = [];
+  const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
+    identities.push((JSON.parse(String(init?.body)) as { event: { event_id: string } }).event.event_id);
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 10, fetchImpl });
+  dispatcher.start();
+  await settle();
+  dispatcher.wake();
+  await settle();
+  expect(identities).toEqual([admission.event.event_id, admission.event.event_id]);
+  expect((await store.projection(admission.replay_id))?.deliveries[0]).toMatchObject({
+    status: "delivered",
+    attempts: 1,
+  });
+  dispatcher.stop();
 });

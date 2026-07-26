@@ -1,27 +1,46 @@
-# busd — the central event bus
+# busd — replay and event authority
 
-Postgres-as-bus, transactional-outbox shape. Emitters append ONE event to the
-central journal (`bus.events` — busd is its single writer); the
-`bus.subscriptions` config table decides which services receive it — zero, one,
-or all, invisible to the emitter. busd delivers over HTTP per subscription,
-strictly in seq order, from a durable per-subscriber cursor. A consumer that is
-down simply catches up from its cursor when it returns — replay is free.
+PostgreSQL 18 stores the append-only replay stream and publication intent in
+one transaction. `replay_id` binds one canonical SHA-256 request hash;
+`event_id` is globally unique; `sequence` is monotonic inside one replay.
+Current state and event-delivery status are folds over immutable events and
+delivery attempts.
 
-DB triggers do NOT deliver, and there is no broker: appends wake the dispatcher
-in-process (busd is the one writer, so no LISTEN/NOTIFY machinery exists) and a
-30s repair tick covers everything a wake cannot see.
+Wakeups carry no correctness. busd is the sole replay writer; every daemon
+publishes through its strict HTTP surface, and a committed append wakes the
+dispatcher in-process. Startup and `POST /ctl/reconcile` reconcile durable
+unfinished work. Lost or duplicate wakeups are harmless; there is no interval
+checker, cooldown sleep, or volatile retry journal.
+
+`bus.events` serves vendor-hook subscribers with the same event-only posture:
+a failed subscriber becomes externally blocked until a new wake or service
+restart.
 
 ## Surfaces
 
 | Route | Plane |
 | --- | --- |
 | `GET /ctl/health` | ok + build + per-subscription lag (the `bus.lag` view) |
+| `POST /ctl/reconcile` | explicit bounded wake for durable pending delivery |
+| `POST /v1/replays/admit` | bind a replay to its request hash and atomically append its first event |
+| `POST /v1/replays/<replay_id>/events` | append an immutable event and publication intent |
+| `GET /v1/replays/<replay_id>` | fold event and delivery state |
+| `GET /v1/replays?source=<service>&unfinished=true` | startup reconciliation index |
+| `POST /ingress/github` | signature-verified, delivery-deduplicated GitHub event normalization |
 | `POST /ingress/hooks/<type>` | hook shim: one door per pinned vendor hook type (30), ALL consumed — journals `hook.<type>`. No 410 tail exists. |
 | `POST /ingress/events` | generic publish door (loopback emitters). `hook.*` is reserved and rejected here. |
 
 Harness hooks arrive via the local edge proxy (`hookConsumers` fan-in — busd is
 the only consumer); the `x-edge-proxy` header is the transport receipt woven
 into journal provenance.
+
+Each GitHub delivery is an immutable source replay keyed by GitHub's delivery
+UUID. The normalized payload carries repository, PR, exact head SHA where the
+webhook supplies one, and producer App identity for checks. githubd consumes
+that fact and appends a causally linked policy event to the relevant command
+replay; ingress never guesses a transaction replay from repository metadata.
+Issue comments explicitly require a PR-snapshot binding before they can affect
+SHA-bound policy.
 
 ## Delivery contract
 
@@ -31,10 +50,11 @@ into journal provenance.
 - **Subscribers MUST 2xx events they do not care about** (ack ≠ consume).
   Delivery is head-of-line per subscription — busd never skips — so a non-2xx
   on an irrelevant event wedges that subscriber's own lane (and only its own).
-- At-least-once: subscribers dedupe. Retry state is in-memory; a busd restart
-  retries from the durable cursor.
-- Backoff: full-jitter exponential, 500ms base, 60s cap; 10s delivery timeout;
-  batch reads of 100; per-subscription independent serial lanes.
+- At-least-once: subscribers dedupe by `event_id`. Every failed and successful
+  attempt is durable and the projection is rebuildable.
+- A failed delivery records `externally_blocked`; it is not followed by a sleep
+  or repeated API request. A later event, explicit reconciliation wake, or
+  startup reconciliation continues the durable intent.
 
 ## Subscribing (runbook)
 
@@ -61,8 +81,10 @@ Observability: `SELECT * FROM bus.lag;` or `curl localhost:7782/ctl/health`.
 txd's B1 pattern: `BUSD_CONFIG` JSON file → env → defaults. `machine` must come
 from `IMPERIUM_MACHINE` or config (fail loud). Defaults: bind `127.0.0.1`, port
 `7782`, db peer-auth socket `/var/run/postgresql` database `terminus`,
-`repairIntervalMs` 30000, `deliveryTimeoutMs` 10000, `batchSize` 100,
-`backoffBaseMs` 500, `backoffCapMs` 60000.
+`deliveryTimeoutMs` 10000 and `batchSize` 100. Signed GitHub ingress reads its
+secret from the absolute systemd credential path in
+`githubWebhookSecretFile`/`BUSD_GITHUB_WEBHOOK_SECRET_FILE`; secret material is
+never config content, an event payload, a projection, or a response.
 
 ## No-fallback posture (ruled)
 

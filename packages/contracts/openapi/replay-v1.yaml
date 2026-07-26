@@ -1,0 +1,197 @@
+openapi: 3.1.0
+info:
+  title: Terminus Replay Authority
+  version: 1.0.0
+paths:
+  /v1/replays/admit:
+    post:
+      operationId: admitReplay
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReplayAdmission" }
+      responses:
+        "200": { $ref: "#/components/responses/EventResult" }
+        "201": { $ref: "#/components/responses/EventResult" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Invalid" }
+  /v1/replays:
+    get:
+      operationId: listUnfinishedReplays
+      parameters:
+        - { name: source, in: query, required: true, schema: { type: string, minLength: 1 } }
+        - { name: unfinished, in: query, required: true, schema: { const: "true" } }
+      responses:
+        "200":
+          description: Rebuildable unfinished replay index
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [replays]
+                properties:
+                  replays:
+                    type: array
+                    items: { $ref: "#/components/schemas/LowercaseUuid" }
+  /v1/replays/{replay_id}:
+    parameters:
+      - $ref: "#/components/parameters/ReplayId"
+    get:
+      operationId: inspectReplay
+      responses:
+        "200":
+          description: Folded replay and delivery projection
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplayProjection" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/replays/{replay_id}/events:
+    parameters:
+      - $ref: "#/components/parameters/ReplayId"
+    post:
+      operationId: appendReplayEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [event]
+              properties:
+                event: { $ref: "#/components/schemas/ReplayEventInput" }
+      responses:
+        "200": { $ref: "#/components/responses/EventResult" }
+        "201": { $ref: "#/components/responses/EventResult" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Invalid" }
+  /ingress/github:
+    post:
+      operationId: ingestGithubWebhook
+      parameters:
+        - { name: x-github-delivery, in: header, required: true, schema: { $ref: "#/components/schemas/LowercaseUuid" } }
+        - { name: x-github-event, in: header, required: true, schema: { $ref: "#/components/schemas/GithubEventName" } }
+        - { name: x-hub-signature-256, in: header, required: true, schema: { type: string, pattern: "^sha256=[0-9a-f]{64}$" } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "200": { $ref: "#/components/responses/WebhookResult" }
+        "202": { $ref: "#/components/responses/WebhookResult" }
+        "401":
+          description: Signature refused before publication
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Invalid" }
+components:
+  parameters:
+    ReplayId:
+      name: replay_id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/LowercaseUuid" }
+  schemas:
+    LowercaseUuid:
+      type: string
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    RequestHash:
+      type: string
+      pattern: "^[0-9a-f]{64}$"
+    SafeFacts:
+      $ref: "../schemas/replay-event-v1.schema.json#/$defs/safeObject"
+    ReplayEventBase:
+      type: object
+      required: [replay_id, event_id, event_type, schema_version, source, provenance, causation_event_id, occurred_at, payload]
+      properties:
+        replay_id: { $ref: "#/components/schemas/LowercaseUuid" }
+        event_id: { $ref: "#/components/schemas/LowercaseUuid" }
+        event_type: { type: string, pattern: "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" }
+        schema_version: { const: 1 }
+        source: { type: string, minLength: 1 }
+        provenance:
+          allOf:
+            - { $ref: "#/components/schemas/SafeFacts" }
+            - type: object
+              required: [machine, ingress]
+        causation_event_id:
+          anyOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/LowercaseUuid" }
+        occurred_at: { type: string, format: date-time }
+        payload: { $ref: "#/components/schemas/SafeFacts" }
+    ReplayEventInput:
+      allOf:
+        - { $ref: "#/components/schemas/ReplayEventBase" }
+      unevaluatedProperties: false
+    ReplayEventRecord:
+      allOf:
+        - { $ref: "#/components/schemas/ReplayEventBase" }
+        - type: object
+          required: [sequence, recorded_at]
+          properties:
+            sequence: { type: integer, minimum: 1 }
+            recorded_at: { type: string, format: date-time }
+      unevaluatedProperties: false
+    ReplayAdmission:
+      type: object
+      additionalProperties: false
+      required: [replay_id, request_hash, event]
+      properties:
+        replay_id: { $ref: "#/components/schemas/LowercaseUuid" }
+        request_hash: { $ref: "#/components/schemas/RequestHash" }
+        event: { $ref: "#/components/schemas/ReplayEventInput" }
+    ReplayDelivery:
+      type: object
+      additionalProperties: false
+      required: [event_id, subscription, status, attempts, last_error]
+      properties:
+        event_id: { $ref: "#/components/schemas/LowercaseUuid" }
+        subscription: { type: string, minLength: 1 }
+        status: { enum: [pending, delivered, failed] }
+        attempts: { type: integer, minimum: 0 }
+        last_error: { type: [string, "null"] }
+    ReplayProjection:
+      type: object
+      additionalProperties: false
+      required: [replay_id, request_hash, source, terminal, events, deliveries]
+      properties:
+        replay_id: { $ref: "#/components/schemas/LowercaseUuid" }
+        request_hash: { $ref: "#/components/schemas/RequestHash" }
+        source: { type: string, minLength: 1 }
+        terminal: { type: boolean }
+        events: { type: array, items: { $ref: "#/components/schemas/ReplayEventRecord" } }
+        deliveries: { type: array, items: { $ref: "#/components/schemas/ReplayDelivery" } }
+    GithubEventName:
+      enum: [pull_request, pull_request_review, pull_request_review_comment, issue_comment, check_suite, check_run, status, push, create, delete]
+    EventResult:
+      type: object
+      required: [ok, created, event]
+      properties:
+        ok: { const: true }
+        created: { type: boolean }
+        event: { $ref: "#/components/schemas/ReplayEventRecord" }
+    WebhookResult:
+      type: object
+      required: [ok, created, replay_id, event_id]
+      properties:
+        ok: { const: true }
+        created: { type: boolean }
+        replay_id: { $ref: "#/components/schemas/LowercaseUuid" }
+        event_id: { $ref: "#/components/schemas/LowercaseUuid" }
+  responses:
+    EventResult:
+      description: Idempotent append result
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/EventResult" }
+    WebhookResult:
+      description: Deduplicated signed delivery
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/WebhookResult" }
+    Conflict: { description: Immutable identity conflict }
+    Invalid: { description: Strict contract validation failed }
+    NotFound: { description: Replay does not exist }
