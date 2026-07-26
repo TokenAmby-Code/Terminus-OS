@@ -1,5 +1,8 @@
 // Behavioral-pin lane: every real tmux operation crosses one sanitized audit boundary.
 import { expect, test } from 'bun:test';
+import { chmodSync, copyFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { RealTmux, type TmuxAuditRecord, type TmuxCommandResult } from '../src/tmux.ts';
 
 test('adapter emits sanitized structured audit records without arguments or raw tmux ids', async () => {
@@ -74,4 +77,32 @@ test('static launch execs the wrapper as the pane process for physical attestati
   })).toBe(true);
 
   expect(calls.at(-1)?.at(-1)).toBe("exec '/fleet/agent-wrapper' claude");
+});
+
+test('physical attestation reads live procfs parent and engine identity', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'txd-attestation-'));
+  const engine = join(directory, 'claude');
+  copyFileSync('/usr/bin/sleep', engine);
+  chmodSync(engine, 0o700);
+  const child = Bun.spawn([engine, '600'], { stdout: 'ignore', stderr: 'ignore' });
+  try {
+    const tmux = new RealTmux('scratch', {
+      run: async (_socket, args) => {
+        if (args[0] === 'list-panes') {
+          return { code: 0, stdout: '%17\tcouncil:custodes\n', stderr: '' };
+        }
+        if (args[0] === 'display-message') {
+          return { code: 0, stdout: `${process.pid}\t0\n`, stderr: '' };
+        }
+        throw new Error(`unexpected tmux call: ${args[0]}`);
+      },
+      audit: () => {},
+    });
+
+    expect(await tmux.attestStaticAgent('council:custodes', process.pid, child.pid, 'claude')).toBe(true);
+  } finally {
+    child.kill(9);
+    await child.exited;
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
