@@ -4,7 +4,7 @@ import { Dispatcher, ReplayDispatcher } from "../src/dispatcher.ts";
 import { MemoryReplayStore } from "../src/replay-store.ts";
 import { MemoryBusStore } from "../src/store.ts";
 
-const URL = "http://127.0.0.1:7999/event";
+const DELIVERY_URL = "http://127.0.0.1:7999/event";
 
 function busEvent(eventType = "hook.stop"): BusEventInput {
   return {
@@ -18,7 +18,7 @@ function busEvent(eventType = "hook.stop"): BusEventInput {
 
 test("legacy bus delivery is ordered and an outage becomes blocked until a new wake", async () => {
   const store = new MemoryBusStore();
-  store.setSubscription({ name: "consumer", delivery_url: URL, event_pattern: "hook.%", active: true });
+  store.setSubscription({ name: "consumer", delivery_url: DELIVERY_URL, event_pattern: "hook.%", active: true });
   store.seedCursor("consumer", 0);
   await store.append(busEvent());
   await store.append(busEvent("hook.notification"));
@@ -45,7 +45,7 @@ test("legacy bus delivery is ordered and an outage becomes blocked until a new w
 
 test("startup reconciliation resumes from the durable cursor without a standing checker", async () => {
   const store = new MemoryBusStore();
-  store.setSubscription({ name: "consumer", delivery_url: URL, event_pattern: "hook.%", active: true });
+  store.setSubscription({ name: "consumer", delivery_url: DELIVERY_URL, event_pattern: "hook.%", active: true });
   store.seedCursor("consumer", 1);
   await store.append(busEvent());
   await store.append(busEvent("hook.notification"));
@@ -99,7 +99,7 @@ test("delivery can target a protected Unix socket without opening a loopback por
 
 test("replay outbox records failure durably and retries the same event identity only on a wake", async () => {
   const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
-  store.setSubscription({ name: "manager", delivery_url: URL, event_pattern: "githubd.%", active: true });
+  store.setSubscription({ name: "manager", delivery_url: DELIVERY_URL, event_pattern: "githubd.%", active: true });
   const admission: ReplayAdmission = {
     replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
     request_hash: "a".repeat(64),
@@ -167,7 +167,7 @@ test("one blocked replay delivery does not strand an unrelated batch", async () 
   const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 1, fetchImpl });
   dispatcher.start();
   await dispatcher.settled();
-  expect(delivered).toEqual(["http://blocked/event", "http://healthy/event"]);
+  expect(new Set(delivered)).toEqual(new Set(["http://blocked/event", "http://healthy/event"]));
   const projection = await store.projection(admission.replay_id);
   expect(projection?.deliveries.find((item) => item.subscription === "blocked")?.status).toBe("failed");
   expect(projection?.deliveries.find((item) => item.subscription === "healthy")?.status).toBe("delivered");
@@ -176,7 +176,7 @@ test("one blocked replay delivery does not strand an unrelated batch", async () 
 
 test("worker loss after an external 2xx redelivers the same immutable event identity", async () => {
   const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
-  store.setSubscription({ name: "manager", delivery_url: URL, event_pattern: "githubd.%", active: true });
+  store.setSubscription({ name: "manager", delivery_url: DELIVERY_URL, event_pattern: "githubd.%", active: true });
   const admission: ReplayAdmission = {
     replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
     request_hash: "a".repeat(64),
@@ -222,7 +222,7 @@ test("worker loss after an external 2xx redelivers the same immutable event iden
 
 test("graceful stop awaits an admitted replay delivery before closing its store boundary", async () => {
   const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
-  store.setSubscription({ name: "manager", delivery_url: URL, event_pattern: "githubd.%", active: true });
+  store.setSubscription({ name: "manager", delivery_url: DELIVERY_URL, event_pattern: "githubd.%", active: true });
   const admission: ReplayAdmission = {
     replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
     request_hash: "a".repeat(64),

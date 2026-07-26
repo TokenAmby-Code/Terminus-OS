@@ -57,6 +57,7 @@ paths:
                     anyOf:
                       - { type: "null" }
                       - { $ref: "#/components/schemas/LowercaseUuid" }
+        "422": { $ref: "#/components/responses/Invalid" }
   /v1/replays/{replay_id}:
     parameters:
       - $ref: "#/components/parameters/ReplayId"

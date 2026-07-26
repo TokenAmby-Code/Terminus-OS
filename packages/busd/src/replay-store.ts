@@ -509,7 +509,7 @@ export class PostgresReplayStore implements ReplayStore {
       FROM replay.events
       WHERE journal_sequence > ${cursor}
         AND (${query.source}::text IS NULL OR source = ${query.source})
-        AND event_type LIKE ${pattern}
+        AND event_type LIKE ${pattern} ESCAPE '!'
       ORDER BY journal_sequence
       LIMIT ${fetchLimit}`) as EventRow[];
     const events = rows.slice(0, query.limit).map(rowToEvent);
@@ -656,7 +656,7 @@ function assertLimit(limit: number): void {
 }
 
 function escapeLikePrefix(prefix: string): string {
-  return prefix.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+  return prefix.replaceAll("!", "!!").replaceAll("%", "!%").replaceAll("_", "!_");
 }
 
 function normalizeReplayWriteError(error: unknown): never {
