@@ -34,6 +34,11 @@ describe('systemd/busd.service pins', () => {
     pin('Environment=BUSD_BIND=127.0.0.1');
   });
 
+  test('loads the signed GitHub ingress secret from systemd encrypted credentials', () => {
+    pin('Environment=BUSD_GITHUB_WEBHOOK_SECRET_FILE=%d/busd.github-webhook');
+    pin('LoadCredentialEncrypted=busd.github-webhook:%E/credstore.encrypted/busd.github-webhook');
+  });
+
   test('waits for the postgres peer-auth socket, bounded — user units cannot After= system postgres', () => {
     pin("ExecStartPre=/bin/sh -c 'until test -S /var/run/postgresql/.s.PGSQL.5432; do sleep 2; done'");
     pin('TimeoutStartSec=180');
