@@ -35,9 +35,11 @@ through the same typed lifecycle path as a dead or replaced bound pane.
 There is no public tint mutation command.
 
 A durable scoped-reset request fences every named seat from launch, static
-acknowledgement, and send admission until completion. It captures each current
-binding's event sequence and pane generation; restart recovery may retire only
-those exact generations and fails loud if newer binding truth appears.
+acknowledgement, comm, send admission, and the final physical send boundary
+until completion. Already-enqueued guarded sends cancel with the typed reset
+cause. The request captures each current binding's event sequence and pane
+generation; restart recovery may retire only those exact generations and fails
+loud if newer binding truth appears.
 
 The Council trial values are:
 

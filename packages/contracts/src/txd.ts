@@ -200,7 +200,7 @@ export const DELIVERY_VERDICTS = [
 export type DeliveryVerdict = (typeof DELIVERY_VERDICTS)[number];
 export const DeliveryVerdictSchema = z.enum(DELIVERY_VERDICTS);
 
-export const SEND_CANCELLATION_REASONS = ['binding_changed'] as const;
+export const SEND_CANCELLATION_REASONS = ['binding_changed', 'scoped_reset_pending'] as const;
 export type SendCancellationReason = (typeof SEND_CANCELLATION_REASONS)[number];
 export const SendCancellationReasonSchema = z.enum(SEND_CANCELLATION_REASONS);
 
@@ -390,8 +390,8 @@ export const SendReceiptSchema = SendReceiptBaseSchema.superRefine((receipt, ctx
   if (receipt.verdict === 'partial_delivered' && receipt.bytes_delivered === null) {
     ctx.addIssue({ code: 'custom', message: 'partial_delivered must carry non-null bytes_delivered', path: ['bytes_delivered'] });
   }
-  if (receipt.verdict === 'cancelled' && receipt.cancellation_reason !== 'binding_changed') {
-    ctx.addIssue({ code: 'custom', message: 'cancelled must carry binding_changed', path: ['cancellation_reason'] });
+  if (receipt.verdict === 'cancelled' && receipt.cancellation_reason === null) {
+    ctx.addIssue({ code: 'custom', message: 'cancelled must carry a cancellation reason', path: ['cancellation_reason'] });
   }
   if (receipt.verdict !== 'cancelled' && receipt.cancellation_reason !== null) {
     ctx.addIssue({ code: 'custom', message: 'only cancelled may carry a cancellation reason', path: ['cancellation_reason'] });

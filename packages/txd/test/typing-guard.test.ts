@@ -187,3 +187,53 @@ test('held message for occupant A is cancelled before replacement occupant B can
   expect(terminal?.event_type).toBe('act.send_cancelled');
   expect(terminal?.payload).toMatchObject({ reason: 'binding_changed', resolved_seq: 0 });
 });
+
+test('a reset requested after enqueue cancels the held send at the physical delivery boundary', async () => {
+  class RecordingTmux extends FakeTmux {
+    deliveries: Array<{ seat: string; text: string }> = [];
+    override async sendToSeat(seat: string, text: string) {
+      this.deliveries.push({ seat, text });
+      return super.sendToSeat(seat, text);
+    }
+  }
+  const store = base();
+  const tmux = new RecordingTmux();
+  let nowMs = 1_000_000;
+  let release: (() => void | Promise<void>) | undefined;
+  const d = new Daemon(
+    store,
+    tmux,
+    () => new Date(nowMs).toISOString(),
+    (callback) => { release = callback; },
+    () => nowMs,
+  );
+  await bareSeat(d);
+  tmux.setPresence(SEAT, nowMs);
+  expect(((await d.send({ target: SEAT, text: 'held', schema_version: 8 })) as SendReceipt).verdict).toBe('enqueued_gated');
+  await store.append({
+    entity_type: 'estate',
+    entity_id: 'reset-after-enqueue',
+    event_type: 'estate.scoped_reset_requested',
+    payload: {
+      scope: 'pane',
+      seats: [SEAT],
+      force: true,
+      bound_seats: [],
+      bound_generations: [],
+      foreground_workloads: [],
+      trigger: 'operator',
+    },
+    provenance: { source: 'wrapper', transport_receipt: null, emitter_version: 8 },
+    occurred_at: new Date(nowMs).toISOString(),
+  });
+
+  nowMs += SEND_PRESENCE_ACTIVITY_WINDOW_MS + 1;
+  await release!();
+
+  expect(tmux.deliveries).toEqual([]);
+  const terminal = (await store.readAll()).filter((event) => event.entity_type === 'send').at(-1);
+  expect(terminal).toMatchObject({
+    event_type: 'act.send_cancelled',
+    payload: { reason: 'scoped_reset_pending', resolved_seq: 0 },
+  });
+});

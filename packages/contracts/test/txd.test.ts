@@ -82,7 +82,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(SendReceiptSchema.parse({ ...base, bytes_delivered: 3 }).bytes_delivered).toBe(3);
   });
 
-  test("cancelled receipts name only the binding generation reason", () => {
+  test("cancelled receipts carry an explicit typed cause", () => {
     expect(SendReceiptSchema.parse({
       verdict: "cancelled",
       resolution: { target: "somnium:NE", seat_id: "somnium:NE", bound_seq: 42 },

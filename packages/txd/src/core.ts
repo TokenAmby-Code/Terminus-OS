@@ -31,6 +31,7 @@ import {
   type ProvenanceSource,
   type ReconcileResponse,
   type SendReceipt,
+  type SendCancellationReason,
   type SendRefusal,
   type SendRefusalReason,
   type SendRequest,
@@ -325,6 +326,9 @@ export class Daemon {
         if (targets.length === 0) throw new Error(`identity_absent: ${targetIdentity}`);
         if (targets.length > 1) throw new Error(`identity_ambiguous: ${targetIdentity}`);
       }
+      const pendingResetSeats = this.pendingScopedResetSeats(events);
+      const fenced = targets.find((target) => pendingResetSeats.has(target.seat_id));
+      if (fenced) throw new Error(`scoped_reset_pending: ${fenced.seat_id}`);
       const messageId = crypto.randomUUID();
       const askId = req.ask ? crypto.randomUUID() : null;
       const occurred_at = this.now();
@@ -961,6 +965,9 @@ export class Daemon {
     if (!(await this.frozenResolutionIsCurrent(resolution))) {
       return this.cancelSend(sendId, resolution, transportReceipt);
     }
+    if (this.pendingScopedResetSeats(await this.store.readAll()).has(resolution.seat_id)) {
+      return this.cancelSend(sendId, resolution, transportReceipt, 'scoped_reset_pending');
+    }
 
     const result = await this.tmux.sendToSeat(resolution.seat_id, text);
     for (const observation of result.trace ?? []) {
@@ -1009,6 +1016,7 @@ export class Daemon {
     sendId: string,
     resolution: SendResolution,
     transportReceipt: string | null,
+    reason: SendCancellationReason = 'binding_changed',
   ): Promise<SendReceipt> {
     await this.store.append({
       entity_type: 'send',
@@ -1017,12 +1025,12 @@ export class Daemon {
       payload: {
         target: resolution.seat_id,
         resolved_seq: resolution.bound_seq,
-        reason: 'binding_changed',
+        reason,
       },
       provenance: this.prov('observer', transportReceipt),
       occurred_at: this.now(),
     });
-    return this.receipt('cancelled', resolution, sendId, null, null, 0);
+    return this.receipt('cancelled', resolution, sendId, null, null, 0, reason);
   }
 
   private resolveTarget(target: string, proj: Projections): SendResolution | null {
@@ -1051,12 +1059,13 @@ export class Daemon {
     gate: 'typing_guard' | null,
     window: number | null,
     bytes: number | null,
+    cancellationReason: SendCancellationReason | null = null,
   ): Promise<SendReceipt> {
     return {
       verdict,
       resolution,
       gate_reason: gate,
-      cancellation_reason: verdict === 'cancelled' ? 'binding_changed' : null,
+      cancellation_reason: verdict === 'cancelled' ? cancellationReason : null,
       activity_window_ms: window,
       bytes_delivered: bytes,
       send_seq: (await this.store.readByEntity(sendId)).at(-1)?.seq ?? -1,

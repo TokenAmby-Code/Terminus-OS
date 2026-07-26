@@ -32,6 +32,44 @@ test('absence and ambiguity refuse before communication effects', async () => {
   expect(await store.count()).toBe(beforeAmbiguous);
 });
 
+test('pending scoped reset fences comm before acceptance or physical transport', async () => {
+  const { store, daemon } = await setup();
+  const binding = (await store.readAll()).find((event) =>
+    event.entity_id === 'somnium:N' && event.event_type === 'reg.bound',
+  )!;
+  await store.append({
+    entity_type: 'estate',
+    entity_id: 'comm-reset-fence',
+    event_type: 'estate.scoped_reset_requested',
+    payload: {
+      scope: 'pane',
+      seats: ['somnium:N'],
+      force: true,
+      bound_seats: ['somnium:N'],
+      bound_generations: [{
+        seat_id: 'somnium:N',
+        bound_seq: binding.seq,
+        pane_generation: binding.payload.pane_generation,
+      }],
+      foreground_workloads: [],
+      trigger: 'operator',
+    },
+    provenance: { source: 'wrapper', transport_receipt: null, emitter_version: 8 },
+    occurred_at: new Date().toISOString(),
+  });
+  const before = await store.count();
+
+  expect(daemon.comm({
+    schema_version: 8,
+    source_instance_id: 'source',
+    target: 'target-a',
+    message: 'must not cross reset fence',
+    ask: false,
+    reply: false,
+  })).rejects.toThrow('scoped_reset_pending: somnium:N');
+  expect(await store.count()).toBe(before);
+});
+
 test('page resolution is an immutable exact inventory and payload stays opaque', async () => {
   const { store, daemon } = await setup();
   const message = '---\na: 1\n---\n{"x":"λ\\n\\\""}';
