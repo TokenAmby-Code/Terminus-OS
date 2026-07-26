@@ -6,7 +6,8 @@
 import { describeEndpoint } from '@terminus-os/db';
 import { loadConfig } from './config.ts';
 import { PostgresBusStore } from './store.ts';
-import { Dispatcher } from './dispatcher.ts';
+import { PostgresReplayStore } from './replay-store.ts';
+import { Dispatcher, ReplayDispatcher } from './dispatcher.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
 
@@ -22,24 +23,41 @@ const cfg = await loadConfig();
 // Connect + migrate (forward-only, shared migrations home, advisory-locked
 // against concurrent booters) — fail loud at boot.
 const store = await PostgresBusStore.connect(cfg.db);
+const replayStore = await PostgresReplayStore.connect(cfg.db);
+await replayStore.reconcileSubscriptions(cfg.subscriptions);
 const dispatcher = new Dispatcher(store, {
-  repairIntervalMs: cfg.repairIntervalMs,
   deliveryTimeoutMs: cfg.deliveryTimeoutMs,
   batchSize: cfg.batchSize,
-  backoffBaseMs: cfg.backoffBaseMs,
-  backoffCapMs: cfg.backoffCapMs,
 });
+const replayDispatcher = new ReplayDispatcher(replayStore, {
+  deliveryTimeoutMs: cfg.deliveryTimeoutMs,
+  batchSize: cfg.batchSize,
+});
+let githubWebhookSecret: Uint8Array | undefined;
+if (cfg.githubWebhookSecretFile) {
+  const file = Bun.file(cfg.githubWebhookSecretFile);
+  if (!await file.exists()) throw new Error('configured GitHub webhook credential is unavailable');
+  const value = (await file.text()).trim();
+  if (!value) throw new Error('configured GitHub webhook credential is empty');
+  githubWebhookSecret = new TextEncoder().encode(value);
+}
 const server = makeServer({
   bind: cfg.bind,
   port: cfg.port,
   store,
-  onAppend: () => dispatcher.wake(),
+  replayStore,
+  onAppend: () => {
+    dispatcher.wake();
+    replayDispatcher.wake();
+  },
   build,
   machine: cfg.machine,
+  ...(githubWebhookSecret ? { githubWebhookSecret } : {}),
 });
 dispatcher.start();
+replayDispatcher.start();
 
-console.log(
+console.info(
   JSON.stringify({
     level: 'info',
     event: 'listening',
@@ -51,12 +69,13 @@ console.log(
 );
 
 async function shutdown() {
-  // Graceful, but bounded: stop scheduling deliveries, let in-flight requests
-  // finish, never let a stuck request block termination. The delivery cursor
-  // is durable — an interrupted retry simply re-runs after restart.
-  dispatcher.stop();
-  await Promise.race([server.stop(), Bun.sleep(5_000)]);
+  // Stop scheduling and await the bounded transport requests already in flight.
+  // Their timeout is the configured transport contract, not a second shutdown
+  // timer. Durable delivery state reconciles any process-level interruption.
+  await Promise.all([dispatcher.stop(), replayDispatcher.stop()]);
+  await server.stop();
   await store.close();
+  await replayStore.close();
   process.exit(0);
 }
 process.on('SIGTERM', shutdown);

@@ -24,7 +24,7 @@ packages/
     src/
     systemd/
     test/
-  busd/                central event bus: append-only journal + subscription HTTP fan-out (transactional outbox)
+  busd/                PostgreSQL replay/event authority, signed ingress, and transactional publication
     src/
     systemd/
     test/

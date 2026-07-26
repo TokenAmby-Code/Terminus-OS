@@ -125,7 +125,10 @@ describe.skipIf(!endpoint)('PostgresBusStore (live postgres 18)', () => {
   beforeAll(async () => {
     raw = await connectDb(endpoint!);
     // Clean slate: connect() re-applies the forward-only migrations from zero.
+    await raw`drop schema if exists replay cascade`;
     await raw`drop schema if exists bus cascade`;
+    await raw`drop schema if exists telemetry cascade`;
+    await raw`drop schema if exists txd cascade`;
     await raw`drop table if exists schema_migrations`;
     store = await PostgresBusStore.connect(endpoint!, () => `2026-07-22T00:00:0${tick++}.000Z`);
     await raw`insert into bus.subscriptions (name, delivery_url, event_pattern, active)

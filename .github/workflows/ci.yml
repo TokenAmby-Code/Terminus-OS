@@ -60,5 +60,17 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: DB integration tests
-        run: bun test packages/db packages/txd
+      # These suites deliberately rebuild schemas and historical migration
+      # fixtures. Keep them as separate processes against the disposable CI
+      # authority so one reset cannot race another suite's forward-only ledger.
+      - name: Database foundation integration
+        run: bun test packages/db
+
+      - name: txd PostgreSQL integration
+        run: bun test packages/txd
+
+      - name: busd PostgreSQL integration
+        run: bun test packages/busd/test/store.test.ts
+
+      - name: Replay PostgreSQL integration
+        run: bun test packages/busd/test/replay-store.test.ts
