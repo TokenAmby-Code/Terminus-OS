@@ -63,6 +63,42 @@ test("startup reconciliation resumes from the durable cursor without a standing 
   dispatcher.stop();
 });
 
+test("delivery can target a protected Unix socket without opening a loopback port", async () => {
+  const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
+  store.setSubscription({
+    name: "githubd-github",
+    delivery_url: "http+unix://%2Frun%2Fgithubd%2Fghd.sock/event",
+    event_pattern: "github.%",
+    active: true,
+  });
+  const input = {
+    replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+    request_hash: "a".repeat(64),
+    event: {
+      replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+      event_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      event_type: "github.pull_request",
+      schema_version: 1,
+      source: "github",
+      provenance: { machine: "test", ingress: "github_webhook" },
+      causation_event_id: null,
+      occurred_at: "2026-07-26T17:00:00.000Z",
+      payload: {},
+    },
+  } satisfies ReplayAdmission;
+  await store.admit(input);
+  const calls: Array<{ url: string; unix: unknown }> = [];
+  const fetchImpl = (async (url: unknown, init?: RequestInit) => {
+    calls.push({ url: String(url), unix: (init as RequestInit & { unix?: string })?.unix });
+    return new Response("{}", { status: 200 });
+  }) as typeof fetch;
+  const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
+  dispatcher.start();
+  await settle();
+  expect(calls).toEqual([{ url: "http://localhost/event", unix: "/run/githubd/ghd.sock" }]);
+  dispatcher.stop();
+});
+
 test("replay outbox records failure durably and retries the same event identity only on a wake", async () => {
   const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
   store.setSubscription({ name: "manager", delivery_url: URL, event_pattern: "githubd.%", active: true });

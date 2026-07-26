@@ -14,6 +14,7 @@ import {
   type ReplayProjection,
 } from "@terminus-os/contracts";
 import { likeToRegExp } from "./store.ts";
+import type { DesiredSubscription } from "./config.ts";
 
 export type Clock = () => string;
 const systemClock: Clock = () => new Date().toISOString();
@@ -260,6 +261,51 @@ export class PostgresReplayStore implements ReplayStore {
     const sql = await connectDb(endpoint);
     await runMigrations(sql, MIGRATIONS_DIR);
     return new PostgresReplayStore(sql, now);
+  }
+
+  async reconcileSubscriptions(desired: DesiredSubscription[]): Promise<void> {
+    await this.sql.begin(async (transaction) => {
+      const names = desired.map((subscription) => subscription.name);
+      if (names.length) {
+        await transaction`
+          UPDATE bus.subscriptions
+          SET active = false
+          WHERE name IN (SELECT subscription_name FROM bus.managed_subscriptions)
+            AND name NOT IN ${transaction(names)}`;
+      } else {
+        await transaction`
+          UPDATE bus.subscriptions
+          SET active = false
+          WHERE name IN (SELECT subscription_name FROM bus.managed_subscriptions)`;
+      }
+      for (const subscription of desired) {
+        await transaction`
+          INSERT INTO bus.subscriptions (name, delivery_url, event_pattern, active)
+          VALUES (
+            ${subscription.name},
+            ${subscription.delivery_url},
+            ${subscription.event_pattern},
+            ${subscription.active}
+          )
+          ON CONFLICT (name) DO UPDATE SET
+            delivery_url = EXCLUDED.delivery_url,
+            event_pattern = EXCLUDED.event_pattern,
+            active = EXCLUDED.active`;
+        await transaction`
+          INSERT INTO bus.managed_subscriptions (subscription_name)
+          VALUES (${subscription.name})
+          ON CONFLICT DO NOTHING`;
+        await transaction`
+          INSERT INTO bus.cursors (subscription_name, acked_seq)
+          SELECT ${subscription.name},
+                 CASE WHEN ${subscription.seed} = 'beginning'
+                   THEN 0
+                   ELSE coalesce(max(seq), 0)
+                 END
+          FROM bus.events
+          ON CONFLICT DO NOTHING`;
+      }
+    });
   }
 
   async admit(raw: ReplayAdmission): Promise<{ created: boolean; event: ReplayEventRecord }> {

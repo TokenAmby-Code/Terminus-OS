@@ -7,6 +7,11 @@
 // guesses its own machine is a bug).
 
 import { DbEndpoint, type DbEndpointT } from '@terminus-os/db';
+import { BusSubscriptionRowSchema, type BusSubscriptionRow } from '@terminus-os/contracts';
+
+export type DesiredSubscription = BusSubscriptionRow & {
+  seed: 'beginning' | 'now';
+};
 
 export type DaemonConfig = {
   bind: string;
@@ -20,6 +25,8 @@ export type DaemonConfig = {
   deliveryTimeoutMs: number;
   /** Journal rows read per delivery batch. */
   batchSize: number;
+  /** Machine-owned subscriptions reconciled transactionally at daemon boot. */
+  subscriptions: DesiredSubscription[];
 };
 
 // Partial with explicit undefined: the root tsconfig pins
@@ -42,6 +49,7 @@ const HARD_DEFAULTS = {
   githubWebhookSecretFile: null,
   deliveryTimeoutMs: 10_000,
   batchSize: 100,
+  subscriptions: [] as DesiredSubscription[],
 } as const;
 
 function envDefaults(): PartialConfig {
@@ -74,6 +82,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     db: raw.db ?? env.db ?? HARD_DEFAULTS.db,
     deliveryTimeoutMs: raw.deliveryTimeoutMs ?? HARD_DEFAULTS.deliveryTimeoutMs,
     batchSize: raw.batchSize ?? HARD_DEFAULTS.batchSize,
+    subscriptions: raw.subscriptions ?? HARD_DEFAULTS.subscriptions,
   };
 
   if (!cfg.bind) throw new Error('busd config error: bind is required');
@@ -93,6 +102,20 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     if (!Number.isInteger(cfg[knob]) || cfg[knob]! < 1)
       throw new Error(`busd config error: ${knob} must be a positive integer (got ${cfg[knob]})`);
   }
+  if (!Array.isArray(cfg.subscriptions)) throw new Error('busd config error: subscriptions must be an array');
+  const names = new Set<string>();
+  cfg.subscriptions = cfg.subscriptions.map((rawSubscription) => {
+    const raw = rawSubscription as DesiredSubscription;
+    const subscription = BusSubscriptionRowSchema.parse(raw);
+    if (raw.seed !== 'beginning' && raw.seed !== 'now') {
+      throw new Error(`busd config error: subscription ${subscription.name} has invalid seed`);
+    }
+    if (names.has(subscription.name)) {
+      throw new Error(`busd config error: duplicate subscription ${subscription.name}`);
+    }
+    names.add(subscription.name);
+    return { ...subscription, seed: raw.seed };
+  });
   return cfg as DaemonConfig;
 }
 

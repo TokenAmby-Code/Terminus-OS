@@ -214,12 +214,19 @@ async function deliver(
   timeoutMs: number,
 ): Promise<{ ok: true } | { ok: false; detail: string }> {
   try {
-    const response = await fetchImpl(url, {
+    const target = new URL(url);
+    const unix = target.protocol === "http+unix:" ? decodeURIComponent(target.hostname) : null;
+    const requestUrl = unix
+      ? `http://localhost${target.pathname}${target.search}`
+      : url;
+    const init = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
-    });
+      ...(unix ? { unix } : {}),
+    };
+    const response = await fetchImpl(requestUrl, init as RequestInit);
     return response.ok ? { ok: true } : { ok: false, detail: `status_${response.status}` };
   } catch (error) {
     return {

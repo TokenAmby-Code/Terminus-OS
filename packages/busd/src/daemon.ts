@@ -24,6 +24,7 @@ const cfg = await loadConfig();
 // against concurrent booters) — fail loud at boot.
 const store = await PostgresBusStore.connect(cfg.db);
 const replayStore = await PostgresReplayStore.connect(cfg.db);
+await replayStore.reconcileSubscriptions(cfg.subscriptions);
 const dispatcher = new Dispatcher(store, {
   deliveryTimeoutMs: cfg.deliveryTimeoutMs,
   batchSize: cfg.batchSize,

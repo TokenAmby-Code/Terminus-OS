@@ -67,6 +67,14 @@ describe("bus event vocabulary", () => {
         active: true,
       }).name,
     ).toBe("txd");
+    expect(
+      BusSubscriptionRowSchema.parse({
+        name: "githubd-github",
+        delivery_url: "http+unix://%2Frun%2Fgithubd%2Fghd.sock/event",
+        event_pattern: "github.%",
+        active: true,
+      }).delivery_url,
+    ).toBe("http+unix://%2Frun%2Fgithubd%2Fghd.sock/event");
     expect(() =>
       BusSubscriptionRowSchema.parse({
         name: "txd",

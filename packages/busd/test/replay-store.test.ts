@@ -305,4 +305,76 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
       await raw`DROP FUNCTION replay.test_reject_publication()`;
     }
   });
+
+  test("machine subscriptions converge transactionally without taking over operator rows", async () => {
+    await raw`
+      INSERT INTO bus.events (
+        event_type, source, payload, provenance, occurred_at, recorded_at
+      ) VALUES (
+        'deployment.test', 'test', '{}'::jsonb, '{}'::jsonb,
+        '2026-07-26T17:00:00.000Z', '2026-07-26T17:00:00.000Z'
+      )`;
+    await store.reconcileSubscriptions([
+      {
+        name: "managed-test-beginning",
+        delivery_url: "http+unix://%2Frun%2Fgithubd%2Fghd.sock/event",
+        event_pattern: "github.%",
+        active: true,
+        seed: "beginning",
+      },
+      {
+        name: "managed-test-now",
+        delivery_url: "http://127.0.0.1:7999/event",
+        event_pattern: "deployment.%",
+        active: true,
+        seed: "now",
+      },
+    ]);
+    const seeded = (await raw`
+      SELECT s.name, s.active, c.acked_seq::int AS acked_seq
+      FROM bus.subscriptions s
+      JOIN bus.cursors c ON c.subscription_name = s.name
+      WHERE s.name IN ('managed-test-beginning', 'managed-test-now')
+      ORDER BY s.name`) as Array<{ name: string; active: boolean; acked_seq: number }>;
+    expect(seeded[0]).toEqual({ name: "managed-test-beginning", active: true, acked_seq: 0 });
+    expect(seeded[1]!.acked_seq).toBeGreaterThan(0);
+
+    await store.reconcileSubscriptions([{
+      name: "managed-test-now",
+      delivery_url: "http://127.0.0.1:7999/changed",
+      event_pattern: "policy.%",
+      active: true,
+      seed: "beginning",
+    }]);
+    const reconciled = (await raw`
+      SELECT name, delivery_url, event_pattern, active
+      FROM bus.subscriptions
+      WHERE name IN ('managed-test-beginning', 'managed-test-now', 'replay-test-manager')
+      ORDER BY name`) as Array<{
+        name: string;
+        delivery_url: string;
+        event_pattern: string;
+        active: boolean;
+      }>;
+    expect(reconciled).toEqual([
+      {
+        name: "managed-test-beginning",
+        delivery_url: "http+unix://%2Frun%2Fgithubd%2Fghd.sock/event",
+        event_pattern: "github.%",
+        active: false,
+      },
+      {
+        name: "managed-test-now",
+        delivery_url: "http://127.0.0.1:7999/changed",
+        event_pattern: "policy.%",
+        active: true,
+      },
+      {
+        name: "replay-test-manager",
+        delivery_url: "http://127.0.0.1:7999/event",
+        event_pattern: "githubd.%",
+        active: true,
+      },
+    ]);
+  });
 });

@@ -51,12 +51,35 @@ SHA-bound policy.
   Delivery is head-of-line per subscription — busd never skips — so a non-2xx
   on an irrelevant event wedges that subscriber's own lane (and only its own).
 - At-least-once: subscribers dedupe by `event_id`. Every failed and successful
-  attempt is durable and the projection is rebuildable.
+  attempt is durable and the projection is rebuildable. Protected local
+  consumers may use an `http+unix://<percent-encoded-absolute-socket>/path`
+  delivery URL instead of opening a TCP listener.
 - A failed delivery records `externally_blocked`; it is not followed by a sleep
   or repeated API request. A later event, explicit reconciliation wake, or
   startup reconciliation continues the durable intent.
 
-## Subscribing (runbook)
+## Subscribing
+
+Normal machine subscriptions are declared in `BUSD_CONFIG`. busd transactionally
+upserts them at startup, seeds a new cursor from the beginning or current end
+as configured, and deactivates managed rows removed from configuration. Rows
+created directly by an operator remain unmanaged and are never changed by
+configuration convergence.
+
+```json
+{
+  "machine": "k12-personal",
+  "subscriptions": [{
+    "name": "githubd-github",
+    "delivery_url": "http+unix://%2Frun%2Fgithubd%2Fghd.sock/event",
+    "event_pattern": "github.%",
+    "active": true,
+    "seed": "beginning"
+  }]
+}
+```
+
+Direct SQL remains an operator-only recovery/debugging surface:
 
 ```sql
 INSERT INTO bus.subscriptions (name, delivery_url, event_pattern, active)
@@ -84,7 +107,8 @@ from `IMPERIUM_MACHINE` or config (fail loud). Defaults: bind `127.0.0.1`, port
 `deliveryTimeoutMs` 10000 and `batchSize` 100. Signed GitHub ingress reads its
 secret from the absolute systemd credential path in
 `githubWebhookSecretFile`/`BUSD_GITHUB_WEBHOOK_SECRET_FILE`; secret material is
-never config content, an event payload, a projection, or a response.
+never config content, an event payload, a projection, or a response. The
+optional `subscriptions` array is the machine-owned delivery topology.
 
 ## No-fallback posture (ruled)
 

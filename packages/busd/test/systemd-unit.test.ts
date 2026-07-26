@@ -34,6 +34,10 @@ describe('systemd/busd.service pins', () => {
     pin('Environment=BUSD_BIND=127.0.0.1');
   });
 
+  test('loads machine-owned durable subscriptions', () => {
+    pin('Environment=BUSD_CONFIG=%h/.config/token-fleet/busd.json');
+  });
+
   test('loads the signed GitHub ingress secret from systemd encrypted credentials', () => {
     pin('Environment=BUSD_GITHUB_WEBHOOK_SECRET_FILE=%d/busd.github-webhook');
     pin('LoadCredentialEncrypted=busd.github-webhook:%E/credstore.encrypted/busd.github-webhook');

@@ -107,7 +107,17 @@ export type BusDelivery = z.infer<typeof BusDeliverySchema>;
 // ── Config + operational rows (Zod boundary for busd's typed reads) ─────────
 export const BusSubscriptionRowSchema = z.object({
   name: z.string().min(1),
-  delivery_url: z.url(),
+  delivery_url: z.url().refine((value) => {
+    const url = new URL(value);
+    if (url.protocol === "http:" || url.protocol === "https:") return true;
+    if (url.protocol !== "http+unix:" || url.username || url.password || url.port) return false;
+    try {
+      const socket = decodeURIComponent(url.hostname);
+      return socket.startsWith("/") && !socket.includes("\0");
+    } catch {
+      return false;
+    }
+  }, "delivery_url must use http, https, or an absolute http+unix socket"),
   event_pattern: z.string().min(1), // SQL LIKE over event_type — matching lives in the delivery query
   active: z.boolean(),
 });
