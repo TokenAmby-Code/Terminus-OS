@@ -37,6 +37,39 @@ import { z } from 'zod';
 // and authenticated static-persona launch facts/readiness.
 export const SCHEMA_VERSION = 7;
 
+export const CLIPBOARD_BUFFER_NAME = 'tx-clipboard';
+export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
+
+function validClipboardText(value: string): boolean {
+  return value.isWellFormed()
+    && new TextEncoder().encode(value).length <= MAX_CLIPBOARD_BYTES;
+}
+
+export const ClipboardPullRequestSchema = z.object({
+  schema_version: z.number().int(),
+  content: z.string().refine(validClipboardText, 'clipboard must be valid UTF-8 at most 1 MiB'),
+});
+export type ClipboardPullRequest = z.infer<typeof ClipboardPullRequestSchema>;
+
+export const ClipboardPushRequestSchema = z.object({
+  schema_version: z.number().int(),
+  buffer_name: z.literal(CLIPBOARD_BUFFER_NAME),
+});
+export type ClipboardPushRequest = z.infer<typeof ClipboardPushRequestSchema>;
+
+export const ClipboardPullResponseSchema = z.object({
+  ok: z.literal(true),
+  target: z.string().min(1),
+  buffer_name: z.literal(CLIPBOARD_BUFFER_NAME),
+  bytes: z.number().int().nonnegative().max(MAX_CLIPBOARD_BYTES),
+});
+export type ClipboardPullResponse = z.infer<typeof ClipboardPullResponseSchema>;
+
+export const ClipboardPushResponseSchema = ClipboardPullResponseSchema.extend({
+  content_base64: z.string(),
+});
+export type ClipboardPushResponse = z.infer<typeof ClipboardPushResponseSchema>;
+
 // ── Entities ────────────────────────────────────────────────────────────────
 // The four entity kinds the daemon tracks. `send` is a first-class entity: a
 // send has its own lifecycle (enqueued → gated? → delivered) and trust surface.

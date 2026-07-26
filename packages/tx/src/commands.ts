@@ -1,10 +1,19 @@
 import type { TxdRequest } from './client.ts';
-import { SCHEMA_VERSION } from '@terminus-os/contracts';
+import {
+  CLIPBOARD_BUFFER_NAME,
+  ClipboardPullResponseSchema,
+  ClipboardPushResponseSchema,
+  MAX_CLIPBOARD_BYTES,
+  SCHEMA_VERSION,
+  type ClipboardPushResponse,
+} from '@terminus-os/contracts';
+import type { LocalClipboard } from './clipboard.ts';
 
 export type CommandContext = {
   args: string[];
   request: TxdRequest;
   write: (value: unknown) => void;
+  clipboard: () => LocalClipboard;
 };
 
 export type Command = {
@@ -60,9 +69,63 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
   return result.complete ? 0 : 3;
 }
 
+function decodedPush(response: ClipboardPushResponse): string {
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(response.content_base64)) {
+    throw new Error('txd returned invalid clipboard encoding');
+  }
+  const bytes = Uint8Array.from(Buffer.from(response.content_base64, 'base64'));
+  if (bytes.byteLength !== response.bytes || bytes.byteLength > MAX_CLIPBOARD_BYTES) {
+    throw new Error('txd returned inconsistent clipboard byte count');
+  }
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+  catch { throw new Error('txd returned invalid UTF-8 clipboard content'); }
+}
+
 /** The single extension point: subcommands add one declarative entry here. */
 export const COMMANDS: readonly Command[] = [
   { path: ['comm'], summary: 'Send, ask, page, or reply through txd event truth', run: comm },
+  {
+    path: ['clipboard', 'push'],
+    summary: 'Set this device clipboard from the K12 tx-clipboard buffer',
+    run: async ({ args, request, write, clipboard }) => {
+      if (args.length) throw new Error('usage: tx clipboard push');
+      const local = clipboard();
+      const raw = await request('POST', '/ctl/clipboard/push', {
+        schema_version: SCHEMA_VERSION,
+        buffer_name: CLIPBOARD_BUFFER_NAME,
+      }, { sensitive: true });
+      const parsed = ClipboardPushResponseSchema.safeParse(raw);
+      if (!parsed.success) throw new Error('txd returned invalid clipboard response');
+      const response = parsed.data;
+      await local.set(decodedPush(response));
+      write({ ok: true, target: response.target, direction: 'push', local: local.target, bytes: response.bytes });
+      return 0;
+    },
+  },
+  {
+    path: ['clipboard', 'pull'],
+    summary: 'Load this device clipboard into the K12 tx-clipboard buffer',
+    run: async ({ args, request, write, clipboard }) => {
+      if (args.length) throw new Error('usage: tx clipboard pull');
+      const local = clipboard();
+      const content = await local.get();
+      const bytes = new TextEncoder().encode(content);
+      if (!content.isWellFormed()) throw new Error('local clipboard is not valid UTF-8');
+      if (bytes.byteLength > MAX_CLIPBOARD_BYTES) throw new Error('local clipboard exceeds 1 MiB');
+      const raw = await request('POST', '/ctl/clipboard/pull', {
+        schema_version: SCHEMA_VERSION,
+        content,
+      }, { sensitive: true });
+      const parsed = ClipboardPullResponseSchema.safeParse(raw);
+      if (!parsed.success) throw new Error('txd returned invalid clipboard response');
+      const response = parsed.data;
+      if (response.bytes !== bytes.byteLength || response.buffer_name !== CLIPBOARD_BUFFER_NAME) {
+        throw new Error('txd returned inconsistent clipboard receipt');
+      }
+      write({ ok: true, target: response.target, direction: 'pull', local: local.target, bytes: response.bytes });
+      return 0;
+    },
+  },
   {
     path: ['health'],
     summary: 'Show txd and estate health',

@@ -1,5 +1,11 @@
 import { expect, test } from 'bun:test';
-import { BUS_SCHEMA_VERSION, HOOK_TYPES, type BusDelivery } from '@terminus-os/contracts';
+import {
+  BUS_SCHEMA_VERSION,
+  CLIPBOARD_BUFFER_NAME,
+  HOOK_TYPES,
+  SCHEMA_VERSION,
+  type BusDelivery,
+} from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -18,6 +24,8 @@ const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 const RATIFIED = [
   'GET /ctl/health',
   'POST /ctl/reconcile',
+  'POST /ctl/clipboard/pull',
+  'POST /ctl/clipboard/push',
   'POST /ctl/estate/rotate',
   'POST /ingress/tmux',
   'POST /ingress/static-launch',
@@ -91,6 +99,82 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
   } finally {
     srv.stop(true);
   }
+});
+
+test('clipboard pull/push preserves opaque UTF-8 without persistence or execution', async () => {
+  const content = 'literal %12 @8 $3\n雪 😀\ttrailing  ';
+  const store = new MemoryEventStore();
+  const tmux = new FakeTmux();
+  const srv = makeServer({
+    bind: '127.0.0.1',
+    port: 0,
+    daemon: new Daemon(store, tmux),
+    build,
+    machine: 'k12-test',
+  });
+  try {
+    const pulled = await fetch(`http://127.0.0.1:${srv.port}/ctl/clipboard/pull`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: SCHEMA_VERSION, content }),
+    });
+    expect(pulled.status).toBe(200);
+    expect(await pulled.json()).toEqual({
+      ok: true,
+      target: 'k12-test',
+      buffer_name: CLIPBOARD_BUFFER_NAME,
+      bytes: new TextEncoder().encode(content).byteLength,
+    });
+    const pushed = await fetch(`http://127.0.0.1:${srv.port}/ctl/clipboard/push`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: SCHEMA_VERSION, buffer_name: CLIPBOARD_BUFFER_NAME }),
+    });
+    expect(pushed.status).toBe(200);
+    const body = await pushed.json() as { content_base64: string; bytes: number };
+    expect(Buffer.from(body.content_base64, 'base64').toString()).toBe(content);
+    expect(body.bytes).toBe(new TextEncoder().encode(content).byteLength);
+    expect(await store.readAll()).toEqual([]);
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('clipboard validation errors redact sensitive payloads', async () => {
+  const secret = 'never-log-this-secret';
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test' });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/clipboard/pull`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: SCHEMA_VERSION, content: `${secret}${'\ud800'}` }),
+    });
+    expect(response.status).toBe(422);
+    const serialized = JSON.stringify(await response.json());
+    expect(serialized).not.toContain(secret);
+    expect(serialized).toContain('invalid_clipboard_pull_request');
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('clipboard ingress rejects a declared oversized body before reading it', async () => {
+  const route = buildRoutes(daemon(), build, 'test').find((candidate) => candidate.label === 'POST /ctl/clipboard/pull')!;
+  const request = new Request('http://localhost/ctl/clipboard/pull', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'content-length': String((6 * 1024 * 1024) + 4097),
+    },
+    body: '{}',
+  });
+  const response = await route.handler(request, {});
+  expect(response.status).toBe(413);
+  expect(await response.json()).toEqual({
+    ok: false,
+    error: 'invalid_clipboard_pull_request',
+    field: '$',
+  });
 });
 
 test('POST /ctl/estate/rotate resets a page in-process instead of killing the estate server', async () => {

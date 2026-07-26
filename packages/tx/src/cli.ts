@@ -1,10 +1,12 @@
 import { COMMANDS, type Command } from './commands.ts';
 import { createClient, type TxdRequest } from './client.ts';
+import { createLocalClipboard, type LocalClipboard } from './clipboard.ts';
 
 export type CliDependencies = {
   request: TxdRequest;
   stdout: (line: string) => void;
   stderr: (line: string) => void;
+  clipboard?: () => LocalClipboard;
 };
 
 function assertCanonicalOutput(value: unknown): void {
@@ -42,6 +44,7 @@ export async function runCli(
       args: argv.slice(command.path.length),
       request: deps.request,
       write: (value) => { assertCanonicalOutput(value); deps.stdout(JSON.stringify(value, null, 2)); },
+      clipboard: deps.clipboard ?? createLocalClipboard,
     });
   } catch (error) {
     deps.stderr(`tx: ${error instanceof Error ? error.message : String(error)}`);
