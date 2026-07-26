@@ -163,6 +163,10 @@ describe('disposable canonical estate geometry', () => {
     await tmux(socket, 'set-option', '-p', '-t', 'main:palace.0', '@scratch', 'must-die');
     await tmux(socket, 'set-option', '-w', '-t', 'main:palace', '@page_scratch', 'must-die');
     await tmux(socket, 'resize-pane', '-Z', '-t', 'main:palace.0');
+    // A reconstructed seed must not inherit its prior workload command. Static
+    // Council panes otherwise replay a stale wrapper launch before txd can
+    // retire the old identity and reserve a fresh handshake.
+    await tmux(socket, 'respawn-pane', '-k', '-t', 'main:palace.0', 'exit 127');
     await tmux(socket, 'kill-pane', '-t', 'main:palace.3');
 
     expect(await control.rebuildPage('palace')).toBe(true);
