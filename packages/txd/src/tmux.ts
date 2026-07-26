@@ -435,7 +435,16 @@ export class RealTmux implements TmuxControlPlane {
           if ((await this.command('clear_page_history', page, ['clear-history', '-t', seed])).code !== 0) return false;
           await this.clearPaneUserOptions(seed, page);
           await this.clearWindowUserOptions(target, page);
-          if ((await this.command('reset_page_seed', page, ['respawn-pane', '-k', '-c', this.homeDirectory(), '-t', seed])).code !== 0) return false;
+          const defaultShell = await this.command(
+            'observe_default_shell',
+            page,
+            ['show-options', '-gv', 'default-shell'],
+          );
+          const shellCommand = defaultShell.stdout.trim();
+          if (defaultShell.code !== 0 || shellCommand === '') return false;
+          if ((await this.command('reset_page_seed', page, [
+            'respawn-pane', '-k', '-c', this.homeDirectory(), '-t', seed, shellCommand,
+          ])).code !== 0) return false;
         }
       } else if (this.stderrCategory(listed) !== 'not_found') {
         return false;

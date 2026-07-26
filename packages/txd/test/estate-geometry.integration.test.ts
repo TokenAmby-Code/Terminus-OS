@@ -163,14 +163,27 @@ describe('disposable canonical estate geometry', () => {
     await tmux(socket, 'set-option', '-p', '-t', 'main:palace.0', '@scratch', 'must-die');
     await tmux(socket, 'set-option', '-w', '-t', 'main:palace', '@page_scratch', 'must-die');
     await tmux(socket, 'resize-pane', '-Z', '-t', 'main:palace.0');
+    // A reconstructed seed must not inherit its prior workload command. Static
+    // Council panes otherwise replay a stale wrapper launch before txd can
+    // retire the old identity and reserve a fresh handshake.
+    await tmux(socket, 'respawn-pane', '-k', '-t', 'main:palace.0', 'sleep 600');
     await tmux(socket, 'kill-pane', '-t', 'main:palace.3');
 
     expect(await control.rebuildPage('palace')).toBe(true);
 
-    const rows = await tmux(socket, 'list-panes', '-t', 'main:palace', '-F', '#{@canonical_id}\t#{pane_pid}\t#{@scratch}\t#{pane_dead}');
+    const defaultShell = await tmux(socket, 'show-options', '-gv', 'default-shell');
+    const rows = await tmux(
+      socket,
+      'list-panes',
+      '-t',
+      'main:palace',
+      '-F',
+      '#{@canonical_id}\t#{pane_pid}\t#{@scratch}\t#{pane_dead}\t#{pane_start_command}',
+    );
     const rebuilt = rows.split('\n').map((row) => row.split('\t'));
     expect(rebuilt.map(([seat]) => seat).sort()).toEqual([...TXD_WINDOWS.palace].sort());
     expect(rebuilt.every(([, pid, scratch, dead]) => !before.includes(pid!) && scratch === '' && dead === '0')).toBe(true);
+    expect(rebuilt.find(([seat]) => seat === 'palace:W')?.[4]).toBe(defaultShell);
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{window_zoomed_flag}\t#{@page_scratch}')).toBe('0');
   });
 });
