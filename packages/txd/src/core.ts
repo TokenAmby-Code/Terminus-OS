@@ -46,6 +46,7 @@ import {
   type SubscribeResponse,
   type TmuxLifecycleEventRequest,
   type TmuxLifecycleEventResponse,
+  type TintReadiness,
 } from '@terminus-os/contracts';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
@@ -111,6 +112,178 @@ export class Daemon {
 
   private async projections(): Promise<Projections> {
     return buildProjections(await this.store.readAll());
+  }
+
+  private pendingScopedResetSeats(events: Awaited<ReturnType<EventStore['readAll']>>): Set<string> {
+    const closed = new Set(events
+      .filter((event) =>
+        event.event_type === 'estate.scoped_reset_completed'
+        || event.event_type === 'estate.scoped_reset_failed',
+      )
+      .map((event) => event.entity_id));
+    return new Set(events.flatMap((event) =>
+      event.event_type === 'estate.scoped_reset_requested'
+        && !closed.has(event.entity_id)
+        && Array.isArray(event.payload.seats)
+        ? event.payload.seats.filter((seat): seat is string => typeof seat === 'string')
+        : [],
+    ));
+  }
+
+  private async applyBindingTint(seatId: string, tint: string): Promise<boolean> {
+    if (await this.tmux.setSeatTint(seatId, tint)) return true;
+    if (!(await this.tmux.setSeatTint(seatId, null))) {
+      throw new Error(`txd could not restore fail-dark tint state for ${seatId}`);
+    }
+    return false;
+  }
+
+  private async clearBindingTint(seatId: string): Promise<void> {
+    if (!(await this.tmux.setSeatTint(seatId, null))) {
+      throw new Error(`txd could not attest fail-dark tint state for ${seatId}`);
+    }
+  }
+
+  private async prepareBinding(
+    seatId: string,
+    paneGeneration: string,
+    tuple: Record<string, unknown>,
+    provenance: Provenance,
+    occurred_at: string,
+  ): Promise<string> {
+    const prepareId = crypto.randomUUID();
+    await this.store.append({
+      entity_type: 'seat',
+      entity_id: seatId,
+      event_type: 'reg.binding_prepared',
+      payload: { prepare_id: prepareId, seat_id: seatId, pane_generation: paneGeneration, ...tuple },
+      provenance,
+      occurred_at,
+    });
+    return prepareId;
+  }
+
+  private async abortBinding(
+    seatId: string,
+    prepareId: string,
+    reason: string,
+    provenance: Provenance,
+  ): Promise<void> {
+    await this.store.append({
+      entity_type: 'seat',
+      entity_id: seatId,
+      event_type: 'reg.binding_aborted',
+      payload: { prepare_id: prepareId, reason },
+      provenance,
+      occurred_at: this.now(),
+    });
+  }
+
+  /** Fail-dark recovery for a crash after physical style mutation but before reg.bound. */
+  private async recoverBindingPreparations(): Promise<void> {
+    const events = await this.store.readAll();
+    const closed = new Set(events.flatMap((event) => {
+      if (event.event_type === 'reg.binding_aborted' && typeof event.payload.prepare_id === 'string') {
+        return [event.payload.prepare_id];
+      }
+      if (event.event_type === 'reg.bound' && typeof event.payload.binding_prepare_id === 'string') {
+        return [event.payload.binding_prepare_id];
+      }
+      return [];
+    }));
+    const currentSeats = new Set(buildProjections(events).currentBindings.map((binding) => binding.seat_id));
+    for (const prepared of events) {
+      if (prepared.event_type !== 'reg.binding_prepared') continue;
+      const prepareId = typeof prepared.payload.prepare_id === 'string' ? prepared.payload.prepare_id : null;
+      const paneGeneration = typeof prepared.payload.pane_generation === 'string' ? prepared.payload.pane_generation : null;
+      if (!prepareId || !paneGeneration || closed.has(prepareId)) continue;
+      if (currentSeats.has(prepared.entity_id)) {
+        throw new Error(`txd found an unclosed binding preparation behind a current binding at ${prepared.entity_id}`);
+      }
+      if (await this.tmux.seatGeneration(prepared.entity_id) === paneGeneration) {
+        await this.clearBindingTint(prepared.entity_id);
+      }
+      await this.abortBinding(prepared.entity_id, prepareId, 'boot_recovery', this.prov('observer', null));
+    }
+  }
+
+  /** Resume every requested scoped reconstruction from event truth on boot. */
+  private async recoverScopedResets(): Promise<void> {
+    const events = await this.store.readAll();
+    const closed = new Set(events
+      .filter((event) =>
+        event.event_type === 'estate.scoped_reset_completed'
+        || event.event_type === 'estate.scoped_reset_failed',
+      )
+      .map((event) => event.entity_id));
+    for (const request of events) {
+      if (request.event_type !== 'estate.scoped_reset_requested' || closed.has(request.entity_id)) continue;
+      const seats = Array.isArray(request.payload.seats)
+        ? request.payload.seats.filter((seat): seat is string => typeof seat === 'string')
+        : [];
+      const scope = request.payload.scope;
+      if (seats.length === 0 || (scope !== 'page' && scope !== 'pane')) {
+        throw new Error(`txd cannot resume malformed scoped reset ${request.entity_id}`);
+      }
+      const snapshots = Array.isArray(request.payload.bound_generations)
+        ? request.payload.bound_generations.flatMap((candidate) => {
+          if (!candidate || typeof candidate !== 'object') return [];
+          const row = candidate as Record<string, unknown>;
+          return typeof row.seat_id === 'string'
+            && typeof row.bound_seq === 'number'
+            && (typeof row.pane_generation === 'string' || row.pane_generation === null)
+            ? [{
+              seat_id: row.seat_id,
+              bound_seq: row.bound_seq,
+              pane_generation: row.pane_generation,
+            }]
+            : [];
+        })
+        : null;
+      if (snapshots === null) {
+        throw new Error(`txd cannot resume scoped reset ${request.entity_id} without binding generations`);
+      }
+      const current = (await this.projections()).currentBindings
+        .filter((binding) => seats.includes(binding.seat_id));
+      const unexpected = current.find((binding) => !snapshots.some((snapshot) =>
+        snapshot.seat_id === binding.seat_id
+        && snapshot.bound_seq === binding.bound_seq
+        && snapshot.pane_generation === binding.pane_generation,
+      ));
+      if (unexpected) {
+        throw new Error(`txd fenced scoped reset ${request.entity_id} from newer binding at ${unexpected.seat_id}`);
+      }
+      const bindings = current.filter((binding) => snapshots.some((snapshot) =>
+        snapshot.seat_id === binding.seat_id
+        && snapshot.bound_seq === binding.bound_seq
+        && snapshot.pane_generation === binding.pane_generation,
+      ));
+      if (scope === 'page') {
+        const page = seats[0]!.split(':', 1)[0];
+        if (!page || !isTxdPage(page) || seats.some((seat) => !seat.startsWith(`${page}:`))) {
+          throw new Error(`txd cannot resume invalid page reset ${request.entity_id}`);
+        }
+        if (!(await this.tmux.rebuildPage(page))) {
+          throw new Error(`txd failed to resume pending ${page} page reconstruction`);
+        }
+      } else if (!(await this.tmux.resetSeat(seats[0]!))) {
+        throw new Error(`txd failed to resume pending ${seats[0]} pane reconstruction`);
+      }
+      const occurred_at = this.now();
+      const inputs = bindings.flatMap((binding) =>
+        this.resetBindingInputs(binding, null, occurred_at),
+      );
+      inputs.push({
+        entity_type: 'estate',
+        entity_id: request.entity_id,
+        event_type: 'estate.scoped_reset_completed',
+        payload: request.payload,
+        provenance: this.prov('observer', null),
+        occurred_at,
+      });
+      await this.store.appendAll(inputs);
+      closed.add(request.entity_id);
+    }
   }
 
   private wakeAsk(askId: string): void {
@@ -286,6 +459,15 @@ export class Daemon {
       // single-writer lock is held. No implicit handover: callers must close a
       // current binding before a different launch can claim either side.
       const proj = await this.projections();
+      if (this.pendingScopedResetSeats(await this.store.readAll()).has(req.seat_id)) {
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: `scoped_reset_pending: ${req.seat_id}`,
+        };
+      }
       if (proj.decommissionedSeats.has(req.seat_id)) {
         return {
           ok: false,
@@ -312,6 +494,16 @@ export class Daemon {
           && seatBinding.rank === (req.rank ?? null)
           && seatBinding.commander === (req.commander ?? null);
         if (exactRepeat) {
+          if (await this.tmux.seatTint(req.seat_id) !== req.tint
+            || await this.tmux.seatGeneration(req.seat_id) !== seatBinding.pane_generation) {
+            return {
+              ok: false,
+              seat_id: req.seat_id,
+              handover: false,
+              missing_attestations: [],
+              reason: 'binding_physical_attestation_mismatch',
+            };
+          }
           return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null };
         }
         return {
@@ -363,22 +555,60 @@ export class Daemon {
         });
       }
 
-      // Atomic bind: the full tuple in ONE event.
-      await this.store.append({
-        entity_type: 'seat',
-        entity_id: req.seat_id,
-        event_type: 'reg.bound',
-        payload: {
-          wrapper_id: null,
-          instance_id: req.identity,
-          persona: req.persona,
-          tint: req.tint,
-          rank: req.rank ?? null,
-          commander: req.commander ?? null,
-        },
-        provenance: prov,
-        occurred_at,
-      });
+      const paneGeneration = await this.tmux.seatGeneration(req.seat_id);
+      if (!paneGeneration) {
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: 'pane_generation_unattested',
+        };
+      }
+      const prepareId = await this.prepareBinding(req.seat_id, paneGeneration, {
+        wrapper_id: null,
+        instance_id: req.identity,
+        persona: req.persona,
+        tint: req.tint,
+        rank: req.rank ?? null,
+        commander: req.commander ?? null,
+      }, prov, occurred_at);
+      if (!(await this.applyBindingTint(req.seat_id, req.tint!))) {
+        await this.abortBinding(req.seat_id, prepareId, 'tint_attestation_failed', prov);
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: 'tint_attestation_failed',
+        };
+      }
+
+      // Atomic logical bind: the full tuple in ONE event, only after physical
+      // tint has been applied and read back. Store failure compensates fail-dark.
+      try {
+        await this.store.append({
+          entity_type: 'seat',
+          entity_id: req.seat_id,
+          event_type: 'reg.bound',
+          payload: {
+            wrapper_id: null,
+            instance_id: req.identity,
+            persona: req.persona,
+            tint: req.tint,
+            rank: req.rank ?? null,
+            commander: req.commander ?? null,
+            pane_generation: paneGeneration,
+            binding_prepare_id: prepareId,
+          },
+          provenance: prov,
+          occurred_at,
+        });
+      } catch (error) {
+        await this.clearBindingTint(req.seat_id);
+        await this.abortBinding(req.seat_id, prepareId, 'bound_commit_failed', prov);
+        throw error;
+      }
 
       return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null };
     });
@@ -399,6 +629,7 @@ export class Daemon {
   // but shape failures throw before any event append: half-estates are refused.
   async constructEstate(): Promise<{ created: string[]; existing: string[]; backfilled: string[]; failed: string[] }> {
     const result = await this.locked(async () => {
+      await this.recoverBindingPreparations();
       const before = await this.store.readAll();
       const lastMigrationRequest = before.findLast((event) =>
         event.entity_id === COUNCIL_MIGRATION_ID && event.event_type === 'estate.topology_migration_requested',
@@ -482,6 +713,8 @@ export class Daemon {
         throw new Error('txd refused non-canonical existing tmux estate');
       }
 
+      await this.recoverScopedResets();
+
       // Boot-observed Council damage must enter the same durable page-reset
       // state machine as lifecycle ingress before any physical repair occurs.
       // An empty estate is constructed below; there is no old page to retire.
@@ -491,7 +724,27 @@ export class Daemon {
           .filter((seat) => seat.seat_id.startsWith('council:') && seat.pane === 'live')
           .map((seat) => seat.seat_id)
           .sort();
-        const councilHealthy = liveCouncil.length === expectedCouncil.length
+        const councilBindings = (await this.projections()).currentBindings
+          .filter((binding) => binding.seat_id.startsWith('council:'));
+        let bindingProjectionHealthy = true;
+        for (const binding of councilBindings) {
+          const declaration = STATIC_PERSONAS.find((candidate) => candidate.seat === binding.seat_id);
+          if (!declaration
+            || binding.persona !== declaration.persona
+            || binding.tint !== declaration.tint
+            || binding.pane_generation !== await this.tmux.seatGeneration(binding.seat_id)
+            || await this.tmux.seatTint(binding.seat_id) !== declaration.tint) {
+            bindingProjectionHealthy = false;
+          }
+        }
+        for (const seat of TXD_WINDOWS.council) {
+          if (!councilBindings.some((binding) => binding.seat_id === seat)
+            && await this.tmux.seatTint(seat) !== null) {
+            bindingProjectionHealthy = false;
+          }
+        }
+        const councilHealthy = bindingProjectionHealthy
+          && liveCouncil.length === expectedCouncil.length
           && liveCouncil.every((seat, index) => seat === expectedCouncil[index]);
         if (!councilHealthy) {
           const rotationId = crypto.randomUUID();
@@ -507,6 +760,11 @@ export class Daemon {
                 .filter((binding) => binding.seat_id.startsWith('council:'))
                 .map((binding) => binding.seat_id)
                 .sort(),
+              bound_generations: councilBindings.map((binding) => ({
+                seat_id: binding.seat_id,
+                bound_seq: binding.bound_seq,
+                pane_generation: binding.pane_generation,
+              })),
               foreground_workloads: [],
               trigger: 'boot-observer',
             },
@@ -515,45 +773,9 @@ export class Daemon {
           });
         }
       }
-
-      // A Council reset is a page-total volatile-memory wipe. If txd died
-      // after recording the request (at any point through binding retirement),
-      // replay the physical reconstruction and commit both retirements plus
-      // completion in one event transaction before exposing the new page.
-      const resetEvents = await this.store.readAll();
-      const completedResets = new Set(resetEvents
-        .filter((event) =>
-          event.event_type === 'estate.scoped_reset_completed'
-          || event.event_type === 'estate.scoped_reset_failed',
-        )
-        .map((event) => event.entity_id));
-      const pendingCouncilReset = resetEvents.findLast((event) =>
-        event.event_type === 'estate.scoped_reset_requested'
-        && event.payload.scope === 'page'
-        && event.payload.seats instanceof Array
-        && event.payload.seats.includes('council:custodes')
-        && !completedResets.has(event.entity_id),
-      );
-      if (pendingCouncilReset) {
-        if (!(await this.tmux.rebuildPage('council'))) {
-          throw new Error('txd failed to resume pending Council page reconstruction');
-        }
-        const bindings = (await this.projections()).currentBindings
-          .filter((binding) => binding.seat_id.startsWith('council:'));
-        const occurred_at = this.now();
-        const inputs = bindings.flatMap((binding) =>
-          this.resetBindingInputs(binding, null, occurred_at),
-        );
-        inputs.push({
-          entity_type: 'estate',
-          entity_id: pendingCouncilReset.entity_id,
-          event_type: 'estate.scoped_reset_completed',
-          payload: pendingCouncilReset.payload,
-          provenance: this.prov('observer', null),
-          occurred_at,
-        });
-        await this.store.appendAll(inputs);
-      }
+      // The observer above may have opened a reset for a contradiction found
+      // during this same boot. Execute it through the same replayable path.
+      await this.recoverScopedResets();
 
       // Construction is all-or-nothing below the membrane: create on an empty
       // socket, accept the exact canonical shape, refuse every other estate.
@@ -636,8 +858,12 @@ export class Daemon {
       // Resolve target -> canonical seat + the seq it resolved against. Prefer a
       // current binding; fall back to a bare live seat.
       const proj = await this.projections();
+      const events = await this.store.readAll();
       const resolution = this.resolveTarget(req.target, proj);
       if (!resolution) return this.refuse('pane_unresolved', req.target);
+      if (this.pendingScopedResetSeats(events).has(resolution.seat_id)) {
+        return this.refuse('scoped_reset_pending', req.target);
+      }
       // Pane must be live at admission (unresolved/dead never admitted).
       const board = proj.activityBoard.find((r) => r.seat_id === resolution.seat_id);
       if (board && board.pane === 'dead') return this.refuse('pane_dead', req.target);
@@ -896,7 +1122,7 @@ export class Daemon {
   // Returns false (nothing written) if the process could not be reaped, so a
   // retire-with-live-process is unspellable. Caller holds the single-writer mutex.
   private async executeClose(binding: CurrentBinding, transportReceipt: string | null): Promise<boolean> {
-    const reaped = await this.tmux.reapSeat(binding.seat_id);
+    const reaped = await this.tmux.reapSeat(binding.seat_id, binding.tint);
     if (!reaped) return false;
     const occurred_at = this.now();
     const prov = this.prov('observer', transportReceipt);
@@ -1078,6 +1304,37 @@ export class Daemon {
             'seat_cleared',
             `seat is bound (bound_seq=${b.bound_seq}) but tmux pane is ${pane ?? 'absent'} — no teardown/reap/clear attested`,
           );
+          continue;
+        }
+        const observedTint = await this.tmux.seatTint(b.seat_id);
+        const observedGeneration = await this.tmux.seatGeneration(b.seat_id);
+        if (observedGeneration !== b.pane_generation) {
+          await flag(
+            b.seat_id,
+            'bound_generation_mismatch',
+            'pane_generation',
+            `seat binding expects pane generation=${b.pane_generation ?? 'missing'} but tmux attests ${observedGeneration ?? 'absent'}`,
+          );
+        }
+        if (observedTint !== b.tint) {
+          await flag(
+            b.seat_id,
+            'bound_tint_mismatch',
+            'tint',
+            `seat binding expects tint=${b.tint ?? 'null'} but tmux attests ${observedTint ?? 'untinted'}`,
+          );
+        }
+      }
+      for (const seat of observed) {
+        if (seat.pane !== 'live' || proj.currentBindings.some((binding) => binding.seat_id === seat.seat_id)) continue;
+        const observedTint = await this.tmux.seatTint(seat.seat_id);
+        if (observedTint !== null) {
+          await flag(
+            seat.seat_id,
+            'unbound_tint_present',
+            'binding',
+            `unbound seat physically attests tint=${observedTint ?? 'unreadable'}`,
+          );
         }
       }
       // Retired instance whose pane is still live (retire-with-live-process).
@@ -1115,10 +1372,43 @@ export class Daemon {
     return (await this.projections()).activityBoard;
   }
 
+  async tintReadiness(): Promise<TintReadiness[]> {
+    const proj = await this.projections();
+    const observedSeats = await this.tmux.listSeats();
+    const paneBySeat = new Map(observedSeats.map((seat) => [seat.seat_id, seat.pane]));
+    const bindingBySeat = new Map(proj.currentBindings.map((binding) => [binding.seat_id, binding]));
+    const seats = new Set([
+      ...TXD_ESTATE,
+      ...observedSeats.map((seat) => seat.seat_id),
+      ...proj.currentBindings.map((binding) => binding.seat_id),
+    ]);
+    const rows: TintReadiness[] = [];
+    for (const seat_id of [...seats].sort()) {
+      const binding = bindingBySeat.get(seat_id);
+      const expected = binding?.tint ?? null;
+      const observed = await this.tmux.seatTint(seat_id);
+      const generationReady = !binding
+        || await this.tmux.seatGeneration(seat_id) === binding.pane_generation;
+      const pane = paneBySeat.get(seat_id);
+      rows.push({
+        seat_id,
+        binding: binding ? 'bound' : 'unbound',
+        expected,
+        observed: observed ?? null,
+        state: pane !== 'live' || observed === undefined
+          ? 'missing'
+          : observed === expected && generationReady ? 'ready' : 'mismatched',
+      });
+    }
+    return rows;
+  }
+
   async staticPersonaReadiness(): Promise<Array<{
     seat_id: string;
     state: 'ready' | 'missing' | 'mismatched' | 'awaiting_ack';
     instance_id: string | null;
+    tint: string;
+    tint_attested: boolean;
   }>> {
     const proj = await this.projections();
     const launches = [...proj.staticLaunches.values()];
@@ -1126,6 +1416,8 @@ export class Daemon {
       seat_id: string;
       state: 'ready' | 'missing' | 'mismatched' | 'awaiting_ack';
       instance_id: string | null;
+      tint: string;
+      tint_attested: boolean;
     }> = [];
     for (const declaration of STATIC_PERSONAS) {
       const binding = proj.currentBindings.find((candidate) => candidate.seat_id === declaration.seat);
@@ -1137,11 +1429,14 @@ export class Daemon {
           seat_id: declaration.seat,
           state: pending ? 'awaiting_ack' : 'missing',
           instance_id: pending?.instance_id ?? null,
+          tint: declaration.tint,
+          tint_attested: false,
         });
         continue;
       }
       const tupleMatches =
         binding.persona === declaration.persona
+        && binding.tint === declaration.tint
         && binding.rank === declaration.rank
         && binding.commander === declaration.commander
         && binding.engine === declaration.engine
@@ -1149,17 +1444,24 @@ export class Daemon {
         && binding.continuity_kind === declaration.continuity_kind
         && binding.wrapper_pid !== null
         && binding.engine_pid !== null
+        && binding.engine_executable !== null
         && binding.static_launch_id !== null;
       const alive = tupleMatches && await this.tmux.attestStaticAgent(
         declaration.seat,
         binding.wrapper_pid!,
         binding.engine_pid!,
         declaration.engine,
+        binding.engine_executable!,
       );
+      const tint_attested = await this.tmux.seatTint(declaration.seat) === declaration.tint;
+      const generation_attested = binding.pane_generation !== null
+        && await this.tmux.seatGeneration(declaration.seat) === binding.pane_generation;
       rows.push({
         seat_id: declaration.seat,
-        state: alive ? 'ready' : 'mismatched',
+        state: alive && tint_attested && generation_attested ? 'ready' : 'mismatched',
         instance_id: binding.instance_id,
+        tint: declaration.tint,
+        tint_attested,
       });
     }
     return rows;
@@ -1213,6 +1515,7 @@ export class Daemon {
             commander: declaration.commander,
             authority_principal: declaration.authority_principal,
             continuity_kind: declaration.continuity_kind,
+            tint: declaration.tint,
             token_hash,
           },
           provenance: this.prov('observer', null),
@@ -1263,12 +1566,14 @@ export class Daemon {
         && handshake.instance_id === launch.instance_id
         && handshake.seat_id === launch.seat_id
         && handshake.engine === launch.engine
-        && handshake.engine === declaration.engine;
+        && handshake.engine === declaration.engine
+        && launch.tint === declaration.tint;
       const physicallyAttested = tupleMatches && await this.tmux.attestStaticAgent(
         handshake.seat_id,
         handshake.wrapper_pid,
         handshake.engine_pid,
         handshake.engine,
+        handshake.engine_executable,
       );
       if (!tupleMatches || !physicallyAttested) {
         await this.store.append({
@@ -1289,27 +1594,58 @@ export class Daemon {
         binding.seat_id === declaration.seat || binding.instance_id === launch.instance_id,
       );
       if (occupied) return { ok: false, acknowledged: false, reason: 'binding_conflict' };
-      await this.store.append({
-        entity_type: 'seat',
-        entity_id: declaration.seat,
-        event_type: 'reg.bound',
-        payload: {
-          wrapper_id: handshake.launch_id,
-          instance_id: handshake.instance_id,
-          persona: declaration.persona,
-          rank: declaration.rank,
-          commander: declaration.commander,
-          tint: null,
-          engine: declaration.engine,
-          static_launch_id: handshake.launch_id,
-          wrapper_pid: handshake.wrapper_pid,
-          engine_pid: handshake.engine_pid,
-          authority_principal: declaration.authority_principal,
-          continuity_kind: declaration.continuity_kind,
-        },
-        provenance: this.prov('wrapper', null),
-        occurred_at: this.now(),
-      });
+      if (this.pendingScopedResetSeats(await this.store.readAll()).has(declaration.seat)) {
+        return { ok: false, acknowledged: false, reason: 'scoped_reset_pending' };
+      }
+      const paneGeneration = await this.tmux.seatGeneration(declaration.seat);
+      if (!paneGeneration) return { ok: false, acknowledged: false, reason: 'pane_generation_unattested' };
+      const provenance = this.prov('wrapper', null);
+      const occurred_at = this.now();
+      const prepareId = await this.prepareBinding(declaration.seat, paneGeneration, {
+        wrapper_id: handshake.launch_id,
+        instance_id: handshake.instance_id,
+        persona: declaration.persona,
+        rank: declaration.rank,
+        commander: declaration.commander,
+        tint: declaration.tint,
+        engine: declaration.engine,
+        engine_executable: handshake.engine_executable,
+        static_launch_id: handshake.launch_id,
+      }, provenance, occurred_at);
+      if (!(await this.applyBindingTint(declaration.seat, declaration.tint))) {
+        await this.abortBinding(declaration.seat, prepareId, 'tint_attestation_failed', provenance);
+        return { ok: false, acknowledged: false, reason: 'tint_attestation_failed' };
+      }
+      try {
+        await this.store.append({
+          entity_type: 'seat',
+          entity_id: declaration.seat,
+          event_type: 'reg.bound',
+          payload: {
+            wrapper_id: handshake.launch_id,
+            instance_id: handshake.instance_id,
+            persona: declaration.persona,
+            rank: declaration.rank,
+            commander: declaration.commander,
+            tint: declaration.tint,
+            engine: declaration.engine,
+            static_launch_id: handshake.launch_id,
+            wrapper_pid: handshake.wrapper_pid,
+            engine_pid: handshake.engine_pid,
+            engine_executable: handshake.engine_executable,
+            authority_principal: declaration.authority_principal,
+            continuity_kind: declaration.continuity_kind,
+            pane_generation: paneGeneration,
+            binding_prepare_id: prepareId,
+          },
+          provenance,
+          occurred_at,
+        });
+      } catch (error) {
+        await this.clearBindingTint(declaration.seat);
+        await this.abortBinding(declaration.seat, prepareId, 'bound_commit_failed', provenance);
+        throw error;
+      }
       return { ok: true, acknowledged: true, reason: null };
     });
   }
@@ -1385,7 +1721,19 @@ export class Daemon {
         .sort((a, b) => a.seat_id.localeCompare(b.seat_id));
       const rotation_id = crypto.randomUUID();
       const occurred_at = this.now();
-      const payload = { scope, seats, force: req.force, bound_seats, foreground_workloads, trigger };
+      const payload = {
+        scope,
+        seats,
+        force: req.force,
+        bound_seats,
+        bound_generations: bindings.map((binding) => ({
+          seat_id: binding.seat_id,
+          bound_seq: binding.bound_seq,
+          pane_generation: binding.pane_generation,
+        })),
+        foreground_workloads,
+        trigger,
+      };
       if ((bound_seats.length > 0 || foreground_workloads.length > 0) && !req.force) {
         await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_refused', payload, provenance: this.prov('wrapper', transportReceipt), occurred_at });
         return { ok: false, rotation_id, accepted: false, force: false, scope, seats, bound_seats, foreground_workloads, reason: 'estate_busy' };
@@ -1394,13 +1742,16 @@ export class Daemon {
       await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_requested', payload, provenance, occurred_at });
       if (scope === 'page') {
         if (!(await this.tmux.rebuildPage(req.page!))) {
-          await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_failed', payload: { ...payload, failed_page: req.page }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+          // Leave the durable request open. Boot resumes the same typed reset;
+          // closing it as "failed" after a partial physical rebuild would strand
+          // old binding truth against replacement pane generations.
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
         }
       } else {
         const seat = seats[0]!;
         if (!(await this.tmux.resetSeat(seat))) {
-          await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_failed', payload: { ...payload, failed_seat: seat }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+          // Keep the request pending for reconstruction recovery; the physical
+          // adapter may already have replaced the process before verification.
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
         }
       }
@@ -1500,8 +1851,12 @@ export class Daemon {
     const tmux_reachable = await this.tmux.reachable();
     const open = proj.openContradictions.length;
     const static_personas = await this.staticPersonaReadiness();
+    const tints = await this.tintReadiness();
     return {
-      ok: open === 0 && tmux_reachable && static_personas.every((persona) => persona.state === 'ready'),
+      ok: open === 0
+        && tmux_reachable
+        && static_personas.every((persona) => persona.state === 'ready')
+        && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,
@@ -1512,6 +1867,7 @@ export class Daemon {
       open_contradictions: open,
       tmux_reachable,
       static_personas,
+      tints,
     };
   }
 }

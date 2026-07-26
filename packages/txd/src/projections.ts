@@ -4,7 +4,7 @@
 //
 // Payload conventions (dumb facts; the fold denormalizes on the read side):
 //   reg.pane_created   (seat)     payload.pane_state? = 'live' | 'empty'   (default 'live')
-//   reg.bound          (seat)     payload {wrapper_id, instance_id, persona, tint}  — bound_seq = event.seq
+//   reg.bound          (seat)     payload {wrapper_id, instance_id, persona, tint, pane_generation} — bound_seq = event.seq
 //   reg.seat_cleared   (seat)     clears the binding (pane axis untouched)
 //   reg.teardown_started(seat)    pane → 'dead' (teardown kills the pane)
 //   reg.process_reaped (seat)     pane → 'dead'
@@ -46,6 +46,7 @@ export type Projections = {
     seat_id: string;
     instance_id: string;
     engine: 'claude' | 'codex';
+    tint: string;
     token_hash: string;
     state: 'awaiting_ack' | 'failed' | 'bound';
   }>;
@@ -86,6 +87,7 @@ export function buildProjections(events: EventRecord[]): Projections {
     seat_id: string;
     instance_id: string;
     engine: 'claude' | 'codex';
+    tint: string;
     token_hash: string;
     state: 'awaiting_ack' | 'failed' | 'bound';
   }>();
@@ -102,12 +104,14 @@ export function buildProjections(events: EventRecord[]): Projections {
         const instance_id = str(e.payload.instance_id);
         const engine = e.payload.engine;
         const token_hash = str(e.payload.token_hash);
-        if (seat_id && instance_id && token_hash && (engine === 'claude' || engine === 'codex')) {
+        const tint = str(e.payload.tint);
+        if (seat_id && instance_id && token_hash && tint && (engine === 'claude' || engine === 'codex')) {
           staticLaunches.set(e.entity_id, {
             launch_id: e.entity_id,
             seat_id,
             instance_id,
             engine,
+            tint,
             token_hash,
             state: 'awaiting_ack',
           });
@@ -138,10 +142,12 @@ export function buildProjections(events: EventRecord[]): Projections {
           rank: str(e.payload.rank),
           commander: str(e.payload.commander),
           tint: str(e.payload.tint),
+          pane_generation: str(e.payload.pane_generation),
           engine: e.payload.engine === 'claude' || e.payload.engine === 'codex' ? e.payload.engine : null,
           static_launch_id: str(e.payload.static_launch_id),
           wrapper_pid: positiveInt(e.payload.wrapper_pid),
           engine_pid: positiveInt(e.payload.engine_pid),
+          engine_executable: str(e.payload.engine_executable),
           authority_principal: str(e.payload.authority_principal),
           continuity_kind: e.payload.continuity_kind === 'daily_note' ? 'daily_note' : null,
           bound_seq: e.seq,

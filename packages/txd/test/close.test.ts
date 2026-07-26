@@ -10,7 +10,7 @@ function setup() {
   return { store, tmux, d: new Daemon(store, tmux) };
 }
 
-const FULL = { schema_version: 7, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
+const FULL = { schema_version: 8, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
 
 // Rung 3: /close is the generic "close this instance" system. For the persistent
 // estate it REAPS the agent process, KEEPS the pane (respawned bare), and returns
@@ -19,7 +19,8 @@ const FULL = { schema_version: 7, identity: 'i1', persona: 'salamander', tint: '
 test('close reaps the process, keeps the pane, returns the seat to the freelist', async () => {
   const { store, tmux, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  const res = await d.close({ target: 'palace:W', schema_version: 7 });
+  expect(await tmux.seatTint('palace:W')).toBe('#302800');
+  const res = await d.close({ target: 'palace:W', schema_version: 8 });
   expect(res).toMatchObject({ ok: true, closed: true, seat_id: 'palace:W', instance_id: 'i1' });
 
   const types = (await store.readAll()).map((e) => e.event_type);
@@ -32,18 +33,19 @@ test('close reaps the process, keeps the pane, returns the seat to the freelist'
   expect(p.currentBindings).toEqual([]);
   expect(p.freelist).toEqual([{ seat_id: 'palace:W', pane_state: 'live' }]);
   expect((await tmux.listSeats()).find((s) => s.seat_id === 'palace:W')!.pane).toBe('live');
+  expect(await tmux.seatTint('palace:W')).toBeNull();
 });
 
 test('close resolves by instance id as well as seat id', async () => {
   const { d } = setup();
   await d.launch({ seat_id: 'somnium:NE', ...FULL });
-  const res = await d.close({ target: 'i1', schema_version: 7 }); // by instance id
+  const res = await d.close({ target: 'i1', schema_version: 8 }); // by instance id
   expect(res).toMatchObject({ ok: true, closed: true, seat_id: 'somnium:NE', instance_id: 'i1' });
 });
 
 test('close of a non-bound target refuses loud — no events, never a silent no-op', async () => {
   const { store, d } = setup();
-  const res = await d.close({ target: 'palace:W', schema_version: 7 }); // never launched
+  const res = await d.close({ target: 'palace:W', schema_version: 8 }); // never launched
   expect(res).toMatchObject({ ok: false, closed: false });
   expect(res.reason).toContain('no_binding');
   expect(await store.count()).toBe(0);
@@ -54,13 +56,30 @@ test('a failed reap refuses loud and writes NO retire chain (retire-with-live-pr
   await d.launch({ seat_id: 'palace:N', ...FULL });
   tmux.failReapSeat('palace:N');
   const before = await store.count();
-  const res = await d.close({ target: 'palace:N', schema_version: 7 });
+  const res = await d.close({ target: 'palace:N', schema_version: 8 });
   expect(res).toMatchObject({ ok: false, closed: false });
   expect(res.reason).toContain('reap_failed');
   // Nothing appended: the binding stands, no retired/process_reaped/seat_cleared.
   expect(await store.count()).toBe(before);
   const p = buildProjections(await store.readAll());
   expect(p.currentBindings.map((b) => b.seat_id)).toEqual(['palace:N']);
+});
+
+test('a tint-clear failure prevents reap and preserves the current binding signal', async () => {
+  const { store, tmux, d } = setup();
+  await d.launch({ seat_id: 'palace:W', schema_version: 8, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  tmux.failTintClearSeat('palace:W');
+  const before = await store.count();
+
+  const closed = await d.close({ target: 'i1', schema_version: 8 });
+
+  expect(closed).toMatchObject({ ok: false, closed: false });
+  expect(await tmux.seatTint('palace:W')).toBe('#302800');
+  expect(await store.count()).toBe(before);
+  expect((await d.estateRows()).find((row) => row.seat_id === 'palace:W')).toMatchObject({
+    binding: 'bound',
+    entity_id: 'i1',
+  });
 });
 
 test('schema mismatch refuses close loud', async () => {

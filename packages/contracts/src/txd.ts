@@ -35,7 +35,8 @@ import { z } from 'zod';
 // v6: additive — explicit estate rotation request/refusal/completion lifecycle.
 // v7: additive — Council topology migration, canonical seat decommissioning,
 // and authenticated static-persona launch facts/readiness.
-export const SCHEMA_VERSION = 7;
+// v8: physical persona-tint apply/read-back, fail-dark reset, and readiness.
+export const SCHEMA_VERSION = 8;
 
 // ── Entities ────────────────────────────────────────────────────────────────
 // The four entity kinds the daemon tracks. `send` is a first-class entity: a
@@ -44,7 +45,7 @@ export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'send', 'message', '
 export type EntityType = (typeof ENTITY_TYPES)[number];
 export const EntityTypeSchema = z.enum(ENTITY_TYPES);
 
-// ── Event vocabulary — the seed 16, domain-partitioned (spec §3) ─────────────
+// ── Event vocabulary — domain-partitioned typed lifecycle facts (spec §3) ────
 // Domain is encoded as a prefix on the qualified event_type. There is ONE
 // stream; the prefix enables per-domain projections/retention later without a
 // parallel behavior stream (rejected explicitly as a split-brain factory).
@@ -59,6 +60,8 @@ export const REG_EVENT_NAMES = [
   'session_started',
   'static_launch_requested',
   'static_launch_failed',
+  'binding_prepared',
+  'binding_aborted',
   'bound',
   'stop_subscribed', // v2: a close-on-next-stop subscription (bound-keyed, satiated-once)
   'comm_accepted',
@@ -104,7 +107,7 @@ export const ESTATE_EVENT_NAMES = [
 ] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
-// the type stays a narrow literal union and stays greppable. 11 reg + 7 act = 18.
+// the type stays a narrow literal union and stays greppable.
 export const EVENT_TYPES = [
   'reg.dispatch_requested',
   'reg.pane_created',
@@ -112,6 +115,8 @@ export const EVENT_TYPES = [
   'reg.session_started',
   'reg.static_launch_requested',
   'reg.static_launch_failed',
+  'reg.binding_prepared',
+  'reg.binding_aborted',
   'reg.bound',
   'reg.stop_subscribed',
   'reg.comm_accepted',
@@ -176,6 +181,7 @@ export const SendGateReasonSchema = z.enum(SEND_GATE_REASONS);
 export const SEND_REFUSAL_REASONS = [
   'pane_unresolved',
   'pane_dead',
+  'scoped_reset_pending',
   'schema_version_mismatch',
 ] as const;
 export type SendRefusalReason = (typeof SEND_REFUSAL_REASONS)[number];
@@ -247,10 +253,12 @@ export const CurrentBindingSchema = z.object({
   rank: z.string().nullable(),
   commander: z.string().nullable(),
   tint: z.string().nullable(),
+  pane_generation: z.string().nullable(),
   engine: z.enum(['claude', 'codex']).nullable(),
   static_launch_id: z.string().nullable(),
   wrapper_pid: z.number().int().positive().nullable(),
   engine_pid: z.number().int().positive().nullable(),
+  engine_executable: z.string().nullable(),
   authority_principal: z.string().nullable(),
   continuity_kind: z.literal('daily_note').nullable(),
   // The bound-event seq the binding resolved against — receipts and drains
@@ -293,6 +301,15 @@ export const OpenContradictionSchema = z.object({
 export type OpenContradiction = z.infer<typeof OpenContradictionSchema>;
 
 // ── API surface (spec §7) ────────────────────────────────────────────────────
+export const TintReadinessSchema = z.object({
+  seat_id: z.string(),
+  binding: BindingStateSchema,
+  expected: z.string().nullable(),
+  observed: z.string().nullable(),
+  state: z.enum(['ready', 'missing', 'mismatched']),
+});
+export type TintReadiness = z.infer<typeof TintReadinessSchema>;
+
 export const HealthSchema = z.object({
   ok: z.boolean(),
   service: z.literal('txd'),
@@ -305,10 +322,13 @@ export const HealthSchema = z.object({
   // Honest-only: bring-up mode reports ok=false while any contradiction is open.
   open_contradictions: z.number().int(),
   tmux_reachable: z.boolean(),
+  tints: z.array(TintReadinessSchema),
   static_personas: z.array(z.object({
     seat_id: z.string(),
     state: z.enum(['ready', 'missing', 'mismatched', 'awaiting_ack']),
     instance_id: z.string().nullable(),
+    tint: z.string(),
+    tint_attested: z.boolean(),
   })),
 });
 export type Health = z.infer<typeof HealthSchema>;
@@ -520,6 +540,7 @@ export const EstateReadResponseSchema = z.object({
   schema_version: z.number().int(),
   rows: z.array(ActivityBoardRowSchema),
   static_personas: HealthSchema.shape.static_personas,
+  tints: HealthSchema.shape.tints,
 });
 export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;
 
@@ -580,6 +601,7 @@ export const StaticLaunchHandshakeSchema = z.object({
   engine: z.enum(['claude', 'codex']),
   wrapper_pid: z.number().int().positive(),
   engine_pid: z.number().int().positive(),
+  engine_executable: z.string().startsWith('/'),
 });
 export type StaticLaunchHandshake = z.infer<typeof StaticLaunchHandshakeSchema>;
 

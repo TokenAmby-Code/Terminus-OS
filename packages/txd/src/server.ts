@@ -363,6 +363,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           schema_version: SCHEMA_VERSION,
           rows: await daemon.estateRows(),
           static_personas: await daemon.staticPersonaReadiness(),
+          tints: await daemon.tintReadiness(),
         };
         return json(body);
       },

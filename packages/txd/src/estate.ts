@@ -66,6 +66,7 @@ export type StaticPersonaDeclaration = {
   authority_principal: string;
   continuity_kind: 'daily_note';
   workspace: 'custodes' | 'fabricator-general';
+  tint: '#302800' | '#300808';
 };
 
 export const STATIC_PERSONAS = [
@@ -78,6 +79,7 @@ export const STATIC_PERSONAS = [
     authority_principal: 'emperor',
     continuity_kind: 'daily_note',
     workspace: 'custodes',
+    tint: '#302800',
   },
   {
     seat: 'council:fabricator-general',
@@ -88,5 +90,6 @@ export const STATIC_PERSONAS = [
     authority_principal: 'council:custodes',
     continuity_kind: 'daily_note',
     workspace: 'fabricator-general',
+    tint: '#300808',
   },
 ] as const satisfies readonly StaticPersonaDeclaration[];

@@ -11,7 +11,7 @@
 // tmux dependency; on-box acceptance exercises the real plane.
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
-import { readFile } from 'node:fs/promises';
+import { readFile, readlink } from 'node:fs/promises';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
@@ -66,7 +66,7 @@ export interface TmuxControlPlane {
    * freelist live+empty. Returns false if the pane could not be resolved/respawned
    * (caller must NOT attest process_reaped/seat_cleared on a failed reap).
    */
-  reapSeat(seatId: string): Promise<boolean>;
+  reapSeat(seatId: string, previousTint?: string | null): Promise<boolean>;
   /** Clear pane history, replace its process, and re-verify its canonical tag. */
   resetSeat(seatId: string): Promise<boolean>;
   /** Reconstruct every terminal process and the declared geometry inside one page border. */
@@ -74,7 +74,19 @@ export interface TmuxControlPlane {
   /** Start through the sanctioned wrapper in the already-declared physical seat. */
   startStaticAgent(launch: StaticAgentLaunch): Promise<boolean>;
   /** Prove the wrapper/engine process pair belongs to the expected physical seat. */
-  attestStaticAgent(seatId: string, wrapperPid: number, enginePid: number, engine: 'claude' | 'codex'): Promise<boolean>;
+  attestStaticAgent(
+    seatId: string,
+    wrapperPid: number,
+    enginePid: number,
+    engine: 'claude' | 'codex',
+    engineExecutable: string,
+  ): Promise<boolean>;
+  /** Apply or clear the persona tint and verify both pane-local tmux style options. */
+  setSeatTint(seatId: string, tint: string | null): Promise<boolean>;
+  /** Observe the verified pane-local tint; undefined means absent/unreadable, null means fail-dark. */
+  seatTint(seatId: string): Promise<string | null | undefined>;
+  /** Observe txd's opaque physical pane generation (never a raw tmux handle). */
+  seatGeneration(seatId: string): Promise<string | undefined>;
   /**
    * Canonical ids of seats an attached client is actively on within windowMs —
    * a point-in-time READ of the server-maintained client_activity + active
@@ -86,6 +98,7 @@ export interface TmuxControlPlane {
 }
 
 const CANON_OPT = '@canonical_id';
+const GENERATION_OPT = '@txd_generation';
 type EstateRow = {
   session: string;
   window: string;
@@ -357,6 +370,19 @@ export class RealTmux implements TmuxControlPlane {
 
   private async tag(paneId: string, seatId: string): Promise<void> {
     await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`, seatId);
+    await this.checked(['set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID()], `tag ${seatId} generation`, seatId);
+  }
+
+  private async ensureSeatGeneration(seatId: string): Promise<void> {
+    if (await this.seatGeneration(seatId)) return;
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) throw new Error(`txd cannot resolve seat generation for ${seatId}`);
+    await this.checked(
+      ['set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID()],
+      `tag ${seatId} generation`,
+      seatId,
+    );
+    if (!(await this.seatGeneration(seatId))) throw new Error(`txd cannot attest seat generation for ${seatId}`);
   }
 
   private async clearPaneUserOptions(paneId: string, page: string): Promise<void> {
@@ -453,6 +479,9 @@ export class RealTmux implements TmuxControlPlane {
       await this.constructPage(page, seed);
       const rows = await this.estateRows();
       const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS];
+      for (const seat of expected) {
+        if (!(await this.setSeatTint(seat, null))) return false;
+      }
       const observed = await this.listSeats();
       const live = new Set(observed.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id));
       return expected.every((seat) => live.has(seat))
@@ -489,7 +518,10 @@ export class RealTmux implements TmuxControlPlane {
         if (!healthy && !(await this.rebuildPage(page))) throw new Error(`txd failed to reconstruct damaged canonical page ${page}`);
         if (!healthy) rebuilt_pages.push(page as TxdPage);
       }
-      if (this.isCanonicalEstate(await this.estateRows())) return { state: 'existing', rebuilt_pages };
+      if (this.isCanonicalEstate(await this.estateRows())) {
+        for (const seat of TXD_ESTATE) await this.ensureSeatGeneration(seat);
+        return { state: 'existing', rebuilt_pages };
+      }
       throw new Error('txd canonical estate recovery postcondition failed');
     }
 
@@ -578,6 +610,10 @@ export class RealTmux implements TmuxControlPlane {
       }
       const tag = await this.command('tag_seat', seatId, ['set-option', '-p', '-t', paneId, CANON_OPT, seatId]);
       if (tag.code !== 0) throw new Error(`txd tmux tag_seat failed for ${seatId}: ${this.stderrCategory(tag)}`);
+      const generation = await this.command('tag_seat_generation', seatId, [
+        'set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID(),
+      ]);
+      if (generation.code !== 0) throw new Error(`txd tmux tag_seat_generation failed for ${seatId}: ${this.stderrCategory(generation)}`);
       const tagged = await this.command('verify_seat_tag', seatId, ['list-panes', '-t', safe, '-F', `#{pane_id}\t#{${CANON_OPT}}`]);
       const rows = tagged.stdout.trim().split('\n').filter(Boolean);
       if (tagged.code !== 0 || rows.length !== 1 || rows[0] !== `${paneId}\t${seatId}`) {
@@ -597,13 +633,20 @@ export class RealTmux implements TmuxControlPlane {
     if (paneId) await this.command('kill_seat', seatId, ['kill-pane', '-t', paneId]);
   }
 
-  async reapSeat(seatId: string): Promise<boolean> {
+  async reapSeat(seatId: string, previousTint: string | null = null): Promise<boolean> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return false;
+    // Clear and attest the identity signal before killing the bound process.
+    // If respawn then fails, restore the still-current binding's tint.
+    if (!(await this.setSeatTint(seatId, null))) return false;
     // -k kills the pane's current command; the pane (and its @canonical_id option)
     // is REUSED and a fresh default shell is started — the estate seat persists.
     const r = await this.command('reap_seat', seatId, ['respawn-pane', '-k', '-t', paneId]);
-    return r.code === 0;
+    if (r.code === 0) return true;
+    if (previousTint !== null && !(await this.setSeatTint(seatId, previousTint))) {
+      throw new Error(`txd failed to restore binding tint after reap failure for ${seatId}`);
+    }
+    return false;
   }
 
   async resetSeat(seatId: string): Promise<boolean> {
@@ -612,7 +655,7 @@ export class RealTmux implements TmuxControlPlane {
     if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return false;
     if ((await this.command('reset_seat_process', seatId, ['respawn-pane', '-k', '-t', paneId])).code !== 0) return false;
     const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
-    return verified.code === 0 && verified.stdout.trim() === seatId;
+    return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
   }
 
   private shellQuote(value: string): string {
@@ -635,6 +678,7 @@ export class RealTmux implements TmuxControlPlane {
     wrapperPid: number,
     enginePid: number,
     engine: 'claude' | 'codex',
+    engineExecutable: string,
   ): Promise<boolean> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return false;
@@ -645,17 +689,52 @@ export class RealTmux implements TmuxControlPlane {
     const [observedPid, dead] = pane.stdout.trim().split('\t');
     if (Number(observedPid) !== wrapperPid || dead !== '0') return false;
     try {
-      const [rawStat, rawComm] = await Promise.all([
+      const [rawStat, rawComm, observedExecutable] = await Promise.all([
         readFile(`/proc/${enginePid}/stat`, 'utf8'),
         readFile(`/proc/${enginePid}/comm`, 'utf8'),
+        readlink(`/proc/${enginePid}/exe`),
       ]);
       const afterName = rawStat.slice(rawStat.lastIndexOf(')') + 2).trim().split(/\s+/);
       const parentPid = Number(afterName[1]);
       const processName = rawComm.trim();
-      return parentPid === wrapperPid && (processName === engine || processName.startsWith(engine));
+      return parentPid === wrapperPid
+        && processName === engine
+        && observedExecutable === engineExecutable;
     } catch {
       return false;
     }
+  }
+
+  async seatTint(seatId: string): Promise<string | null | undefined> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return undefined;
+    const [inactive, active] = await Promise.all([
+      this.command('observe_seat_tint', seatId, ['show-options', '-p', '-v', '-t', paneId, 'window-style']),
+      this.command('observe_seat_active_tint', seatId, ['show-options', '-p', '-v', '-t', paneId, 'window-active-style']),
+    ]);
+    if (inactive.code !== 0 || active.code !== 0) return undefined;
+    const styles = [inactive.stdout.trim(), active.stdout.trim()];
+    if (styles.every((style) => style === 'default')) return null;
+    if (styles[0] === styles[1] && styles[0]?.startsWith('bg=')) return styles[0].slice(3);
+    return styles.join('|');
+  }
+
+  async seatGeneration(seatId: string): Promise<string | undefined> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return undefined;
+    const observed = await this.command('observe_seat_generation', seatId, [
+      'display-message', '-p', '-t', paneId, `#{${GENERATION_OPT}}`,
+    ]);
+    const generation = observed.stdout.trim();
+    return observed.code === 0 && generation.length > 0 ? generation : undefined;
+  }
+
+  async setSeatTint(seatId: string, tint: string | null): Promise<boolean> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return false;
+    const style = tint === null ? 'default' : `bg=${tint}`;
+    const applied = await this.command('set_seat_tint', seatId, ['select-pane', '-t', paneId, '-P', style]);
+    return applied.code === 0 && await this.seatTint(seatId) === tint;
   }
 
   async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
@@ -726,7 +805,7 @@ export class RealTmux implements TmuxControlPlane {
 
 // In-memory fake for tests — same membrane contract, no tmux dependency.
 export class FakeTmux implements TmuxControlPlane {
-  private seats = new Map<string, { pane: 'live' | 'dead' }>();
+  private seats = new Map<string, { pane: 'live' | 'dead'; generation: string }>();
   private present = new Map<string, number>(); // seat -> last activity epoch ms
   private failCreate = new Set<string>(); // seats whose createSeat is forced to throw
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
@@ -737,6 +816,10 @@ export class FakeTmux implements TmuxControlPlane {
   private commands = new Map<string, string>();
   private staticAgents = new Map<string, { wrapperPid: number; enginePid: number; engine: 'claude' | 'codex'; launch: StaticAgentLaunch }>();
   private staticStartFailures = new Set<string>();
+  private tints = new Map<string, string>();
+  private tintFailures = new Set<string>();
+  private tintClearFailures = new Set<string>();
+  private tintMisapplications = new Set<string>();
   private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
 
   async reachable(): Promise<boolean> {
@@ -782,7 +865,7 @@ export class FakeTmux implements TmuxControlPlane {
       sessions: [TXD_SESSION],
       windows: Object.fromEntries(Object.entries(TXD_WINDOWS).map(([window, seats]) => [window, [...seats]])),
     };
-    for (const seat of TXD_ESTATE) this.seats.set(seat, { pane: 'live' });
+    for (const seat of TXD_ESTATE) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
     return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
   }
   async estateGeneration(): Promise<EstateGeneration> {
@@ -810,7 +893,7 @@ export class FakeTmux implements TmuxControlPlane {
   }
   seedNonCanonicalEstate(): void {
     this.shape = { sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } };
-    this.seats.set('palace:W', { pane: 'live' });
+    this.seats.set('palace:W', { pane: 'live', generation: crypto.randomUUID() });
   }
   seedLegacyEstate(): void {
     this.shape = {
@@ -828,7 +911,7 @@ export class FakeTmux implements TmuxControlPlane {
       },
     };
     for (const seats of Object.values(this.shape.windows)) {
-      for (const seat of seats) this.seats.set(seat, { pane: 'live' });
+      for (const seat of seats) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
     }
   }
   seedCouncilMechanicusEstate(): void {
@@ -837,7 +920,7 @@ export class FakeTmux implements TmuxControlPlane {
       windows: Object.fromEntries(Object.entries(PREVIOUS_WINDOWS).map(([page, seats]) => [page, [...seats]])),
     };
     for (const seats of Object.values(this.shape.windows)) {
-      for (const seat of seats) this.seats.set(seat, { pane: 'live' });
+      for (const seat of seats) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
     }
   }
   seedInterruptedCouncilMigration(): void {
@@ -849,14 +932,14 @@ export class FakeTmux implements TmuxControlPlane {
       },
     };
     for (const seats of Object.values(this.shape.windows)) {
-      for (const seat of seats) this.seats.set(seat, { pane: 'live' });
+      for (const seat of seats) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
     }
   }
   async createSeat(seatId: string): Promise<void> {
     // Test control: a configured seat throws (simulates a below-membrane tmux
     // failure), exercising the constructor's per-seat isolation.
     if (this.failCreate.has(seatId)) throw new Error(`FakeTmux: forced createSeat failure for ${seatId}`);
-    this.seats.set(seatId, { pane: 'live' });
+    this.seats.set(seatId, { pane: 'live', generation: crypto.randomUUID() });
   }
   /** Test control: force createSeat(seatId) to throw. */
   failCreateSeat(seatId: string): void {
@@ -866,12 +949,19 @@ export class FakeTmux implements TmuxControlPlane {
     const s = this.seats.get(seatId);
     if (s) s.pane = 'dead';
   }
-  async reapSeat(seatId: string): Promise<boolean> {
+  async reapSeat(seatId: string, previousTint: string | null = null): Promise<boolean> {
     // Respawn keeps the pane LIVE (bare shell) — a live seat is reapable; a dead
     // or missing pane is not (nothing to respawn without a teardown+recreate).
-    if (this.failReap.has(seatId)) return false;
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') return false;
+    const tint = this.tints.get(seatId) ?? null;
+    if (this.tintClearFailures.has(seatId)) return false;
+    this.tints.delete(seatId);
+    if (this.failReap.has(seatId)) {
+      if (previousTint !== null) this.tints.set(seatId, previousTint);
+      else if (tint !== null) this.tints.set(seatId, tint);
+      return false;
+    }
     s.pane = 'live';
     return true;
   }
@@ -880,6 +970,7 @@ export class FakeTmux implements TmuxControlPlane {
     if (!s || s.pane === 'dead') return false;
     s.pane = 'live';
     this.commands.delete(seatId);
+    this.tints.delete(seatId);
     this.resets.push(seatId);
     return true;
   }
@@ -891,8 +982,9 @@ export class FakeTmux implements TmuxControlPlane {
     this.shape.windows[page] = seats;
     for (const [seat] of this.seats) if (seat.startsWith(`${page}:`)) this.seats.delete(seat);
     for (const [seat] of this.staticAgents) if (seat.startsWith(`${page}:`)) this.staticAgents.delete(seat);
+    for (const [seat] of this.tints) if (seat.startsWith(`${page}:`)) this.tints.delete(seat);
     for (const seat of seats) {
-      this.seats.set(seat, { pane: 'live' });
+      this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
       this.commands.delete(seat);
     }
     this.pageRebuilds.push(page);
@@ -916,9 +1008,50 @@ export class FakeTmux implements TmuxControlPlane {
   staticAgent(seatId: string) {
     return this.staticAgents.get(seatId);
   }
-  async attestStaticAgent(seatId: string, wrapperPid: number, enginePid: number, engine: 'claude' | 'codex'): Promise<boolean> {
+  async attestStaticAgent(
+    seatId: string,
+    wrapperPid: number,
+    enginePid: number,
+    engine: 'claude' | 'codex',
+    engineExecutable: string,
+  ): Promise<boolean> {
     const agent = this.staticAgents.get(seatId);
-    return agent?.wrapperPid === wrapperPid && agent.enginePid === enginePid && agent.engine === engine;
+    return agent?.wrapperPid === wrapperPid
+      && agent.enginePid === enginePid
+      && agent.engine === engine
+      && engineExecutable === `/sanctioned/${engine}`;
+  }
+  async setSeatTint(seatId: string, tint: string | null): Promise<boolean> {
+    const seat = this.seats.get(seatId);
+    if (!seat || seat.pane === 'dead') return false;
+    if (tint === null && this.tintClearFailures.has(seatId)) return false;
+    if (tint !== null && this.tintFailures.has(seatId)) return false;
+    if (tint !== null && this.tintMisapplications.has(seatId)) {
+      this.tints.set(seatId, '#000000');
+      return false;
+    }
+    if (tint === null) this.tints.delete(seatId);
+    else this.tints.set(seatId, tint);
+    return true;
+  }
+  async seatTint(seatId: string): Promise<string | null | undefined> {
+    const seat = this.seats.get(seatId);
+    if (!seat || seat.pane === 'dead') return undefined;
+    return this.tints.get(seatId) ?? null;
+  }
+  async seatGeneration(seatId: string): Promise<string | undefined> {
+    return this.seats.get(seatId)?.generation;
+  }
+  failTintSeat(seatId: string): void { this.tintFailures.add(seatId); }
+  failTintClearSeat(seatId: string): void { this.tintClearFailures.add(seatId); }
+  misapplyTintSeat(seatId: string): void { this.tintMisapplications.add(seatId); }
+  forceSeatTint(seatId: string, tint: string | null): void {
+    if (tint === null) this.tints.delete(seatId);
+    else this.tints.set(seatId, tint);
+  }
+  forceSeatGeneration(seatId: string, generation: string): void {
+    const seat = this.seats.get(seatId);
+    if (seat) seat.generation = generation;
   }
   rebuiltPages(): string[] { return [...this.pageRebuilds]; }
   /** Test control: force reapSeat(seatId) to fail (simulates a wedged process). */

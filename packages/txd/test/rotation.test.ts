@@ -118,3 +118,82 @@ test('scoped reset refuses busy targets until force is explicit and never widens
   expect(reset).toMatchObject({ accepted: true, scope: 'pane', seats: ['somnium:NE'] });
   expect(tmux.resetSeats()).toEqual(['somnium:NE']);
 });
+
+test('boot resumes a pending pane reconstruction and retires its exact binding', async () => {
+  const { store, tmux, daemon } = await setup();
+  await daemon.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'ne', persona: 'ne', tint: '#1' });
+  const bound = (await store.readAll()).find((event) =>
+    event.entity_id === 'somnium:NE' && event.event_type === 'reg.bound',
+  )!;
+  const resetId = crypto.randomUUID();
+  await store.append({
+    entity_type: 'estate',
+    entity_id: resetId,
+    event_type: 'estate.scoped_reset_requested',
+    payload: {
+      scope: 'pane',
+      seats: ['somnium:NE'],
+      force: true,
+      bound_seats: ['somnium:NE'],
+      bound_generations: [{
+        seat_id: 'somnium:NE',
+        bound_seq: bound.seq,
+        pane_generation: bound.payload.pane_generation,
+      }],
+      foreground_workloads: [],
+      trigger: 'operator',
+    },
+    provenance: { source: 'wrapper', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: new Date().toISOString(),
+  });
+
+  const restarted = new Daemon(store, tmux);
+  await restarted.constructEstate();
+
+  expect(tmux.resetSeats()).toEqual(['somnium:NE']);
+  expect((await restarted.estateRows()).find((row) => row.seat_id === 'somnium:NE')).toMatchObject({
+    binding: 'unbound',
+  });
+  expect((await store.readAll()).filter((event) =>
+    event.entity_id === 'ne' && event.event_type === 'reg.retired',
+  )).toHaveLength(1);
+  expect((await store.readAll()).filter((event) =>
+    event.entity_id === resetId && event.event_type === 'estate.scoped_reset_completed',
+  )).toHaveLength(1);
+});
+
+test('a pending scoped reset fences new bindings and sends on every reserved seat', async () => {
+  const { store, tmux, daemon } = await setup();
+  await store.append({
+    entity_type: 'estate',
+    entity_id: 'pending-unbound-reset',
+    event_type: 'estate.scoped_reset_requested',
+    payload: {
+      scope: 'pane',
+      seats: ['somnium:NE'],
+      force: true,
+      bound_seats: [],
+      bound_generations: [],
+      foreground_workloads: [],
+      trigger: 'operator',
+    },
+    provenance: { source: 'wrapper', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: new Date().toISOString(),
+  });
+  const before = await store.count();
+
+  expect(await daemon.launch({
+    seat_id: 'somnium:NE',
+    schema_version: SCHEMA_VERSION,
+    identity: 'late',
+    persona: 'late',
+    tint: '#1',
+  })).toMatchObject({ ok: false, handover: false, reason: 'scoped_reset_pending: somnium:NE' });
+  expect(await daemon.send({
+    target: 'somnium:NE',
+    text: 'must not cross the reset fence',
+    schema_version: SCHEMA_VERSION,
+  })).toMatchObject({ ok: false, refused: true, reason: 'scoped_reset_pending' });
+  expect(await store.count()).toBe(before);
+  expect(await tmux.seatTint('somnium:NE')).toBeNull();
+});

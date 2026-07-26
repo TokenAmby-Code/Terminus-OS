@@ -16,7 +16,7 @@ function setup() {
 
 test('out-of-band pane kill on a bound seat → contradiction_flagged, p0, health ok=false', async () => {
   const { tmux, store, d } = setup();
-  await d.launch({ seat_id: 'palace:W', schema_version: 7, identity: 'i-1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 8, identity: 'i-1', persona: 'salamander', tint: '#302800' });
 
   // Raw kill below the daemon — no teardown_started/process_reaped/seat_cleared attested.
   tmux.killOutOfBand('palace:W');
@@ -43,7 +43,7 @@ test('out-of-band pane kill on a bound seat → contradiction_flagged, p0, healt
 
 test('re-reconcile does not double-flag an already-open contradiction', async () => {
   const { tmux, d } = setup();
-  await d.launch({ seat_id: 'palace:W', schema_version: 7, identity: 'i-1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 8, identity: 'i-1', persona: 'salamander', tint: '#302800' });
   tmux.killOutOfBand('palace:W');
 
   const first = await d.reconcile();
@@ -53,4 +53,47 @@ test('re-reconcile does not double-flag an already-open contradiction', async ()
   expect(second.new_contradictions).toHaveLength(0); // already flagged & still open — not re-emitted
   expect(second.open_contradictions.length).toBeGreaterThan(0); // still open
   expect(second.p0).toBe(true);
+});
+
+test('bound pane tint drift is a typed binding contradiction', async () => {
+  const { tmux, d } = setup();
+  await d.launch({ seat_id: 'palace:W', schema_version: 8, identity: 'i-1', persona: 'salamander', tint: '#302800' });
+  tmux.forceSeatTint('palace:W', '#000000');
+
+  const rec = await d.reconcile();
+
+  expect(rec.ok).toBe(false);
+  expect(rec.new_contradictions).toContainEqual(expect.objectContaining({
+    entity_id: 'palace:W',
+    kind: 'bound_tint_mismatch',
+    missing_attestation: 'tint',
+  }));
+});
+
+test('replacement pane generation is a typed binding contradiction even when tint matches', async () => {
+  const { tmux, d } = setup();
+  await d.launch({ seat_id: 'palace:W', schema_version: 8, identity: 'i-1', persona: 'salamander', tint: '#302800' });
+  tmux.forceSeatGeneration('palace:W', 'replacement-generation');
+
+  const rec = await d.reconcile();
+
+  expect(rec.new_contradictions).toContainEqual(expect.objectContaining({
+    entity_id: 'palace:W',
+    kind: 'bound_generation_mismatch',
+    missing_attestation: 'pane_generation',
+  }));
+});
+
+test('manual tint on an unbound pane is a typed binding contradiction', async () => {
+  const { tmux, d } = setup();
+  await d.constructEstate();
+  tmux.forceSeatTint('council:pax', '#302800');
+
+  const rec = await d.reconcile();
+
+  expect(rec.new_contradictions).toContainEqual(expect.objectContaining({
+    entity_id: 'council:pax',
+    kind: 'unbound_tint_present',
+    missing_attestation: 'binding',
+  }));
 });
