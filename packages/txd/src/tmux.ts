@@ -622,7 +622,7 @@ export class RealTmux implements TmuxControlPlane {
     const paneId = await this.resolvePane(launch.seatId);
     if (!paneId) return false;
     const environment = Object.entries(launch.environment).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
-    const command = `${this.shellQuote(launch.wrapper)} ${launch.engine}`;
+    const command = `exec ${this.shellQuote(launch.wrapper)} ${launch.engine}`;
     const result = await this.command('start_static_agent', launch.seatId, [
       'respawn-pane', '-k', '-c', launch.workspace, ...environment, '-t', paneId, command,
     ]);
