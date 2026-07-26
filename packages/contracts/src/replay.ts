@@ -112,3 +112,9 @@ export const ReplayProjectionSchema = z.object({
   deliveries: z.array(ReplayDeliveryStatusSchema),
 }).strict();
 export type ReplayProjection = z.infer<typeof ReplayProjectionSchema>;
+
+export const ReplayEventPageSchema = z.object({
+  events: z.array(ReplayEventRecordSchema),
+  next_cursor: EventIdSchema.nullable(),
+}).strict();
+export type ReplayEventPage = z.infer<typeof ReplayEventPageSchema>;

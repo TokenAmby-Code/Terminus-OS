@@ -9,6 +9,7 @@ import {
   type ReplayAdmission,
   type ReplayDeliveryStatus,
   type ReplayEventInput,
+  type ReplayEventPage,
   type ReplayEventRecord,
   type ReplayProjection,
 } from "@terminus-os/contracts";
@@ -20,6 +21,7 @@ const systemClock: Clock = () => new Date().toISOString();
 export class IdempotencyConflict extends Error {}
 export class UnknownReplay extends Error {}
 export class EventIdentityConflict extends Error {}
+export class InvalidEventCursor extends Error {}
 
 export type PublicationTask = {
   subscription: string;
@@ -37,6 +39,12 @@ export interface ReplayStore {
   append(input: ReplayEventInput): Promise<{ created: boolean; event: ReplayEventRecord }>;
   projection(replayId: string): Promise<ReplayProjection | null>;
   unfinished(source: string): Promise<string[]>;
+  events(query: {
+    after: string | null;
+    source: string | null;
+    eventTypePrefix: string | null;
+    limit: number;
+  }): Promise<ReplayEventPage>;
   pendingDeliveries(limit: number, excluded?: ReadonlySet<PublicationTaskIdentity>): Promise<PublicationTask[]>;
   recordDelivery(eventId: string, subscription: string, succeeded: boolean, error: string | null): Promise<void>;
   close(): Promise<void>;
@@ -66,6 +74,7 @@ type Attempt = { eventId: string; subscription: string; succeeded: boolean; erro
 export class MemoryReplayStore implements ReplayStore {
   private streams = new Map<string, Stream>();
   private eventIndex = new Map<string, ReplayEventRecord>();
+  private journal: ReplayEventRecord[] = [];
   private subscriptions = new Map<string, BusSubscriptionRow>();
   private attempts: Attempt[] = [];
 
@@ -95,6 +104,7 @@ export class MemoryReplayStore implements ReplayStore {
       events: [record],
     });
     this.eventIndex.set(record.event_id, record);
+    this.journal.push(record);
     return { created: true, event: record };
   }
 
@@ -120,6 +130,7 @@ export class MemoryReplayStore implements ReplayStore {
     });
     stream.events.push(record);
     this.eventIndex.set(record.event_id, record);
+    this.journal.push(record);
     return { created: true, event: record };
   }
 
@@ -134,6 +145,26 @@ export class MemoryReplayStore implements ReplayStore {
       .filter(([, stream]) => stream.source === source && !stream.events.some((event) => event.payload.terminal === true))
       .map(([replayId]) => replayId)
       .sort();
+  }
+
+  async events(query: {
+    after: string | null;
+    source: string | null;
+    eventTypePrefix: string | null;
+    limit: number;
+  }): Promise<ReplayEventPage> {
+    const cursor = query.after === null
+      ? -1
+      : this.journal.findIndex((event) => event.event_id === query.after);
+    if (query.after !== null && cursor === -1) throw new InvalidEventCursor("event cursor does not exist");
+    const matching = this.journal.slice(cursor + 1).filter((event) =>
+      (query.source === null || event.source === query.source)
+      && (query.eventTypePrefix === null || event.event_type.startsWith(query.eventTypePrefix)));
+    const events = matching.slice(0, query.limit);
+    return {
+      events,
+      next_cursor: matching.length > events.length ? events.at(-1)!.event_id : null,
+    };
   }
 
   async pendingDeliveries(
@@ -333,6 +364,39 @@ export class PostgresReplayStore implements ReplayStore {
         )
       ORDER BY s.created_at, s.replay_id`) as { replay_id: string }[];
     return rows.map((row) => row.replay_id);
+  }
+
+  async events(query: {
+    after: string | null;
+    source: string | null;
+    eventTypePrefix: string | null;
+    limit: number;
+  }): Promise<ReplayEventPage> {
+    let cursor = 0;
+    if (query.after !== null) {
+      const cursors = (await this.sql`
+        SELECT journal_sequence
+        FROM replay.events
+        WHERE event_id = ${query.after}`) as { journal_sequence: number | bigint | string }[];
+      if (!cursors.length) throw new InvalidEventCursor("event cursor does not exist");
+      cursor = Number(cursors[0]!.journal_sequence);
+    }
+    const pattern = query.eventTypePrefix === null ? "%" : `${query.eventTypePrefix}%`;
+    const fetchLimit = query.limit + 1;
+    const rows = (await this.sql`
+      SELECT event_id, replay_id, sequence, event_type, schema_version, source,
+             provenance, causation_event_id, occurred_at, recorded_at, payload
+      FROM replay.events
+      WHERE journal_sequence > ${cursor}
+        AND (${query.source}::text IS NULL OR source = ${query.source})
+        AND event_type LIKE ${pattern}
+      ORDER BY journal_sequence
+      LIMIT ${fetchLimit}`) as EventRow[];
+    const events = rows.slice(0, query.limit).map(rowToEvent);
+    return {
+      events,
+      next_cursor: rows.length > query.limit ? events.at(-1)!.event_id : null,
+    };
   }
 
   async pendingDeliveries(

@@ -31,6 +31,7 @@ import type { BusStore, Clock } from './store.ts';
 import {
   EventIdentityConflict,
   IdempotencyConflict,
+  InvalidEventCursor,
   UnknownReplay,
   type ReplayStore,
 } from './replay-store.ts';
@@ -213,6 +214,36 @@ export function buildRoutes(deps: ServerDeps): Route[] {
           }
           if (error instanceof Error && error.name === 'ZodError') {
             return json({ ok: false, error: 'invalid_github_delivery_identity' }, 422);
+          }
+          throw error;
+        }
+      },
+    },
+    {
+      method: 'GET',
+      match: exact('/v1/events'),
+      label: 'GET /v1/events',
+      handler: async (req) => {
+        const url = new URL(req.url);
+        const after = url.searchParams.get('after');
+        const source = url.searchParams.get('source');
+        const eventTypePrefix = url.searchParams.get('event_type_prefix');
+        const rawLimit = url.searchParams.get('limit') ?? '200';
+        if (!/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 500 ||
+            (eventTypePrefix !== null &&
+              !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\.?$/.test(eventTypePrefix))) {
+          return json({ ok: false, error: 'invalid_event_query' }, 422);
+        }
+        try {
+          return json(await deps.replayStore.events({
+            after,
+            source,
+            eventTypePrefix,
+            limit: Number(rawLimit),
+          }));
+        } catch (error) {
+          if (error instanceof InvalidEventCursor) {
+            return json({ ok: false, error: 'invalid_event_cursor' }, 422);
           }
           throw error;
         }

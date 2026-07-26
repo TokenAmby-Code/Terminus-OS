@@ -175,7 +175,7 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
     const pgAdmission: ReplayAdmission = {
       ...admission(),
       replay_id: pgReplayId,
-      event: event({ replay_id: pgReplayId, event_id: pgFirstEventId }),
+      event: event({ replay_id: pgReplayId, event_id: pgFirstEventId, source: `githubd-integration-${pgReplayId}` }),
     };
     const accepted = await store.admit(pgAdmission);
     expect(accepted.created).toBe(true);
@@ -185,6 +185,7 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
       replay_id: pgReplayId,
       event_id: crypto.randomUUID(),
       event_type: "githubd.command_completed",
+      source: `githubd-integration-${pgReplayId}`,
       causation_event_id: pgFirstEventId,
       payload: { terminal: true, outcome: "succeeded" },
     }));
@@ -204,6 +205,20 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
     expect(next.map((task) => task.event.sequence)).toEqual([2]);
     const projection = await store.projection(pgReplayId);
     expect(projection?.terminal).toBe(true);
+    const firstPage = await store.events({
+      after: null,
+      source: `githubd-integration-${pgReplayId}`,
+      eventTypePrefix: "githubd.",
+      limit: 1,
+    });
+    expect(firstPage.events.map((item) => item.sequence)).toEqual([1]);
+    expect(firstPage.next_cursor).toBe(pgFirstEventId);
+    expect((await store.events({
+      after: firstPage.next_cursor,
+      source: `githubd-integration-${pgReplayId}`,
+      eventTypePrefix: "githubd.",
+      limit: 10,
+    })).events.map((item) => item.sequence)).toEqual([2]);
     expect(projection?.deliveries.find((delivery) =>
       delivery.event_id === pending[0]!.event.event_id && delivery.subscription === "replay-test-manager"))
       .toMatchObject({ status: "delivered", attempts: 1 });
@@ -211,6 +226,7 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
       replay_id: pgReplayId,
       event_id: crypto.randomUUID(),
       event_type: "githubd.delivery_observed",
+      source: `githubd-integration-${pgReplayId}`,
       causation_event_id: pgFirstEventId,
       payload: { observation: "duplicate-wakeup" },
     });

@@ -74,6 +74,38 @@ test("replay HTTP admission, append, inspection, and unfinished reconciliation",
     expect(projection.terminal).toBe(true);
     expect(projection.events).toHaveLength(2);
     expect(wakes).toBe(2);
+
+    response = await fetch(`${base}/v1/events?source=githubd&event_type_prefix=githubd.&limit=1`);
+    const firstPage = await response.json() as { events: Array<{ event_id: string }>; next_cursor: string | null };
+    expect(firstPage.events.map((event) => event.event_id)).toEqual([eventId]);
+    expect(firstPage.next_cursor).toBe(eventId);
+    response = await fetch(`${base}/v1/events?source=githubd&event_type_prefix=githubd.&limit=1&after=${firstPage.next_cursor}`);
+    const secondPage = await response.json() as { events: Array<{ event_id: string }>; next_cursor: string | null };
+    expect(secondPage.events.map((event) => event.event_id)).toEqual([
+      "9e107d9d-372b-4f4f-9b9d-64a3f5f6b8c1",
+    ]);
+    expect(secondPage.next_cursor).toBeNull();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("event feed refuses invalid filters and unknown cursors", async () => {
+  const replayStore = new MemoryReplayStore();
+  const server = makeServer({
+    bind: "127.0.0.1",
+    port: 0,
+    store: new MemoryBusStore(),
+    replayStore,
+    onAppend: () => {},
+    build: { version: "test", git_sha: "test", bun: Bun.version },
+    machine: "test",
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    expect((await fetch(`${base}/v1/events?limit=0`)).status).toBe(422);
+    expect((await fetch(`${base}/v1/events?event_type_prefix=github.*`)).status).toBe(422);
+    expect((await fetch(`${base}/v1/events?after=${crypto.randomUUID()}`)).status).toBe(422);
   } finally {
     server.stop(true);
   }

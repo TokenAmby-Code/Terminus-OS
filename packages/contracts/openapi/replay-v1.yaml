@@ -3,6 +3,21 @@ info:
   title: Terminus Replay Authority
   version: 1.0.0
 paths:
+  /v1/events:
+    get:
+      operationId: listReplayEvents
+      parameters:
+        - { name: after, in: query, schema: { $ref: "#/components/schemas/LowercaseUuid" } }
+        - { name: source, in: query, schema: { type: string, minLength: 1 } }
+        - { name: event_type_prefix, in: query, schema: { type: string, pattern: "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*\\.?$" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 200 } }
+      responses:
+        "200":
+          description: Journal-ordered immutable events for projection rebuild
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReplayEventPage" }
+        "422": { $ref: "#/components/responses/Invalid" }
   /v1/replays/admit:
     post:
       operationId: admitReplay
@@ -164,6 +179,16 @@ components:
         terminal: { type: boolean }
         events: { type: array, items: { $ref: "#/components/schemas/ReplayEventRecord" } }
         deliveries: { type: array, items: { $ref: "#/components/schemas/ReplayDelivery" } }
+    ReplayEventPage:
+      type: object
+      additionalProperties: false
+      required: [events, next_cursor]
+      properties:
+        events: { type: array, items: { $ref: "#/components/schemas/ReplayEventRecord" } }
+        next_cursor:
+          anyOf:
+            - { type: "null" }
+            - { $ref: "#/components/schemas/LowercaseUuid" }
     GithubEventName:
       enum: [pull_request, pull_request_review, pull_request_review_comment, issue_comment, check_suite, check_run, status, push, create, delete]
     EventResult:
