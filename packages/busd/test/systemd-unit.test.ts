@@ -7,8 +7,8 @@
 // - WorkingDirectory: the k12 box layout keeps the checkout under `live/`
 //   (txd Defect A: shipping the path without live/ produced a CHDIR crashloop).
 // - Postgres socket wait: user units cannot order After= the SYSTEM
-//   postgresql.service, so ExecStartPre polls the peer-auth socket, bounded by
-//   TimeoutStartSec — then Restart=on-failure owns recovery (no fallback code).
+//   postgresql.service, so a path unit consumes the peer-socket appearance
+//   event. No poll loop or magic startup timeout is permitted.
 // - Loopback bind: busd sits behind the edge proxy; it must never bind wide.
 
 import { describe, expect, test } from 'bun:test';
@@ -43,19 +43,29 @@ describe('systemd/busd.service pins', () => {
     pin('LoadCredentialEncrypted=busd.github-webhook:%E/credstore.encrypted/busd.github-webhook');
   });
 
-  test('waits for the postgres peer-auth socket, bounded — user units cannot After= system postgres', () => {
-    pin("ExecStartPre=/bin/sh -c 'until test -S /var/run/postgresql/.s.PGSQL.5432; do sleep 2; done'");
-    pin('TimeoutStartSec=180');
+  test('contains no PostgreSQL polling or magic startup timeout', () => {
+    expect(unit).not.toContain("ExecStartPre=");
+    expect(unit).not.toContain("TimeoutStartSec=");
+    expect(unit).not.toContain("RestartSec=");
+  });
+
+  test("PostgreSQL readiness is a path event rather than a poll", async () => {
+    const pathUnit = await Bun.file(
+      new URL("../systemd/busd-postgres.path", import.meta.url),
+    ).text();
+    expect(pathUnit).toContain("PathExists=/var/run/postgresql/.s.PGSQL.5432");
+    expect(pathUnit).toContain("Unit=busd.service");
+    expect(pathUnit).toContain("WantedBy=default.target");
+    expect(pathUnit).not.toMatch(/\bsleep\b|\buntil\b|OnUnitActiveSec/);
   });
 
   test('fail-loud restart policy — no fallback path exists, recovery is the restart', () => {
     pin('Restart=on-failure');
-    pin('RestartSec=2');
     pin('NoNewPrivileges=true');
   });
 
-  test('user-unit install target and box identity', () => {
-    pin('WantedBy=default.target');
+  test('box identity is explicit and service activation belongs to the path unit', () => {
+    expect(unit).not.toContain("WantedBy=");
     pin('Environment=IMPERIUM_MACHINE=k12-personal');
   });
 });

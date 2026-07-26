@@ -6,9 +6,8 @@
 #
 # busd boots by connecting to the native Postgres 18 cluster over its peer-auth
 # unix socket and fails loud if it is unreachable (no fallback by ruling). User
-# units cannot order After= the SYSTEM postgresql.service, so ExecStartPre
-# waits on the socket instead — bounded by TimeoutStartSec, then on-failure
-# restart takes over.
+# units cannot order After= the SYSTEM postgresql.service, so
+# busd-postgres.path starts this service from the peer-socket appearance event.
 
 [Unit]
 Description=Terminus-OS busd central event bus (journal + subscription fan-out)
@@ -25,13 +24,7 @@ Environment=BUSD_CONFIG=%h/.config/token-fleet/busd.json
 Environment=IMPERIUM_MACHINE=k12-personal
 Environment=BUSD_GITHUB_WEBHOOK_SECRET_FILE=%d/busd.github-webhook
 LoadCredentialEncrypted=busd.github-webhook:%E/credstore.encrypted/busd.github-webhook
-ExecStartPre=/bin/sh -c 'until test -S /var/run/postgresql/.s.PGSQL.5432; do sleep 2; done'
-TimeoutStartSec=180
 # Absolute bun path (pinned 1.3.14 on the fleet).
 ExecStart=%h/.bun/bin/bun src/daemon.ts
 Restart=on-failure
-RestartSec=2
 NoNewPrivileges=true
-
-[Install]
-WantedBy=default.target
