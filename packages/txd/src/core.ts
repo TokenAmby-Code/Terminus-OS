@@ -209,7 +209,12 @@ export class Daemon {
   commStop(instanceId: string, content: string, stopEventId: string | null, receipt: string | null): Promise<void> {
     return this.locked(async () => {
       const events = await this.store.readAll();
-      const asks = events.filter((e) => e.event_type === 'reg.comm_target_snapshotted' && (e.payload.targets as CommTarget[]).some((t) => t.instance_id === instanceId));
+      const askIds = new Set(events
+        .filter((e) => e.event_type === 'reg.comm_accepted' && typeof e.payload.ask_id === 'string')
+        .map((e) => String(e.payload.ask_id)));
+      const asks = events.filter((e) => e.event_type === 'reg.comm_target_snapshotted'
+        && askIds.has(e.entity_id)
+        && (e.payload.targets as CommTarget[]).some((t) => t.instance_id === instanceId));
       for (const ask of asks) await this.assertCallback(ask.entity_id, instanceId, content, 'stop', stopEventId, receipt);
     });
   }
