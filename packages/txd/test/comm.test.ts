@@ -51,6 +51,13 @@ test('delivery assertion is asynchronous, replay-safe, and echoes separately', a
   expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
 });
 
+test('one-way communication never subscribes its sender to stop content', async () => {
+  const { store, daemon } = await setup();
+  await daemon.comm({ schema_version: 7, source_instance_id: 'source', target: 'target-a', message: 'one-way', ask: false, reply: false });
+  await daemon.commStop('target-a', 'ordinary turn content', 'stop-one-way', null);
+  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_callback_asserted')).toHaveLength(0);
+});
+
 test('explicit reply wins over stop fallback and produces exactly one callback', async () => {
   const { store, daemon } = await setup();
   const ask = await daemon.comm({ schema_version: 7, source_instance_id: 'source', target: 'target-a', message: 'question', ask: true, reply: false });
