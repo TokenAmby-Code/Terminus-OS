@@ -28,13 +28,14 @@ test("published replay JSON Schema and OpenAPI stay pinned to the runtime contra
     "myGithubToken",
     "github_token_value",
     "authorization_header",
+    "passwd",
   ]) {
     expect(new RegExp(schema.$defs.safeObject.propertyNames.not.pattern).test(credentialName)).toBe(true);
   }
   expect(new RegExp(schema.$defs.safeObject.propertyNames.not.pattern).test("comment_author")).toBe(false);
   expect(JSON.stringify(schema)).toContain("\\\\s+");
   const openapi = await Bun.file(new URL("../openapi/replay-v1.yaml", import.meta.url)).text();
-  for (const path of ["/v1/events:", "/v1/replays/admit:", "/v1/replays/{replay_id}:", "/v1/replays/{replay_id}/events:", "/ingress/github:"]) {
+  for (const path of ["/v1/events:", "/v1/replays:", "/v1/replays/admit:", "/v1/replays/{replay_id}:", "/v1/replays/{replay_id}/events:", "/ingress/github:"]) {
     expect(openapi).toContain(path);
   }
   for (const contract of ["ReplayAdmission:", "ReplayEventInput:", "ReplayEventRecord:", "ReplayProjection:", "ReplayEventPage:", "GithubEventName:"]) {

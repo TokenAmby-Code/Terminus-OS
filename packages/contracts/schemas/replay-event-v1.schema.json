@@ -50,7 +50,7 @@
       "type": "object",
       "propertyNames": {
         "not": {
-          "pattern": "[Aa][Uu][Tt][Hh](?:[Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Ee][Nn][Tt][Ii][Cc][Aa][Tt][Ii][Oo][Nn])|(^|[_-])[Aa][Uu][Tt][Hh]($|[_-])|auth[A-Z]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Pp][Aa][Ss][Ss](?:[Ww][Oo][Rr][Dd])?|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy]|[Cc][Ll][Ii][Ee][Nn][Tt][_-]?[Kk][Ee][Yy]|[Ss][Ii][Gg][Nn][Ii][Nn][Gg][_-]?[Kk][Ee][Yy]"
+          "pattern": "[Aa][Uu][Tt][Hh](?:[Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]|[Ee][Nn][Tt][Ii][Cc][Aa][Tt][Ii][Oo][Nn])|(^|[_-])[Aa][Uu][Tt][Hh]($|[_-])|auth[A-Z]|[Cc][Oo][Oo][Kk][Ii][Ee]|[Cc][Rr][Ee][Dd][Ee][Nn][Tt][Ii][Aa][Ll]|[Pp][Aa][Ss][Ss](?:[Ww][Oo][Rr][Dd]|[Ww][Dd])?|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]|[Aa][Cc][Cc][Ee][Ss][Ss][_-]?[Kk][Ee][Yy]|[Cc][Ll][Ii][Ee][Nn][Tt][_-]?[Kk][Ee][Yy]|[Ss][Ii][Gg][Nn][Ii][Nn][Gg][_-]?[Kk][Ee][Yy]"
         }
       },
       "additionalProperties": { "$ref": "#/$defs/safeValue" }

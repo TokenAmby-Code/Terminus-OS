@@ -57,7 +57,7 @@ const server = makeServer({
 dispatcher.start();
 replayDispatcher.start();
 
-console.log(
+console.info(
   JSON.stringify({
     level: 'info',
     event: 'listening',
@@ -69,12 +69,11 @@ console.log(
 );
 
 async function shutdown() {
-  // Graceful, but bounded: stop scheduling deliveries, let in-flight requests
-  // finish, never let a stuck request block termination. The delivery cursor
-  // is durable — an interrupted retry simply re-runs after restart.
-  dispatcher.stop();
-  replayDispatcher.stop();
-  await Promise.race([server.stop(), Bun.sleep(5_000)]);
+  // Stop scheduling and await the bounded transport requests already in flight.
+  // Their timeout is the configured transport contract, not a second shutdown
+  // timer. Durable delivery state reconciles any process-level interruption.
+  await Promise.all([dispatcher.stop(), replayDispatcher.stop()]);
+  await server.stop();
   await store.close();
   await replayStore.close();
   process.exit(0);

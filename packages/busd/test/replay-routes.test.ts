@@ -14,7 +14,7 @@ function input() {
       replay_id: replayId,
       event_id: eventId,
       event_type: "githubd.command_accepted",
-      schema_version: 1,
+      schema_version: 1 as const,
       source: "githubd",
       provenance: { machine: "test", ingress: "command" },
       causation_event_id: null,
@@ -53,7 +53,7 @@ test("replay HTTP admission, append, inspection, and unfinished reconciliation",
     expect(response.status).toBe(200);
 
     response = await fetch(`${base}/v1/replays?source=githubd&unfinished=true`);
-    expect(await response.json()).toEqual({ replays: [replayId] });
+    expect(await response.json()).toEqual({ replays: [replayId], next_cursor: null });
 
     response = await fetch(`${base}/v1/replays/${replayId}/events`, {
       method: "POST",
@@ -111,6 +111,48 @@ test("event feed refuses invalid filters and unknown cursors", async () => {
   }
 });
 
+test("unfinished replay reconciliation is bounded and cursor-paginated", async () => {
+  const replayStore = new MemoryReplayStore();
+  const server = makeServer({
+    bind: "127.0.0.1",
+    port: 0,
+    store: new MemoryBusStore(),
+    replayStore,
+    onAppend: () => {},
+    build: { version: "test", git_sha: "test", bun: Bun.version },
+    machine: "test",
+  });
+  const firstReplay = "11111111-1111-4111-8111-111111111111";
+  const secondReplay = "22222222-2222-4222-8222-222222222222";
+  for (const [currentReplay, currentEvent] of [
+    [firstReplay, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"],
+    [secondReplay, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"],
+  ] as const) {
+    await replayStore.admit({
+      ...input(),
+      replay_id: currentReplay,
+      request_hash: currentReplay === firstReplay ? "1".repeat(64) : "2".repeat(64),
+      event: { ...input().event, replay_id: currentReplay, event_id: currentEvent },
+    });
+  }
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    let response = await fetch(`${base}/v1/replays?source=githubd&unfinished=true&limit=1`);
+    expect(await response.json()).toEqual({ replays: [firstReplay], next_cursor: firstReplay });
+    response = await fetch(
+      `${base}/v1/replays?source=githubd&unfinished=true&limit=1&after=${firstReplay}`,
+    );
+    expect(await response.json()).toEqual({ replays: [secondReplay], next_cursor: null });
+
+    expect((await fetch(`${base}/v1/replays?source=githubd&unfinished=true&limit=0`)).status).toBe(422);
+    expect((await fetch(
+      `${base}/v1/replays?source=githubd&unfinished=true&after=${crypto.randomUUID()}`,
+    )).status).toBe(422);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("changed request hash and changed event identity conflict without mutation", async () => {
   const replayStore = new MemoryReplayStore();
   const server = makeServer({
@@ -131,6 +173,64 @@ test("changed request hash and changed event identity conflict without mutation"
     });
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toEqual({ ok: false, error: "idempotency_conflict" });
+
+    const identityConflict = await fetch(`${base}/v1/replays/${replayId}/events`, {
+      method: "POST",
+      body: JSON.stringify({ event: { ...input().event, payload: { operation: "changed" } } }),
+    });
+    expect(identityConflict.status).toBe(409);
+    expect(await identityConflict.json()).toEqual({ ok: false, error: "event_identity_conflict" });
+
+    const otherReplay = "44444444-4444-4444-8444-444444444444";
+    const admissionConflict = await fetch(`${base}/v1/replays/admit`, {
+      method: "POST",
+      body: JSON.stringify({
+        ...input(),
+        replay_id: otherReplay,
+        request_hash: "c".repeat(64),
+        event: { ...input().event, replay_id: otherReplay },
+      }),
+    });
+    expect(admissionConflict.status).toBe(409);
+    expect(await admissionConflict.json()).toEqual({ ok: false, error: "event_identity_conflict" });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("replay routes distinguish unknown streams from path and body mismatches", async () => {
+  const replayStore = new MemoryReplayStore();
+  const server = makeServer({
+    bind: "127.0.0.1",
+    port: 0,
+    store: new MemoryBusStore(),
+    replayStore,
+    onAppend: () => {},
+    build: { version: "test", git_sha: "test", bun: Bun.version },
+    machine: "test",
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const unknownReplay = "33333333-3333-4333-8333-333333333333";
+  try {
+    expect((await fetch(`${base}/v1/replays/${unknownReplay}`)).status).toBe(404);
+
+    let response = await fetch(`${base}/v1/replays/${unknownReplay}/events`, {
+      method: "POST",
+      body: JSON.stringify({
+        event: {
+          ...input().event,
+          replay_id: unknownReplay,
+          event_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        },
+      }),
+    });
+    expect(response.status).toBe(404);
+
+    response = await fetch(`${base}/v1/replays/${unknownReplay}/events`, {
+      method: "POST",
+      body: JSON.stringify({ event: input().event }),
+    });
+    expect(response.status).toBe(422);
   } finally {
     server.stop(true);
   }

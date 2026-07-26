@@ -58,6 +58,7 @@ describe("generic replay wire contract", () => {
       "client_secret_value",
       "authorization_header",
       "password_value",
+      "passwd",
     ]) {
       expect(ReplayEventInputSchema.safeParse({
         ...base,

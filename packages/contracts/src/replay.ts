@@ -118,3 +118,9 @@ export const ReplayEventPageSchema = z.object({
   next_cursor: EventIdSchema.nullable(),
 }).strict();
 export type ReplayEventPage = z.infer<typeof ReplayEventPageSchema>;
+
+export const UnfinishedReplayPageSchema = z.object({
+  replays: z.array(ReplayIdSchema).max(500),
+  next_cursor: ReplayIdSchema.nullable(),
+}).strict();
+export type UnfinishedReplayPage = z.infer<typeof UnfinishedReplayPageSchema>;

@@ -37,6 +37,8 @@ paths:
       parameters:
         - { name: source, in: query, required: true, schema: { type: string, minLength: 1 } }
         - { name: unfinished, in: query, required: true, schema: { const: "true" } }
+        - { name: after, in: query, schema: { $ref: "#/components/schemas/LowercaseUuid" } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 200 } }
       responses:
         "200":
           description: Rebuildable unfinished replay index
@@ -44,11 +46,17 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [replays]
+                additionalProperties: false
+                required: [replays, next_cursor]
                 properties:
                   replays:
                     type: array
+                    maxItems: 500
                     items: { $ref: "#/components/schemas/LowercaseUuid" }
+                  next_cursor:
+                    anyOf:
+                      - { type: "null" }
+                      - { $ref: "#/components/schemas/LowercaseUuid" }
   /v1/replays/{replay_id}:
     parameters:
       - $ref: "#/components/parameters/ReplayId"
@@ -131,6 +139,9 @@ components:
             - { $ref: "#/components/schemas/SafeFacts" }
             - type: object
               required: [machine, ingress]
+              properties:
+                machine: { type: string, minLength: 1 }
+                ingress: { type: string, minLength: 1 }
         causation_event_id:
           anyOf:
             - { type: "null" }

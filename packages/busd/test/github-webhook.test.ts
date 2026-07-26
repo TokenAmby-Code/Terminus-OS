@@ -119,6 +119,51 @@ test("invalid signature and unsupported event refuse before publication", async 
   }
 });
 
+test("missing and malformed signatures are unauthorized before publication", async () => {
+  const { replayStore, server } = fixture();
+  const baseHeaders = {
+    "x-github-delivery": delivery,
+    "x-github-event": "pull_request",
+  };
+  try {
+    let response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
+      method: "POST",
+      headers: baseHeaders,
+      body: payload,
+    });
+    expect(response.status).toBe(401);
+
+    response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
+      method: "POST",
+      headers: { ...baseHeaders, "x-hub-signature-256": "sha256=abcd" },
+      body: payload,
+    });
+    expect(response.status).toBe(401);
+    expect(await replayStore.projection(delivery)).toBeNull();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("prototype property names are not accepted as GitHub event names", async () => {
+  const { replayStore, server } = fixture();
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
+      method: "POST",
+      headers: {
+        "x-github-delivery": delivery,
+        "x-github-event": "constructor",
+        "x-hub-signature-256": await signature(payload),
+      },
+      body: payload,
+    });
+    expect(response.status).toBe(422);
+    expect(await replayStore.projection(delivery)).toBeNull();
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("check producer identity is mandatory and non-PR issue comments are refused", async () => {
   const { replayStore, server } = fixture();
   try {

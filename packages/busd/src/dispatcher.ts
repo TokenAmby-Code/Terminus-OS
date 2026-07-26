@@ -11,8 +11,6 @@ import {
   type BusSubscriptionRow,
 } from "@terminus-os/contracts";
 import {
-  publicationTaskIdentity,
-  type PublicationTaskIdentity,
   type ReplayStore,
 } from "./replay-store.ts";
 import type { BusStore } from "./store.ts";
@@ -27,6 +25,7 @@ type Lane = { running: boolean; wakeRequested: boolean };
 
 export class Dispatcher {
   private lanes = new Map<string, Lane>();
+  private inFlight = new Set<Promise<void>>();
   private stopped = false;
   private fetchImpl: typeof fetch;
 
@@ -39,11 +38,27 @@ export class Dispatcher {
   }
 
   wake(): void {
-    void this.pass();
+    if (this.stopped) return;
+    this.track(this.pass());
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
+    await this.settled();
+  }
+
+  async settled(): Promise<void> {
+    while (this.inFlight.size) {
+      await Promise.all([...this.inFlight]);
+    }
+  }
+
+  private track(promise: Promise<void>): void {
+    this.inFlight.add(promise);
+    void promise.then(
+      () => { this.inFlight.delete(promise); },
+      () => { this.inFlight.delete(promise); },
+    );
   }
 
   private async pass(): Promise<void> {
@@ -55,10 +70,12 @@ export class Dispatcher {
       console.error(JSON.stringify({ level: "error", event: "subscriptions_unreadable", error_code: "store_unavailable" }));
       return;
     }
+    if (this.stopped) return;
     for (const subscription of subscriptions) this.runLane(subscription);
   }
 
   private runLane(subscription: BusSubscriptionRow): void {
+    if (this.stopped) return;
     const lane = this.lanes.get(subscription.name) ?? { running: false, wakeRequested: false };
     this.lanes.set(subscription.name, lane);
     if (lane.running) {
@@ -66,7 +83,7 @@ export class Dispatcher {
       return;
     }
     lane.running = true;
-    void this.drain(subscription)
+    const task = this.drain(subscription)
       .catch(() => {
         console.error(JSON.stringify({
           level: "error",
@@ -82,6 +99,7 @@ export class Dispatcher {
           this.runLane(subscription);
         }
       });
+    this.track(task);
   }
 
   private async drain(subscription: BusSubscriptionRow): Promise<void> {
@@ -113,7 +131,7 @@ export class Dispatcher {
         }
         await this.store.advanceCursor(subscription.name, event.seq);
         acknowledged = event.seq;
-        console.log(JSON.stringify({
+        console.info(JSON.stringify({
           level: "info",
           event: "bus_delivered",
           subscription: subscription.name,
@@ -134,7 +152,7 @@ export class Dispatcher {
 }
 
 export class ReplayDispatcher {
-  private running = false;
+  private current: Promise<void> | null = null;
   private wakeRequested = false;
   private stopped = false;
   private fetchImpl: typeof fetch;
@@ -149,36 +167,39 @@ export class ReplayDispatcher {
 
   wake(): void {
     if (this.stopped) return;
-    if (this.running) {
+    if (this.current) {
       this.wakeRequested = true;
       return;
     }
-    this.running = true;
-    void this.reconcile()
+    const task = this.reconcile()
       .catch(() => {
         console.error(JSON.stringify({ level: "error", event: "replay_delivery_error", error_code: "store_unavailable" }));
       })
       .finally(() => {
-        this.running = false;
+        this.current = null;
         if (this.wakeRequested && !this.stopped) {
           this.wakeRequested = false;
           this.wake();
         }
       });
+    this.current = task;
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
+    await this.settled();
+  }
+
+  async settled(): Promise<void> {
+    while (this.current) await this.current;
   }
 
   private async reconcile(): Promise<void> {
-    const attempted = new Set<PublicationTaskIdentity>();
+    const attemptWatermark = await this.store.deliveryAttemptWatermark();
     while (!this.stopped) {
-      const tasks = await this.store.pendingDeliveries(this.opts.batchSize, attempted);
+      const tasks = await this.store.pendingDeliveries(this.opts.batchSize, attemptWatermark);
       if (!tasks.length) return;
       for (const task of tasks) {
-        const identity = publicationTaskIdentity(task.event.event_id, task.subscription);
-        attempted.add(identity);
         const outcome = await deliver(this.fetchImpl, task.delivery_url, {
           schema_version: REPLAY_SCHEMA_VERSION,
           subscription: task.subscription,
@@ -200,9 +221,17 @@ export class ReplayDispatcher {
             detail: outcome.detail,
             state: "externally_blocked",
           }));
+        } else {
+          console.info(JSON.stringify({
+            level: "info",
+            event: "replay_delivered",
+            replay_id: task.event.replay_id,
+            event_id: task.event.event_id,
+            subscription: task.subscription,
+            event_type: task.event.event_type,
+          }));
         }
       }
-      if (tasks.length < this.opts.batchSize) return;
     }
   }
 }
@@ -227,6 +256,7 @@ async function deliver(
       ...(unix ? { unix } : {}),
     };
     const response = await fetchImpl(requestUrl, init as RequestInit);
+    if (response.body) await response.body.cancel();
     return response.ok ? { ok: true } : { ok: false, detail: `status_${response.status}` };
   } catch (error) {
     return {

@@ -16,8 +16,6 @@ function busEvent(eventType = "hook.stop"): BusEventInput {
   };
 }
 
-const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
-
 test("legacy bus delivery is ordered and an outage becomes blocked until a new wake", async () => {
   const store = new MemoryBusStore();
   store.setSubscription({ name: "consumer", delivery_url: URL, event_pattern: "hook.%", active: true });
@@ -33,16 +31,16 @@ test("legacy bus delivery is ordered and an outage becomes blocked until a new w
   }) as typeof fetch;
   const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
   dispatcher.start();
-  await settle();
+  await dispatcher.settled();
   expect(delivered).toEqual([1]);
   expect(await store.cursor("consumer")).toBe(0);
 
   available = true;
   dispatcher.wake();
-  await settle();
+  await dispatcher.settled();
   expect(delivered).toEqual([1, 1, 2]);
   expect(await store.cursor("consumer")).toBe(2);
-  dispatcher.stop();
+  await dispatcher.stop();
 });
 
 test("startup reconciliation resumes from the durable cursor without a standing checker", async () => {
@@ -58,9 +56,9 @@ test("startup reconciliation resumes from the durable cursor without a standing 
   }) as typeof fetch;
   const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
   dispatcher.start();
-  await settle();
+  await dispatcher.settled();
   expect(delivered).toEqual([2]);
-  dispatcher.stop();
+  await dispatcher.stop();
 });
 
 test("delivery can target a protected Unix socket without opening a loopback port", async () => {
@@ -94,9 +92,9 @@ test("delivery can target a protected Unix socket without opening a loopback por
   }) as typeof fetch;
   const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
   dispatcher.start();
-  await settle();
+  await dispatcher.settled();
   expect(calls).toEqual([{ url: "http://localhost/event", unix: "/run/githubd/ghd.sock" }]);
-  dispatcher.stop();
+  await dispatcher.stop();
 });
 
 test("replay outbox records failure durably and retries the same event identity only on a wake", async () => {
@@ -126,19 +124,19 @@ test("replay outbox records failure durably and retries the same event identity 
   }) as typeof fetch;
   const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
   dispatcher.start();
-  await settle();
+  await dispatcher.settled();
   expect(identities).toEqual([admission.event.event_id]);
   expect((await store.projection(admission.replay_id))?.deliveries[0]?.status).toBe("failed");
 
   available = true;
   dispatcher.wake();
-  await settle();
+  await dispatcher.settled();
   expect(identities).toEqual([admission.event.event_id, admission.event.event_id]);
   expect((await store.projection(admission.replay_id))?.deliveries[0]).toMatchObject({
     status: "delivered",
     attempts: 2,
   });
-  dispatcher.stop();
+  await dispatcher.stop();
 });
 
 test("one blocked replay delivery does not strand an unrelated batch", async () => {
@@ -168,12 +166,12 @@ test("one blocked replay delivery does not strand an unrelated batch", async () 
   }) as typeof fetch;
   const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 1, fetchImpl });
   dispatcher.start();
-  await settle();
+  await dispatcher.settled();
   expect(delivered).toEqual(["http://blocked/event", "http://healthy/event"]);
   const projection = await store.projection(admission.replay_id);
   expect(projection?.deliveries.find((item) => item.subscription === "blocked")?.status).toBe("failed");
   expect(projection?.deliveries.find((item) => item.subscription === "healthy")?.status).toBe("delivered");
-  dispatcher.stop();
+  await dispatcher.stop();
 });
 
 test("worker loss after an external 2xx redelivers the same immutable event identity", async () => {
@@ -211,13 +209,57 @@ test("worker loss after an external 2xx redelivers the same immutable event iden
   }) as typeof fetch;
   const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 10, fetchImpl });
   dispatcher.start();
-  await settle();
+  await dispatcher.settled();
   dispatcher.wake();
-  await settle();
+  await dispatcher.settled();
   expect(identities).toEqual([admission.event.event_id, admission.event.event_id]);
   expect((await store.projection(admission.replay_id))?.deliveries[0]).toMatchObject({
     status: "delivered",
     attempts: 1,
   });
-  dispatcher.stop();
+  await dispatcher.stop();
+});
+
+test("graceful stop awaits an admitted replay delivery before closing its store boundary", async () => {
+  const store = new MemoryReplayStore(() => "2026-07-26T17:00:01.000Z");
+  store.setSubscription({ name: "manager", delivery_url: URL, event_pattern: "githubd.%", active: true });
+  const admission: ReplayAdmission = {
+    replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+    request_hash: "a".repeat(64),
+    event: {
+      replay_id: "d9428888-122b-4c26-b269-0a3f62f4f06b",
+      event_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+      event_type: "githubd.command_accepted",
+      schema_version: 1,
+      source: "githubd",
+      provenance: { machine: "test", ingress: "command" },
+      causation_event_id: null,
+      occurred_at: "2026-07-26T17:00:00.000Z",
+      payload: {},
+    },
+  };
+  await store.admit(admission);
+
+  let release!: () => void;
+  let deliveryStarted!: () => void;
+  const started = new Promise<void>((resolve) => { deliveryStarted = resolve; });
+  const response = new Promise<Response>((resolve) => {
+    release = () => resolve(new Response("{}", { status: 200 }));
+  });
+  const fetchImpl = (async () => {
+    deliveryStarted();
+    return response;
+  }) as unknown as typeof fetch;
+  const dispatcher = new ReplayDispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 10, fetchImpl });
+  dispatcher.start();
+  await started;
+
+  let stopped = false;
+  const stopping = dispatcher.stop().then(() => { stopped = true; });
+  await Promise.resolve();
+  expect(stopped).toBe(false);
+  release();
+  await stopping;
+  expect(stopped).toBe(true);
+  expect((await store.projection(admission.replay_id))?.deliveries[0]?.status).toBe("delivered");
 });

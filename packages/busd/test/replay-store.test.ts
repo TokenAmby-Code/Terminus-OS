@@ -3,9 +3,11 @@ import type { SQL } from "bun";
 import { DbEndpoint, connectDb, type DbEndpointT } from "@terminus-os/db";
 import type { ReplayAdmission, ReplayEventInput } from "@terminus-os/contracts";
 import {
+  EventIdentityConflict,
   IdempotencyConflict,
   MemoryReplayStore,
   PostgresReplayStore,
+  UnknownSubscription,
   foldReplay,
 } from "../src/replay-store.ts";
 
@@ -55,6 +57,19 @@ describe("MemoryReplayStore", () => {
     await expect(store.admit(admission({ request_hash: "b".repeat(64) })))
       .rejects.toBeInstanceOf(IdempotencyConflict);
     expect((await store.projection(replayId))?.events).toHaveLength(1);
+  });
+
+  test("one event identity cannot be admitted into two replay streams", async () => {
+    const store = new MemoryReplayStore();
+    await store.admit(admission());
+    const otherReplay = "22222222-2222-4222-8222-222222222222";
+    await expect(store.admit({
+      ...admission(),
+      replay_id: otherReplay,
+      request_hash: "b".repeat(64),
+      event: event({ replay_id: otherReplay }),
+    })).rejects.toBeInstanceOf(EventIdentityConflict);
+    expect(await store.projection(otherReplay)).toBeNull();
   });
 
   test("append assigns per-replay sequence and event identity is idempotent", async () => {
@@ -115,11 +130,32 @@ describe("MemoryReplayStore", () => {
       event_type: "githubd.command_progressed",
       causation_event_id: firstEventId,
     }));
-    expect(await store.unfinished("githubd")).toEqual([replayId]);
-    expect((await store.pendingDeliveries(10)).map((task) => task.event.sequence)).toEqual([1]);
-    expect((await store.pendingDeliveries(10)).map((task) => task.event.sequence)).toEqual([1]);
+    expect(await store.unfinished({ source: "githubd", after: null, limit: 10 }))
+      .toEqual({ replays: [replayId], next_cursor: null });
+    let watermark = await store.deliveryAttemptWatermark();
+    expect((await store.pendingDeliveries(10, watermark)).map((task) => task.event.sequence)).toEqual([1]);
+    expect((await store.pendingDeliveries(10, watermark)).map((task) => task.event.sequence)).toEqual([1]);
     await store.recordDelivery(firstEventId, "manager", true, null);
-    expect((await store.pendingDeliveries(10)).map((task) => task.event.sequence)).toEqual([2]);
+    watermark = await store.deliveryAttemptWatermark();
+    expect((await store.pendingDeliveries(10, watermark)).map((task) => task.event.sequence)).toEqual([2]);
+  });
+
+  test("store boundaries reject invalid limits and normalize unknown delivery identities", async () => {
+    const store = new MemoryReplayStore();
+    await store.admit(admission());
+    await expect(store.events({
+      after: null,
+      source: null,
+      eventTypePrefix: null,
+      limit: 0,
+    })).rejects.toBeInstanceOf(RangeError);
+    await expect(store.unfinished({
+      source: "githubd",
+      after: null,
+      limit: 501,
+    })).rejects.toBeInstanceOf(RangeError);
+    await expect(store.recordDelivery(firstEventId, "missing", true, null))
+      .rejects.toBeInstanceOf(UnknownSubscription);
   });
 });
 
@@ -167,6 +203,11 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
   });
 
   afterAll(async () => {
+    await raw?.unsafe(`
+      UPDATE bus.subscriptions
+      SET active = false
+      WHERE name IN ('replay-test-manager', 'managed-test-beginning', 'managed-test-now')
+    `);
     await store?.close();
     await raw?.close();
   });
@@ -181,6 +222,18 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
     expect(accepted.created).toBe(true);
     await expect(store.admit({ ...pgAdmission, request_hash: "b".repeat(64) }))
       .rejects.toBeInstanceOf(IdempotencyConflict);
+    const collisionReplay = crypto.randomUUID();
+    await expect(store.admit({
+      ...admission(),
+      replay_id: collisionReplay,
+      request_hash: "c".repeat(64),
+      event: event({
+        replay_id: collisionReplay,
+        event_id: pgFirstEventId,
+        source: `githubd-integration-${collisionReplay}`,
+      }),
+    })).rejects.toBeInstanceOf(EventIdentityConflict);
+    expect(await store.projection(collisionReplay)).toBeNull();
     await store.append(event({
       replay_id: pgReplayId,
       event_id: crypto.randomUUID(),
@@ -196,11 +249,13 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
           JOIN replay.events e ON e.event_id = i.event_id
           WHERE e.replay_id = ${pgReplayId}) AS intents`) as { events: number; intents: number }[];
     expect(counts[0]).toEqual({ events: 2, intents: 2 });
-    const pending = (await store.pendingDeliveries(100))
+    let watermark = await store.deliveryAttemptWatermark();
+    const pending = (await store.pendingDeliveries(100, watermark))
       .filter((task) => task.event.replay_id === pgReplayId && task.subscription === "replay-test-manager");
     expect(pending.map((task) => task.event.sequence)).toEqual([1]);
     await store.recordDelivery(pending[0]!.event.event_id, "replay-test-manager", true, null);
-    const next = (await store.pendingDeliveries(100))
+    watermark = await store.deliveryAttemptWatermark();
+    const next = (await store.pendingDeliveries(100, watermark))
       .filter((task) => task.event.replay_id === pgReplayId && task.subscription === "replay-test-manager");
     expect(next.map((task) => task.event.sequence)).toEqual([2]);
     const projection = await store.projection(pgReplayId);
@@ -304,6 +359,35 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
       await raw`DROP TRIGGER replay_test_reject_publication ON replay.publication_intents`;
       await raw`DROP FUNCTION replay.test_reject_publication()`;
     }
+  });
+
+  test("event feed treats a prefix underscore literally in PostgreSQL LIKE", async () => {
+    const prefixReplayId = crypto.randomUUID();
+    const first = crypto.randomUUID();
+    await store.admit({
+      ...admission(),
+      replay_id: prefixReplayId,
+      event: event({
+        replay_id: prefixReplayId,
+        event_id: first,
+        event_type: "github.check_run",
+        source: `prefix-integration-${prefixReplayId}`,
+      }),
+    });
+    await store.append(event({
+      replay_id: prefixReplayId,
+      event_id: crypto.randomUUID(),
+      event_type: "github.checkxrun",
+      source: `prefix-integration-${prefixReplayId}`,
+      causation_event_id: first,
+    }));
+    const page = await store.events({
+      after: null,
+      source: `prefix-integration-${prefixReplayId}`,
+      eventTypePrefix: "github.check_",
+      limit: 10,
+    });
+    expect(page.events.map((item) => item.event_type)).toEqual(["github.check_run"]);
   });
 
   test("machine subscriptions converge transactionally without taking over operator rows", async () => {

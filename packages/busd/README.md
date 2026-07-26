@@ -25,7 +25,8 @@ restart.
 | `POST /v1/replays/admit` | bind a replay to its request hash and atomically append its first event |
 | `POST /v1/replays/<replay_id>/events` | append an immutable event and publication intent |
 | `GET /v1/replays/<replay_id>` | fold event and delivery state |
-| `GET /v1/replays?source=<service>&unfinished=true` | startup reconciliation index |
+| `GET /v1/replays?source=<service>&unfinished=true&limit=<n>&after=<replay_id>` | bounded, cursor-paginated startup reconciliation index |
+| `GET /v1/events?limit=<n>&after=<event_id>` | bounded immutable journal feed for projection rebuild |
 | `POST /ingress/github` | signature-verified, delivery-deduplicated GitHub event normalization |
 | `POST /ingress/hooks/<type>` | hook shim: one door per pinned vendor hook type (30), ALL consumed — journals `hook.<type>`. No 410 tail exists. |
 | `POST /ingress/events` | generic publish door (loopback emitters). `hook.*` is reserved and rejected here. |
@@ -50,10 +51,11 @@ SHA-bound policy.
 - **Subscribers MUST 2xx events they do not care about** (ack ≠ consume).
   Delivery is head-of-line per subscription — busd never skips — so a non-2xx
   on an irrelevant event wedges that subscriber's own lane (and only its own).
-- At-least-once: subscribers dedupe by `event_id`. Every failed and successful
-  attempt is durable and the projection is rebuildable. Protected local
-  consumers may use an `http+unix://<percent-encoded-absolute-socket>/path`
-  delivery URL instead of opening a TCP listener.
+- At-least-once: replay subscribers dedupe by `event_id`; legacy `bus.events`
+  subscribers dedupe by `seq`. Every replay delivery attempt is durable and
+  the projection is rebuildable. Protected local consumers may use an
+  `http+unix://<percent-encoded-absolute-socket>/path` delivery URL instead of
+  opening a TCP listener.
 - A failed delivery records `externally_blocked`; it is not followed by a sleep
   or repeated API request. A later event, explicit reconciliation wake, or
   startup reconciliation continues the durable intent.

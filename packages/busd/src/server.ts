@@ -21,17 +21,20 @@ import {
   BUS_SCHEMA_VERSION,
   BusPublishRequestSchema,
   HOOK_TYPES,
+  ReplayIdSchema,
   ReplayAdmissionSchema,
   ReplayAppendSchema,
   parseGithubNormalizedPayload,
   type GithubWebhookEvent,
   type BusHealth,
 } from '@terminus-os/contracts';
+import { z } from 'zod';
 import type { BusStore, Clock } from './store.ts';
 import {
   EventIdentityConflict,
   IdempotencyConflict,
   InvalidEventCursor,
+  InvalidReplayCursor,
   UnknownReplay,
   type ReplayStore,
 } from './replay-store.ts';
@@ -158,15 +161,16 @@ export function buildRoutes(deps: ServerDeps): Route[] {
         const deliveryId = req.headers.get('x-github-delivery');
         const githubEvent = req.headers.get('x-github-event');
         const signature = req.headers.get('x-hub-signature-256');
-        if (!deliveryId || !githubEvent || !signature) {
+        if (!deliveryId || !githubEvent) {
           return json({ ok: false, error: 'missing_github_webhook_identity' }, 400);
         }
+        if (!signature) return json({ ok: false, error: 'invalid_github_signature' }, 401);
         const raw = await readBodyBounded(req, GITHUB_WEBHOOK_BODY_LIMIT);
         if (raw === null) return json({ ok: false, error: 'github_webhook_too_large' }, 413);
         if (!await verifyGithubSignature(deps.githubWebhookSecret, raw, signature)) {
           return json({ ok: false, error: 'invalid_github_signature' }, 401);
         }
-        const eventType = GITHUB_EVENTS[githubEvent as GithubWebhookEvent];
+        const eventType = Object.hasOwn(GITHUB_EVENTS, githubEvent) ? GITHUB_EVENTS[githubEvent] : undefined;
         if (!eventType) return json({ ok: false, error: 'unsupported_github_event' }, 422);
         let document: Record<string, unknown>;
         try {
@@ -212,7 +216,7 @@ export function buildRoutes(deps: ServerDeps): Route[] {
           if (error instanceof IdempotencyConflict) {
             return json({ ok: false, error: 'github_delivery_conflict' }, 409);
           }
-          if (error instanceof Error && error.name === 'ZodError') {
+          if (error instanceof z.ZodError) {
             return json({ ok: false, error: 'invalid_github_delivery_identity' }, 422);
           }
           throw error;
@@ -256,10 +260,25 @@ export function buildRoutes(deps: ServerDeps): Route[] {
       handler: async (req) => {
         const url = new URL(req.url);
         const source = url.searchParams.get('source');
-        if (!source || url.searchParams.get('unfinished') !== 'true') {
+        const after = url.searchParams.get('after');
+        const rawLimit = url.searchParams.get('limit') ?? '200';
+        if (!source || url.searchParams.get('unfinished') !== 'true'
+            || !/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 500
+            || (after !== null && !ReplayIdSchema.safeParse(after).success)) {
           return json({ ok: false, error: 'invalid_replay_query' }, 422);
         }
-        return json({ replays: await deps.replayStore.unfinished(source) });
+        try {
+          return json(await deps.replayStore.unfinished({
+            source,
+            after,
+            limit: Number(rawLimit),
+          }));
+        } catch (error) {
+          if (error instanceof InvalidReplayCursor) {
+            return json({ ok: false, error: 'invalid_replay_cursor' }, 422);
+          }
+          throw error;
+        }
       },
     },
     {
@@ -278,6 +297,9 @@ export function buildRoutes(deps: ServerDeps): Route[] {
         } catch (error) {
           if (error instanceof IdempotencyConflict) {
             return json({ ok: false, error: 'idempotency_conflict' }, 409);
+          }
+          if (error instanceof EventIdentityConflict) {
+            return json({ ok: false, error: 'event_identity_conflict' }, 409);
           }
           throw error;
         }
@@ -512,7 +534,7 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   if (value && typeof value === 'object') {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, child]) => `${JSON.stringify(key)}:${canonicalJson(child)}`)
       .join(',')}}`;
   }
@@ -532,13 +554,14 @@ export function makeServer(opts: ServerDeps & { bind: string; port: number }): R
         if (!params) continue;
         try {
           return await route.handler(req, params);
-        } catch {
+        } catch (error) {
           // DB down lands here: 5xx, no fallback, no queueing outside the DB.
           console.error(JSON.stringify({
             level: 'error',
             event: 'handler_error',
             route: route.label,
             error_code: 'internal_error',
+            error_class: error instanceof Error ? error.name : 'NonError',
           }));
           return json({ ok: false, error: 'internal_error' }, 500);
         }
