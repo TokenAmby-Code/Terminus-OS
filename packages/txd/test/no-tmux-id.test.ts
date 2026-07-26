@@ -38,10 +38,10 @@ test('mutation ingress recursively rejects raw tmux ids before tmux or persisten
   // ingress-bus.test.ts.
   const paths = ['/agents/launch', '/agents/send', '/agents/close', '/agents/subscribe'];
   const valid = [
-    { seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' },
-    { target: 'palace:W', text: 'hello', schema_version: 6 },
-    { target: 'palace:W', schema_version: 6 },
-    { instance_id: 'i1', schema_version: 6, action: 'close' },
+    { seat_id: 'palace:W', schema_version: 7, identity: 'i1', persona: 'p', tint: '#1' },
+    { target: 'palace:W', text: 'hello', schema_version: 7 },
+    { target: 'palace:W', schema_version: 7 },
+    { instance_id: 'i1', schema_version: 7, action: 'close' },
   ];
   const attacks = [
     (body: Record<string, unknown>) => ({ ...body, metadata: { pane: '%91' } }),
@@ -96,7 +96,7 @@ test('handler errors are sanitized before structured logging', async () => {
     // Force a below-membrane adapter error containing a raw id without putting
     // that id in the request (request ingress must remain independently clean).
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/launch`, {
-      method: 'POST', body: JSON.stringify({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' }),
+      method: 'POST', body: JSON.stringify({ seat_id: 'palace:W', schema_version: 7, identity: 'i1', persona: 'p', tint: '#1' }),
     });
     expect(res.status).toBe(500);
     expect(lines).toHaveLength(1);
@@ -113,14 +113,14 @@ test('no tmux id appears in any /agents/*, /ingress/bus, /tmux/read, or /ctl res
   try {
     const post = (p: string, body: unknown) => fetch(`http://127.0.0.1:${srv.port}${p}`, { method: 'POST', body: JSON.stringify(body) });
     const bodies: unknown[] = [];
-    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' })).json());
-    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 6 })).json());
+    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 7, identity: 'i1', persona: 'p', tint: '#1' })).json());
+    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 7 })).json());
     bodies.push(await (await post('/ingress/bus', {
       schema_version: 1,
       subscription: 'txd',
       event: {
         seq: 1, event_type: 'hook.stop', source: 'claude',
-        payload: { instance_id: 'i1', schema_version: 6 },
+        payload: { instance_id: 'i1', schema_version: 7 },
         provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'test' },
         occurred_at: '2026-07-22T00:00:00.000Z', recorded_at: '2026-07-22T00:00:00.100Z',
       },
@@ -137,8 +137,8 @@ test('no tmux id appears in any /agents/*, /ingress/bus, /tmux/read, or /ctl res
 test('no tmux id lands in any persisted event payload', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
-  await d.launch({ seat_id: 'palace:W', schema_version: 6, identity: 'i1', persona: 'p', tint: '#1' });
-  await d.send({ target: 'palace:W', text: 'hi', schema_version: 6 });
+  await d.launch({ seat_id: 'palace:W', schema_version: 7, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.send({ target: 'palace:W', text: 'hi', schema_version: 7 });
   await d.reconcile();
   for (const e of await store.readAll()) {
     expect(findTmuxIdDeep(e.payload)).toBeNull();

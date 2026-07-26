@@ -40,6 +40,8 @@ import {
   type StopRefusal,
   type StopRefusalReason,
   type StopRequest,
+  type StaticLaunchHandshake,
+  type StaticLaunchHandshakeResponse,
   type SubscribeRequest,
   type SubscribeResponse,
   type TmuxLifecycleEventRequest,
@@ -48,7 +50,13 @@ import {
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections } from './projections.ts';
-import { isTxdPage, TXD_ESTATE, TXD_WINDOWS } from './estate.ts';
+import {
+  DECOMMISSIONED_COUNCIL_SEATS,
+  isTxdPage,
+  STATIC_PERSONAS,
+  TXD_ESTATE,
+  TXD_WINDOWS,
+} from './estate.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 
@@ -60,6 +68,13 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 type Now = () => string;
 type ScheduledCallback = () => void | Promise<void>;
 type Schedule = (callback: ScheduledCallback, delayMs: number) => void;
+export type StaticLaunchRuntime = {
+  agentWrapper: string;
+  personaWorkspaceRoot: string;
+  acknowledgeUrl: string;
+};
+
+const COUNCIL_MIGRATION_ID = 'council-static-personas';
 
 const scheduleGuardRelease: Schedule = (callback, delayMs) => {
   const timer = setTimeout(() => void callback(), delayMs);
@@ -77,6 +92,7 @@ export class Daemon {
     private schedule: Schedule = scheduleGuardRelease,
     private nowMs: () => number = Date.now,
     private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
+    private staticRuntime: StaticLaunchRuntime | null = null,
   ) {}
 
   /** Serialize a mutating op — the single-writer discipline. */
@@ -265,6 +281,24 @@ export class Daemon {
       // single-writer lock is held. No implicit handover: callers must close a
       // current binding before a different launch can claim either side.
       const proj = await this.projections();
+      if (proj.decommissionedSeats.has(req.seat_id)) {
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: `seat_decommissioned: ${req.seat_id}`,
+        };
+      }
+      if (STATIC_PERSONAS.some((declaration) => declaration.seat === req.seat_id)) {
+        return {
+          ok: false,
+          seat_id: req.seat_id,
+          handover: false,
+          missing_attestations: [],
+          reason: `static_seat_requires_handshake: ${req.seat_id}`,
+        };
+      }
       const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
       if (seatBinding) {
         const exactRepeat = seatBinding.instance_id === req.identity
@@ -358,8 +392,164 @@ export class Daemon {
   // `backfilled` = canonical pane already there but its event was missing;
   // `existing` = present AND attested. `failed` remains in the response contract
   // but shape failures throw before any event append: half-estates are refused.
-  constructEstate(): Promise<{ created: string[]; existing: string[]; backfilled: string[]; failed: string[] }> {
-    return this.locked(async () => {
+  async constructEstate(): Promise<{ created: string[]; existing: string[]; backfilled: string[]; failed: string[] }> {
+    const result = await this.locked(async () => {
+      const before = await this.store.readAll();
+      const lastMigrationRequest = before.findLast((event) =>
+        event.entity_id === COUNCIL_MIGRATION_ID && event.event_type === 'estate.topology_migration_requested',
+      );
+      const lastMigrationCompletion = before.findLast((event) =>
+        event.entity_id === COUNCIL_MIGRATION_ID && event.event_type === 'estate.topology_migration_completed',
+      );
+      let pendingMigration = lastMigrationRequest !== undefined
+        && (lastMigrationCompletion === undefined || lastMigrationRequest.seq > lastMigrationCompletion.seq);
+      const generation = await this.tmux.estateGeneration();
+      if (generation === 'council-mechanicus' && !pendingMigration) {
+        await this.store.append({
+          entity_type: 'estate',
+          entity_id: COUNCIL_MIGRATION_ID,
+          event_type: 'estate.topology_migration_requested',
+          payload: { from: 'council-mechanicus', to: 'council' },
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+        pendingMigration = true;
+      }
+      if (generation === 'migration-interrupted' && !pendingMigration) {
+        throw new Error('txd refused unrequested interrupted Council topology migration');
+      }
+      if (pendingMigration) {
+        const bindings = (await this.projections()).currentBindings.filter((binding) =>
+          binding.seat_id.startsWith('council:') || binding.seat_id.startsWith('mechanicus:'),
+        );
+        if (!(await this.tmux.migrateCouncil(true))) throw new Error('txd failed Council topology migration');
+        const occurred_at = this.now();
+        const provenance = this.prov('observer', null);
+        const inputs: EventInput[] = [];
+        for (const binding of bindings) {
+          if (binding.instance_id) {
+            inputs.push({
+              entity_type: 'instance',
+              entity_id: binding.instance_id,
+              event_type: 'reg.retired',
+              payload: {},
+              provenance,
+              occurred_at,
+            });
+          }
+          inputs.push({
+            entity_type: 'seat',
+            entity_id: binding.seat_id,
+            event_type: 'reg.process_reaped',
+            payload: { instance_id: binding.instance_id },
+            provenance,
+            occurred_at,
+          });
+          inputs.push({
+            entity_type: 'seat',
+            entity_id: binding.seat_id,
+            event_type: 'reg.seat_cleared',
+            payload: {},
+            provenance,
+            occurred_at,
+          });
+        }
+        for (const seat of DECOMMISSIONED_COUNCIL_SEATS) {
+          inputs.push({
+            entity_type: 'seat',
+            entity_id: seat,
+            event_type: 'reg.seat_decommissioned',
+            payload: { migration_id: COUNCIL_MIGRATION_ID },
+            provenance,
+            occurred_at,
+          });
+        }
+        inputs.push({
+          entity_type: 'estate',
+          entity_id: COUNCIL_MIGRATION_ID,
+          event_type: 'estate.topology_migration_completed',
+          payload: { canonical_seats: TXD_ESTATE.length },
+          provenance,
+          occurred_at,
+        });
+        await this.store.appendAll(inputs);
+      } else if (generation === 'foreign') {
+        throw new Error('txd refused non-canonical existing tmux estate');
+      }
+
+      // Boot-observed Council damage must enter the same durable page-reset
+      // state machine as lifecycle ingress before any physical repair occurs.
+      // An empty estate is constructed below; there is no old page to retire.
+      if (generation !== 'empty') {
+        const expectedCouncil = [...TXD_WINDOWS.council].sort();
+        const liveCouncil = (await this.tmux.listSeats())
+          .filter((seat) => seat.seat_id.startsWith('council:') && seat.pane === 'live')
+          .map((seat) => seat.seat_id)
+          .sort();
+        const councilHealthy = liveCouncil.length === expectedCouncil.length
+          && liveCouncil.every((seat, index) => seat === expectedCouncil[index]);
+        if (!councilHealthy) {
+          const rotationId = crypto.randomUUID();
+          await this.store.append({
+            entity_type: 'estate',
+            entity_id: rotationId,
+            event_type: 'estate.scoped_reset_requested',
+            payload: {
+              scope: 'page',
+              seats: [...TXD_WINDOWS.council],
+              force: true,
+              bound_seats: (await this.projections()).currentBindings
+                .filter((binding) => binding.seat_id.startsWith('council:'))
+                .map((binding) => binding.seat_id)
+                .sort(),
+              foreground_workloads: [],
+              trigger: 'boot-observer',
+            },
+            provenance: this.prov('observer', null),
+            occurred_at: this.now(),
+          });
+        }
+      }
+
+      // A Council reset is a page-total volatile-memory wipe. If txd died
+      // after recording the request (at any point through binding retirement),
+      // replay the physical reconstruction and commit both retirements plus
+      // completion in one event transaction before exposing the new page.
+      const resetEvents = await this.store.readAll();
+      const completedResets = new Set(resetEvents
+        .filter((event) =>
+          event.event_type === 'estate.scoped_reset_completed'
+          || event.event_type === 'estate.scoped_reset_failed',
+        )
+        .map((event) => event.entity_id));
+      const pendingCouncilReset = resetEvents.findLast((event) =>
+        event.event_type === 'estate.scoped_reset_requested'
+        && event.payload.scope === 'page'
+        && event.payload.seats instanceof Array
+        && event.payload.seats.includes('council:custodes')
+        && !completedResets.has(event.entity_id),
+      );
+      if (pendingCouncilReset) {
+        if (!(await this.tmux.rebuildPage('council'))) {
+          throw new Error('txd failed to resume pending Council page reconstruction');
+        }
+        const bindings = (await this.projections()).currentBindings
+          .filter((binding) => binding.seat_id.startsWith('council:'));
+        const occurred_at = this.now();
+        const inputs = bindings.flatMap((binding) =>
+          this.resetBindingInputs(binding, null, occurred_at),
+        );
+        inputs.push({
+          entity_type: 'estate',
+          entity_id: pendingCouncilReset.entity_id,
+          event_type: 'estate.scoped_reset_completed',
+          payload: pendingCouncilReset.payload,
+          provenance: this.prov('observer', null),
+          occurred_at,
+        });
+        await this.store.appendAll(inputs);
+      }
+
       // Construction is all-or-nothing below the membrane: create on an empty
       // socket, accept the exact canonical shape, refuse every other estate.
       const estate = await this.tmux.ensureEstate();
@@ -371,11 +561,10 @@ export class Daemon {
         const page = binding.seat_id.split(':', 1)[0];
         return page !== undefined && isTxdPage(page) && rebuiltPages.has(page);
       });
-      for (const binding of bindings) {
-        if (!(await this.recordResetBinding(binding, null))) {
-          throw new Error(`boot page reconstruction attestation failed for ${binding.seat_id}`);
-        }
-      }
+      const bootRetirements = bindings.flatMap((binding) =>
+        this.resetBindingInputs(binding, null, this.now()),
+      );
+      if (bootRetirements.length > 0) await this.store.appendAll(bootRetirements);
       // Seats that already carry a `reg.pane_created` fact. A prior boot could
       // have torn (createSeat committed, its append did not) — the pane persists
       // but the fact was lost. Presence WITHOUT attestation is that torn state.
@@ -407,8 +596,26 @@ export class Daemon {
         (estate.state === 'created' ? created : backfilled).push(seat);
       }
 
+      // Decommission is declaration-level truth, not a side effect that exists
+      // only on machines which happened to migrate the preceding topology.
+      // Emit missing facts only after the canonical estate postcondition holds.
+      const decommissioned = (await this.projections()).decommissionedSeats;
+      const missingDecommissions = DECOMMISSIONED_COUNCIL_SEATS
+        .filter((seat) => !decommissioned.has(seat))
+        .map((seat): EventInput => ({
+          entity_type: 'seat',
+          entity_id: seat,
+          event_type: 'reg.seat_decommissioned',
+          payload: { migration_id: COUNCIL_MIGRATION_ID },
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        }));
+      if (missingDecommissions.length > 0) await this.store.appendAll(missingDecommissions);
+
       return { created, existing, backfilled, failed };
     });
+    await this.provisionStaticPersonas(true);
+    return result;
   }
 
   // ── /agents/send — the ONE chokepoint (spec §5) ───────────────────────────────────
@@ -903,6 +1110,205 @@ export class Daemon {
     return (await this.projections()).activityBoard;
   }
 
+  async staticPersonaReadiness(): Promise<Array<{
+    seat_id: string;
+    state: 'ready' | 'missing' | 'mismatched' | 'awaiting_ack';
+    instance_id: string | null;
+  }>> {
+    const proj = await this.projections();
+    const launches = [...proj.staticLaunches.values()];
+    const rows: Array<{
+      seat_id: string;
+      state: 'ready' | 'missing' | 'mismatched' | 'awaiting_ack';
+      instance_id: string | null;
+    }> = [];
+    for (const declaration of STATIC_PERSONAS) {
+      const binding = proj.currentBindings.find((candidate) => candidate.seat_id === declaration.seat);
+      if (!binding) {
+        const pending = launches.findLast((launch) =>
+          launch.seat_id === declaration.seat && launch.state === 'awaiting_ack',
+        );
+        rows.push({
+          seat_id: declaration.seat,
+          state: pending ? 'awaiting_ack' : 'missing',
+          instance_id: pending?.instance_id ?? null,
+        });
+        continue;
+      }
+      const tupleMatches =
+        binding.persona === declaration.persona
+        && binding.rank === declaration.rank
+        && binding.commander === declaration.commander
+        && binding.engine === declaration.engine
+        && binding.authority_principal === declaration.authority_principal
+        && binding.continuity_kind === declaration.continuity_kind
+        && binding.wrapper_pid !== null
+        && binding.engine_pid !== null
+        && binding.static_launch_id !== null;
+      const alive = tupleMatches && await this.tmux.attestStaticAgent(
+        declaration.seat,
+        binding.wrapper_pid!,
+        binding.engine_pid!,
+        declaration.engine,
+      );
+      rows.push({
+        seat_id: declaration.seat,
+        state: alive ? 'ready' : 'mismatched',
+        instance_id: binding.instance_id,
+      });
+    }
+    return rows;
+  }
+
+  provisionStaticPersonas(recoverPending = false): Promise<void> {
+    return this.locked(async () => {
+      if (!this.staticRuntime) return;
+      let proj = await this.projections();
+      if (recoverPending) {
+        const interrupted = [...proj.staticLaunches.values()]
+          .filter((launch) => launch.state === 'awaiting_ack')
+          .map((launch): EventInput => ({
+            entity_type: 'instance',
+            entity_id: launch.launch_id,
+            event_type: 'reg.static_launch_failed',
+            payload: {
+              reason: 'daemon_restarted_before_ack',
+              seat_id: launch.seat_id,
+              instance_id: launch.instance_id,
+            },
+            provenance: this.prov('observer', null),
+            occurred_at: this.now(),
+          }));
+        if (interrupted.length > 0) {
+          await this.store.appendAll(interrupted);
+          proj = await this.projections();
+        }
+      }
+      for (const declaration of STATIC_PERSONAS) {
+        const binding = proj.currentBindings.find((candidate) => candidate.seat_id === declaration.seat);
+        if (binding) continue;
+        const latest = [...proj.staticLaunches.values()].findLast((launch) => launch.seat_id === declaration.seat);
+        if (latest?.state === 'awaiting_ack') continue;
+
+        const launch_id = crypto.randomUUID();
+        const instance_id = crypto.randomUUID();
+        const token = crypto.randomUUID();
+        const token_hash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
+        const occurred_at = this.now();
+        await this.store.append({
+          entity_type: 'instance',
+          entity_id: launch_id,
+          event_type: 'reg.static_launch_requested',
+          payload: {
+            seat_id: declaration.seat,
+            instance_id,
+            engine: declaration.engine,
+            persona: declaration.persona,
+            rank: declaration.rank,
+            commander: declaration.commander,
+            authority_principal: declaration.authority_principal,
+            continuity_kind: declaration.continuity_kind,
+            token_hash,
+          },
+          provenance: this.prov('observer', null),
+          occurred_at,
+        });
+        const started = await this.tmux.startStaticAgent({
+          seatId: declaration.seat,
+          engine: declaration.engine,
+          wrapper: this.staticRuntime.agentWrapper,
+          workspace: `${this.staticRuntime.personaWorkspaceRoot}/${declaration.workspace}`,
+          environment: {
+            TXD_STATIC_LAUNCH_ID: launch_id,
+            TXD_STATIC_LAUNCH_TOKEN: token,
+            TXD_STATIC_INSTANCE_ID: instance_id,
+            TXD_STATIC_SEAT: declaration.seat,
+            TXD_STATIC_ACK_URL: this.staticRuntime.acknowledgeUrl,
+            TXD_STATIC_ENGINE: declaration.engine,
+            TXD_STATIC_OBSIDIAN_PERSONA: declaration.persona,
+          },
+        });
+        if (!started) {
+          await this.store.append({
+            entity_type: 'instance',
+            entity_id: launch_id,
+            event_type: 'reg.static_launch_failed',
+            payload: { reason: 'wrapper_start_failed', seat_id: declaration.seat, instance_id },
+            provenance: this.prov('observer', null),
+            occurred_at: this.now(),
+          });
+        }
+      }
+    });
+  }
+
+  acknowledgeStaticLaunch(handshake: StaticLaunchHandshake): Promise<StaticLaunchHandshakeResponse> {
+    return this.locked(async () => {
+      const proj = await this.projections();
+      const launch = proj.staticLaunches.get(handshake.launch_id);
+      if (!launch || launch.state !== 'awaiting_ack') {
+        return { ok: false, acknowledged: false, reason: 'launch_absent_or_closed' };
+      }
+      const token_hash = new Bun.CryptoHasher('sha256').update(handshake.token).digest('hex');
+      if (token_hash !== launch.token_hash) {
+        return { ok: false, acknowledged: false, reason: 'launch_authentication_failed' };
+      }
+      const declaration = STATIC_PERSONAS.find((candidate) => candidate.seat === launch.seat_id);
+      const tupleMatches = declaration
+        && handshake.instance_id === launch.instance_id
+        && handshake.seat_id === launch.seat_id
+        && handshake.engine === launch.engine
+        && handshake.engine === declaration.engine;
+      const physicallyAttested = tupleMatches && await this.tmux.attestStaticAgent(
+        handshake.seat_id,
+        handshake.wrapper_pid,
+        handshake.engine_pid,
+        handshake.engine,
+      );
+      if (!tupleMatches || !physicallyAttested) {
+        await this.store.append({
+          entity_type: 'instance',
+          entity_id: handshake.launch_id,
+          event_type: 'reg.static_launch_failed',
+          payload: {
+            reason: tupleMatches ? 'physical_attestation_failed' : 'launch_tuple_mismatch',
+            seat_id: launch.seat_id,
+            instance_id: launch.instance_id,
+          },
+          provenance: this.prov('wrapper', null),
+          occurred_at: this.now(),
+        });
+        return { ok: false, acknowledged: false, reason: 'launch_attestation_failed' };
+      }
+      const occupied = proj.currentBindings.some((binding) =>
+        binding.seat_id === declaration.seat || binding.instance_id === launch.instance_id,
+      );
+      if (occupied) return { ok: false, acknowledged: false, reason: 'binding_conflict' };
+      await this.store.append({
+        entity_type: 'seat',
+        entity_id: declaration.seat,
+        event_type: 'reg.bound',
+        payload: {
+          wrapper_id: handshake.launch_id,
+          instance_id: handshake.instance_id,
+          persona: declaration.persona,
+          rank: declaration.rank,
+          commander: declaration.commander,
+          tint: null,
+          engine: declaration.engine,
+          static_launch_id: handshake.launch_id,
+          wrapper_pid: handshake.wrapper_pid,
+          engine_pid: handshake.engine_pid,
+          authority_principal: declaration.authority_principal,
+          continuity_kind: declaration.continuity_kind,
+        },
+        provenance: this.prov('wrapper', null),
+        occurred_at: this.now(),
+      });
+      return { ok: true, acknowledged: true, reason: null };
+    });
+  }
+
   requestEstateRotation(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
     return this.locked(async () => {
       if (req.scope !== 'estate') {
@@ -943,8 +1349,10 @@ export class Daemon {
    * the window, then stands the full declared geometry before txd retires all
    * old bindings in the page.
    */
-  resetEstateScope(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
-    return this.locked(() => this.resetEstateScopeUnlocked(req, transportReceipt));
+  async resetEstateScope(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
+    const result = await this.locked(() => this.resetEstateScopeUnlocked(req, transportReceipt));
+    if (result.ok && result.scope === 'page' && req.page === 'council') await this.provisionStaticPersonas();
+    return result;
   }
 
   private async resetEstateScopeUnlocked(
@@ -991,18 +1399,27 @@ export class Daemon {
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
         }
       }
-      for (const binding of bindings) {
-        if (!(await this.recordResetBinding(binding, transportReceipt))) throw new Error(`scoped reset attestation failed for ${binding.seat_id}`);
-      }
-      await this.store.append({ entity_type: 'estate', entity_id: rotation_id, event_type: 'estate.scoped_reset_completed', payload, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      const completedAt = this.now();
+      const inputs = bindings.flatMap((binding) =>
+        this.resetBindingInputs(binding, transportReceipt, completedAt),
+      );
+      inputs.push({
+        entity_type: 'estate',
+        entity_id: rotation_id,
+        event_type: 'estate.scoped_reset_completed',
+        payload,
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: completedAt,
+      });
+      await this.store.appendAll(inputs);
     return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
   }
 
-  handleTmuxLifecycleEvent(
+  async handleTmuxLifecycleEvent(
     req: TmuxLifecycleEventRequest,
     transportReceipt: string | null = null,
   ): Promise<TmuxLifecycleEventResponse> {
-    return this.locked(async () => {
+    const result = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {
         return { ok: false, event: req.event, page: req.page, reconstructed: false, rotation_id: null, reason: 'schema_version_mismatch' };
       }
@@ -1030,17 +1447,21 @@ export class Daemon {
         reason: reset.reason,
       };
     });
+    if (result.ok && result.reconstructed && result.page === 'council') await this.provisionStaticPersonas();
+    return result;
   }
 
-  private async recordResetBinding(binding: CurrentBinding, transportReceipt: string | null): Promise<boolean> {
-    const occurred_at = this.now();
+  private resetBindingInputs(
+    binding: CurrentBinding,
+    transportReceipt: string | null,
+    occurred_at: string,
+  ): EventInput[] {
     const prov = this.prov('observer', transportReceipt);
     const inputs: EventInput[] = [];
     if (binding.instance_id) inputs.push({ entity_type: 'instance', entity_id: binding.instance_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { instance_id: binding.instance_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
-    await this.store.appendAll(inputs);
-    return true;
+    return inputs;
   }
 
   async executeEstateRotation(): Promise<void> {
@@ -1073,8 +1494,9 @@ export class Daemon {
     // responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
     const open = proj.openContradictions.length;
+    const static_personas = await this.staticPersonaReadiness();
     return {
-      ok: open === 0, // bring-up mode: any open contradiction ⇒ not ok
+      ok: open === 0 && tmux_reachable && static_personas.every((persona) => persona.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,
@@ -1084,6 +1506,7 @@ export class Daemon {
       events: await this.store.count(),
       open_contradictions: open,
       tmux_reachable,
+      static_personas,
     };
   }
 }
