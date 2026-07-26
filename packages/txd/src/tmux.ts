@@ -11,6 +11,7 @@
 // tmux dependency; on-box acceptance exercises the real plane.
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import { readFile } from 'node:fs/promises';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
@@ -643,14 +644,18 @@ export class RealTmux implements TmuxControlPlane {
     if (pane.code !== 0) return false;
     const [observedPid, dead] = pane.stdout.trim().split('\t');
     if (Number(observedPid) !== wrapperPid || dead !== '0') return false;
-    const stat = Bun.file(`/proc/${enginePid}/stat`);
-    const comm = Bun.file(`/proc/${enginePid}/comm`);
-    if (!(await stat.exists()) || !(await comm.exists())) return false;
-    const rawStat = await stat.text();
-    const afterName = rawStat.slice(rawStat.lastIndexOf(')') + 2).trim().split(/\s+/);
-    const parentPid = Number(afterName[1]);
-    const processName = (await comm.text()).trim();
-    return parentPid === wrapperPid && (processName === engine || processName.startsWith(engine));
+    try {
+      const [rawStat, rawComm] = await Promise.all([
+        readFile(`/proc/${enginePid}/stat`, 'utf8'),
+        readFile(`/proc/${enginePid}/comm`, 'utf8'),
+      ]);
+      const afterName = rawStat.slice(rawStat.lastIndexOf(')') + 2).trim().split(/\s+/);
+      const parentPid = Number(afterName[1]);
+      const processName = rawComm.trim();
+      return parentPid === wrapperPid && (processName === engine || processName.startsWith(engine));
+    } catch {
+      return false;
+    }
   }
 
   async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
