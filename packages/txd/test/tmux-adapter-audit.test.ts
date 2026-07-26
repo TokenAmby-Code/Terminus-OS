@@ -51,3 +51,27 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
   expect(await tmux.resetSeat('palace:N')).toBe(true);
   expect(operations).toEqual(['list-panes', 'clear-history', 'respawn-pane', 'display-message']);
 });
+
+test('static launch execs the wrapper as the pane process for physical attestation', async () => {
+  const calls: string[][] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') {
+        return { code: 0, stdout: '%17\tcouncil:custodes\n', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    audit: () => {},
+  });
+
+  expect(await tmux.startStaticAgent({
+    seatId: 'council:custodes',
+    engine: 'claude',
+    wrapper: '/fleet/agent-wrapper',
+    workspace: '/personas/custodes',
+    environment: { TXD_STATIC_LAUNCH_ID: 'launch-1' },
+  })).toBe(true);
+
+  expect(calls.at(-1)?.at(-1)).toBe("exec '/fleet/agent-wrapper' claude");
+});
