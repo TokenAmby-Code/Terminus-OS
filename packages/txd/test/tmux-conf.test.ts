@@ -81,7 +81,7 @@ describe('tmux/tx.conf', () => {
     expect(conf).toContain('set -g remain-on-exit on');
     expect(conf).toContain('set-hook -g pane-died');
     expect(conf).toContain('set-hook -g pane-exited');
-    expect(conf).toContain('$HOME/.local/bin/tx estate event pane-died --page');
-    expect(conf).toContain('$HOME/.local/bin/tx estate event pane-exited --page');
+    expect(conf).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page');
+    expect(conf).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page');
   });
 });
