@@ -51,11 +51,14 @@ test('delivery assertion is asynchronous, replay-safe, and echoes separately', a
   expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
 });
 
-test('one-way communication never subscribes its sender to stop content', async () => {
+test('one-way communication never subscribes its sender or contaminates a later ask callback', async () => {
   const { store, daemon } = await setup();
   await daemon.comm({ schema_version: 7, source_instance_id: 'source', target: 'target-a', message: 'one-way', ask: false, reply: false });
+  const ask = await daemon.comm({ schema_version: 7, source_instance_id: 'source', target: 'target-a', message: 'real ask', ask: true, reply: false });
   await daemon.commStop('target-a', 'ordinary turn content', 'stop-one-way', null);
-  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_callback_asserted')).toHaveLength(0);
+  const callbacks = (await store.readAll()).filter((e) => e.event_type === 'act.comm_callback_asserted');
+  expect(callbacks).toHaveLength(1);
+  expect(callbacks[0]).toMatchObject({ payload: { ask_id: ask.ask_id, content: 'ordinary turn content' } });
 });
 
 test('explicit reply wins over stop fallback and produces exactly one callback', async () => {
