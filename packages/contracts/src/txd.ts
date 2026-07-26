@@ -39,6 +39,7 @@ export const SCHEMA_VERSION = 7;
 
 export const CLIPBOARD_BUFFER_NAME = 'tx-clipboard';
 export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
+export const MAX_CLIPBOARD_BASE64_CHARS = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4;
 
 function validClipboardText(value: string): boolean {
   return value.isWellFormed()
@@ -66,7 +67,9 @@ export const ClipboardPullResponseSchema = z.object({
 export type ClipboardPullResponse = z.infer<typeof ClipboardPullResponseSchema>;
 
 export const ClipboardPushResponseSchema = ClipboardPullResponseSchema.extend({
-  content_base64: z.string(),
+  content_base64: z.string()
+    .max(MAX_CLIPBOARD_BASE64_CHARS)
+    .regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/, 'invalid base64'),
 });
 export type ClipboardPushResponse = z.infer<typeof ClipboardPushResponseSchema>;
 

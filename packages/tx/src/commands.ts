@@ -3,6 +3,7 @@ import {
   CLIPBOARD_BUFFER_NAME,
   ClipboardPullResponseSchema,
   ClipboardPushResponseSchema,
+  MAX_CLIPBOARD_BASE64_CHARS,
   MAX_CLIPBOARD_BYTES,
   SCHEMA_VERSION,
   type ClipboardPushResponse,
@@ -93,7 +94,7 @@ export const COMMANDS: readonly Command[] = [
       const raw = await request('POST', '/ctl/clipboard/push', {
         schema_version: SCHEMA_VERSION,
         buffer_name: CLIPBOARD_BUFFER_NAME,
-      }, { sensitive: true });
+      }, { sensitive: true, maxResponseBytes: MAX_CLIPBOARD_BASE64_CHARS + 4096 });
       const parsed = ClipboardPushResponseSchema.safeParse(raw);
       if (!parsed.success) throw new Error('txd returned invalid clipboard response');
       const response = parsed.data;
@@ -115,7 +116,7 @@ export const COMMANDS: readonly Command[] = [
       const raw = await request('POST', '/ctl/clipboard/pull', {
         schema_version: SCHEMA_VERSION,
         content,
-      }, { sensitive: true });
+      }, { sensitive: true, maxResponseBytes: 4096 });
       const parsed = ClipboardPullResponseSchema.safeParse(raw);
       if (!parsed.success) throw new Error('txd returned invalid clipboard response');
       const response = parsed.data;

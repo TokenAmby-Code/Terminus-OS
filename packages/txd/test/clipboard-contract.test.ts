@@ -3,6 +3,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   ClipboardPullRequestSchema,
+  ClipboardPushResponseSchema,
   ClipboardPushRequestSchema,
   MAX_CLIPBOARD_BYTES,
 } from '@terminus-os/contracts';
@@ -38,6 +39,16 @@ describe('clipboard payload contract', () => {
     expect(ClipboardPushRequestSchema.safeParse({
       schema_version: 7,
       buffer_name: 'other',
+    }).success).toBe(false);
+  });
+
+  test('push response rejects base64 larger than the 1 MiB ceiling before decode', () => {
+    expect(ClipboardPushResponseSchema.safeParse({
+      ok: true,
+      target: 'test',
+      buffer_name: 'tx-clipboard',
+      bytes: 1,
+      content_base64: 'A'.repeat((Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4) + 1),
     }).success).toBe(false);
   });
 });
