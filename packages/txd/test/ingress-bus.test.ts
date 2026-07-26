@@ -47,7 +47,7 @@ test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance
   const { store, d, srv, post } = setup();
   try {
     await d.launch({ seat_id: 'palace:W', schema_version: 7, identity: 'i1', persona: 'p', tint: '#1' });
-    const res = await post(delivery('hook.stop', { instance_id: 'i1', schema_version: 7 }, 41));
+    const res = await post(delivery('hook.stop', { instance_id: 'i1', hook_event_name: 'Stop' }, 41));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: true,
@@ -65,14 +65,33 @@ test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance
   }
 });
 
-test('a delivered stop WITH content also routes the comm-stop path (old door parity)', async () => {
+test('a native delivered stop projects assistant content into exactly one comm callback', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 7, identity: 'i1', persona: 'p', tint: '#1' });
-    const res = await post(delivery('hook.stop', { instance_id: 'i1', schema_version: 7, content: 'final words' }));
+    await d.launch({ seat_id: 'palace:W', schema_version: 7, identity: 'src', persona: 'p1', tint: '#1' });
+    await d.launch({ seat_id: 'palace:N', schema_version: 7, identity: 'dst', persona: 'p2', tint: '#2' });
+    const ask = await d.comm({ schema_version: 7, source_instance_id: 'src', target: 'dst', message: 'question', ask: true, reply: false });
+    const res = await post(delivery('hook.stop', {
+      instance_id: 'dst',
+      hook_event_name: 'Stop',
+      last_assistant_message: 'final words',
+      prompt_id: 'prompt-1',
+    }, 42));
     expect(res.status).toBe(200);
     expect(((await res.json()) as { consumed: boolean }).consumed).toBe(true);
-    expect((await store.readAll()).some((e) => e.event_type === 'act.stop_reported')).toBe(true);
+    const events = await store.readAll();
+    expect(events.some((e) => e.event_type === 'act.stop_reported')).toBe(true);
+    const callbacks = events.filter((e) => e.event_type === 'act.comm_callback_asserted');
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]).toMatchObject({
+      payload: {
+        ask_id: ask.ask_id,
+        target_instance_id: 'dst',
+        content: 'final words',
+        source: 'stop',
+        stop_event_id: 'bus:42',
+      },
+    });
   } finally {
     srv.stop(true);
   }
@@ -129,7 +148,11 @@ test('a delivered hook.user_prompt_submit with comm context asserts delivery via
     await d.launch({ seat_id: 'palace:N', schema_version: 7, identity: 'dst', persona: 'p2', tint: '#2' });
     const acc = await d.comm({ schema_version: 7, source_instance_id: 'src', target: 'dst', message: 'hi', ask: false, reply: false });
     const res = await post(
-      delivery('hook.user_prompt_submit', { instance_id: 'dst', schema_version: 7, message_id: acc.message_id }),
+      delivery('hook.user_prompt_submit', {
+        instance_id: 'dst',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: `[tx comm ${acc.message_id} from src]\nhi`,
+      }),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: true, receipt: { ok: true, asserted: true } });

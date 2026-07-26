@@ -64,6 +64,33 @@ export type Route = {
 // else delivered on the lane is acked untouched (ack ≠ consume).
 export const CONSUMED_BUS_EVENT_TYPES = ['hook.stop', 'hook.user_prompt_submit'] as const;
 
+const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?\n/;
+
+function stringField(payload: Record<string, unknown>, field: string): string | undefined {
+  const value = payload[field];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function stopHookInput(payload: Record<string, unknown>, seq: number): unknown {
+  return {
+    instance_id: payload.instance_id,
+    schema_version: payload.schema_version ?? SCHEMA_VERSION,
+    content: stringField(payload, 'content') ?? stringField(payload, 'last_assistant_message'),
+    stop_event_id: stringField(payload, 'stop_event_id') ?? `bus:${seq}`,
+  };
+}
+
+function promptHookInput(payload: Record<string, unknown>): unknown {
+  const prompt = stringField(payload, 'prompt');
+  return {
+    instance_id: payload.instance_id,
+    schema_version: payload.schema_version ?? SCHEMA_VERSION,
+    message_id: stringField(payload, 'message_id') ?? prompt?.match(TX_COMM_FRAME)?.[1],
+    content: stringField(payload, 'content'),
+    stop_event_id: stringField(payload, 'stop_event_id'),
+  };
+}
+
 function json(body: unknown, status = 200): Response {
   // Canonical-id membrane enforcement: nothing crosses upward carrying a raw
   // tmux id. A breach fails loud rather than leaking.
@@ -296,7 +323,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           json({ ok: true, seq: event.seq, consumed, reason, ...extra });
         if (event.event_type === 'hook.stop') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
-          const stop = StopRequestSchema.safeParse(event.payload);
+          const stop = StopRequestSchema.safeParse(stopHookInput(event.payload, event.seq));
           if (!stop.success) return ack(false, 'invalid_stop_payload');
           const res = await daemon.stop(stop.data, busReceipt);
           // Ghost/schema refusal records nothing (the old door's loud refusal),
@@ -309,7 +336,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         }
         if (event.event_type === 'hook.user_prompt_submit') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
-          const hook = CommHookSchema.safeParse(event.payload);
+          const hook = CommHookSchema.safeParse(promptHookInput(event.payload));
           if (!hook.success) return ack(false, 'invalid_user_prompt_submit_payload');
           try {
             return ack(true, null, { receipt: await daemon.promptSubmitted(hook.data, busReceipt) });
