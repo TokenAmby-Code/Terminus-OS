@@ -31,3 +31,28 @@ test("machine configuration declares strict, uniquely named durable subscription
     subscriptions: [{ ...config.subscriptions[0]!, seed: "later" as "now" }],
   })).toThrow(/invalid seed/);
 });
+
+test("the github webhook door requires the secret and the machine's App identity as a pair", () => {
+  // Secret without a declared App id would be default-open across Apps — refused at boot.
+  expect(() => assertConfig({
+    machine: "test",
+    githubWebhookSecretFile: "/run/credentials/busd.service/busd.github-webhook",
+  })).toThrow(/githubWebhookAppId/);
+  // An App id without the secret is an incoherent half-door — refused at boot.
+  expect(() => assertConfig({
+    machine: "test",
+    githubWebhookAppId: 4400042,
+  })).toThrow(/githubWebhookSecretFile/);
+  // The App id is a numeric GitHub App id, nothing else.
+  expect(() => assertConfig({
+    machine: "test",
+    githubWebhookSecretFile: "/run/credentials/busd.service/busd.github-webhook",
+    githubWebhookAppId: 1.5,
+  })).toThrow(/positive integer GitHub App id/);
+  const config = assertConfig({
+    machine: "test",
+    githubWebhookSecretFile: "/run/credentials/busd.service/busd.github-webhook",
+    githubWebhookAppId: 4400042,
+  });
+  expect(config.githubWebhookAppId).toBe(4400042);
+});

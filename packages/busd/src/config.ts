@@ -19,6 +19,14 @@ export type DaemonConfig = {
   machine: string;
   /** systemd credential path; the secret itself is never config or event data. */
   githubWebhookSecretFile: string | null;
+  /**
+   * Numeric GitHub App id whose deliveries this machine's github door admits
+   * (`X-GitHub-Hook-Installation-Target-ID`). One webhook, one persistence
+   * machine: both fleet Apps may sign with the same shared secret, so the
+   * machine must declare its OWN App identity — a verified delivery from any
+   * other App is refused loudly at the door, never admitted.
+   */
+  githubWebhookAppId: number | null;
   /** Postgres endpoint for the bus journal (peer-auth unix socket on fleet boxes). */
   db: DbEndpointT;
   /** Per-delivery HTTP timeout. */
@@ -47,6 +55,7 @@ const HARD_DEFAULTS = {
     application_name: 'busd',
   }),
   githubWebhookSecretFile: null,
+  githubWebhookAppId: null,
   deliveryTimeoutMs: 10_000,
   batchSize: 100,
   subscriptions: [] as DesiredSubscription[],
@@ -60,6 +69,9 @@ function envDefaults(): PartialConfig {
     port: process.env.BUSD_PORT ? Number(process.env.BUSD_PORT) : undefined,
     machine: process.env.IMPERIUM_MACHINE,
     githubWebhookSecretFile: process.env.BUSD_GITHUB_WEBHOOK_SECRET_FILE,
+    githubWebhookAppId: process.env.BUSD_GITHUB_WEBHOOK_APP_ID
+      ? Number(process.env.BUSD_GITHUB_WEBHOOK_APP_ID)
+      : undefined,
     db:
       socket_dir || database
         ? DbEndpoint.parse({
@@ -79,6 +91,8 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     machine: raw.machine ?? env.machine, // NO hard default — must be known
     githubWebhookSecretFile:
       raw.githubWebhookSecretFile ?? env.githubWebhookSecretFile ?? HARD_DEFAULTS.githubWebhookSecretFile,
+    githubWebhookAppId:
+      raw.githubWebhookAppId ?? env.githubWebhookAppId ?? HARD_DEFAULTS.githubWebhookAppId,
     db: raw.db ?? env.db ?? HARD_DEFAULTS.db,
     deliveryTimeoutMs: raw.deliveryTimeoutMs ?? HARD_DEFAULTS.deliveryTimeoutMs,
     batchSize: raw.batchSize ?? HARD_DEFAULTS.batchSize,
@@ -92,6 +106,16 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     throw new Error('busd config error: machine is required (set IMPERIUM_MACHINE or config.machine — the daemon must never guess its box identity)');
   if (cfg.githubWebhookSecretFile !== null && !cfg.githubWebhookSecretFile?.startsWith('/')) {
     throw new Error('busd config error: githubWebhookSecretFile must be an absolute credential path');
+  }
+  if (cfg.githubWebhookAppId !== null
+      && (!Number.isInteger(cfg.githubWebhookAppId) || cfg.githubWebhookAppId! < 1)) {
+    throw new Error(`busd config error: githubWebhookAppId must be a positive integer GitHub App id (got ${cfg.githubWebhookAppId})`);
+  }
+  if ((cfg.githubWebhookSecretFile !== null) !== (cfg.githubWebhookAppId !== null)) {
+    throw new Error(
+      'busd config error: githubWebhookSecretFile and githubWebhookAppId configure one door together '
+      + '— the machine must declare its own GitHub App identity alongside the secret (no default-open)',
+    );
   }
   // Strict endpoint validation: unknown fields inside `db` are rejected loud.
   const db = DbEndpoint.safeParse(cfg.db);
