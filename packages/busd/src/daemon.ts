@@ -52,7 +52,11 @@ const server = makeServer({
   },
   build,
   machine: cfg.machine,
-  ...(githubWebhookSecret ? { githubWebhookSecret } : {}),
+  // Config validation guarantees the secret and the App id arrive as a pair;
+  // the github door stays fail-closed unless both are present.
+  ...(githubWebhookSecret && cfg.githubWebhookAppId !== null
+    ? { githubWebhookSecret, githubWebhookAppId: cfg.githubWebhookAppId }
+    : {}),
 });
 dispatcher.start();
 replayDispatcher.start();

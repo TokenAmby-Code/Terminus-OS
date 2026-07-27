@@ -105,6 +105,12 @@ export type ServerDeps = {
   store: BusStore;
   replayStore: ReplayStore;
   githubWebhookSecret?: Uint8Array;
+  /**
+   * Numeric GitHub App id whose deliveries the github door admits
+   * (`X-GitHub-Hook-Installation-Target-ID`). Required alongside the secret:
+   * a signature match alone never admits a delivery from a foreign App.
+   */
+  githubWebhookAppId?: number;
   /** In-process dispatcher wake — fired after every successful append. */
   onAppend: () => void;
   build: BuildInfo;
@@ -155,7 +161,9 @@ export function buildRoutes(deps: ServerDeps): Route[] {
       match: exact('/ingress/github'),
       label: 'POST /ingress/github',
       handler: async (req) => {
-        if (!deps.githubWebhookSecret) {
+        if (!deps.githubWebhookSecret || deps.githubWebhookAppId === undefined) {
+          // No default-open: a secret without a declared App identity refuses
+          // every delivery instead of admitting whatever signs correctly.
           return json({ ok: false, error: 'github_webhook_unconfigured' }, 503);
         }
         const deliveryId = req.headers.get('x-github-delivery');
@@ -169,6 +177,35 @@ export function buildRoutes(deps: ServerDeps): Route[] {
         if (raw === null) return json({ ok: false, error: 'github_webhook_too_large' }, 413);
         if (!await verifyGithubSignature(deps.githubWebhookSecret, raw, signature)) {
           return json({ ok: false, error: 'invalid_github_signature' }, 401);
+        }
+        // App discrimination ("one webhook, one persistence machine"): both
+        // fleet Apps may sign with the same shared secret, so a verified
+        // signature does not prove the delivery belongs to THIS machine. The
+        // App's numeric id rides the installation-target headers; a foreign
+        // App landing here is a webhook misconfiguration, refused 4xx so
+        // GitHub records the failure — loud, never silently dropped, and the
+        // same push fact is never admitted on two machines.
+        const targetType = req.headers.get('x-github-hook-installation-target-type');
+        const targetId = req.headers.get('x-github-hook-installation-target-id');
+        if (targetType !== 'integration' || targetId === null
+            || !/^\d+$/.test(targetId) || Number(targetId) !== deps.githubWebhookAppId) {
+          console.error(JSON.stringify({
+            level: 'error',
+            event: 'foreign_github_app_refused',
+            route: 'POST /ingress/github',
+            expected_app_id: deps.githubWebhookAppId,
+            target_type: targetType,
+            target_id: targetId,
+            delivery_id: deliveryId,
+            github_event: githubEvent,
+          }));
+          return json({
+            ok: false,
+            error: 'foreign_github_app',
+            expected_app_id: deps.githubWebhookAppId,
+            target_type: targetType,
+            target_id: targetId,
+          }, 403);
         }
         const eventType = Object.hasOwn(GITHUB_EVENTS, githubEvent) ? GITHUB_EVENTS[githubEvent] : undefined;
         if (!eventType) return json({ ok: false, error: 'unsupported_github_event' }, 422);
@@ -196,6 +233,8 @@ export function buildRoutes(deps: ServerDeps): Route[] {
                 ingress: 'github_webhook',
                 delivery_id: deliveryId,
                 github_event: githubEvent,
+                // The verified App identity this door admitted the fact under.
+                app_id: deps.githubWebhookAppId,
               },
               causation_event_id: null,
               occurred_at: now(),

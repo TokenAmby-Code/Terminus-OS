@@ -5,6 +5,13 @@ import { makeServer } from "../src/server.ts";
 
 const delivery = "d9428888-122b-4c26-b269-0a3f62f4f06b";
 const secret = new TextEncoder().encode("webhook-test-secret");
+// This machine's declared App identity; deliveries carry it in the
+// installation-target headers ("one webhook, one persistence machine").
+const appId = 4400042;
+const appHeaders = {
+  "x-github-hook-installation-target-type": "integration",
+  "x-github-hook-installation-target-id": String(appId),
+};
 const payload = JSON.stringify({
   action: "synchronize",
   repository: { id: 42, full_name: "TokenAmby-Code/Token-Fleet" },
@@ -35,6 +42,7 @@ function fixture() {
     build: { version: "test", git_sha: "test", bun: Bun.version },
     machine: "test",
     githubWebhookSecret: secret,
+    githubWebhookAppId: appId,
     clock: () => "2026-07-26T17:00:00.000Z",
   });
   return { replayStore, server };
@@ -43,6 +51,7 @@ function fixture() {
 test("signed GitHub delivery is normalized into one deduplicated replay event", async () => {
   const { replayStore, server } = fixture();
   const headers = {
+    ...appHeaders,
     "x-github-delivery": delivery,
     "x-github-event": "pull_request",
     "x-hub-signature-256": await signature(payload),
@@ -82,7 +91,7 @@ test("signed GitHub delivery is normalized into one deduplicated replay event", 
         head_sha: "a".repeat(40),
         base_sha: "b".repeat(40),
       },
-      provenance: { delivery_id: delivery, ingress: "github_webhook" },
+      provenance: { delivery_id: delivery, ingress: "github_webhook", app_id: appId },
     });
   } finally {
     server.stop(true);
@@ -106,6 +115,7 @@ test("invalid signature and unsupported event refuse before publication", async 
     response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
       method: "POST",
       headers: {
+        ...appHeaders,
         "x-github-delivery": delivery,
         "x-github-event": "fork",
         "x-hub-signature-256": await signature(payload),
@@ -151,6 +161,7 @@ test("prototype property names are not accepted as GitHub event names", async ()
     const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
       method: "POST",
       headers: {
+        ...appHeaders,
         "x-github-delivery": delivery,
         "x-github-event": "constructor",
         "x-hub-signature-256": await signature(payload),
@@ -182,6 +193,7 @@ test("check producer identity is mandatory and non-PR issue comments are refused
     let response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
       method: "POST",
       headers: {
+        ...appHeaders,
         "x-github-delivery": delivery,
         "x-github-event": "check_run",
         "x-hub-signature-256": await signature(checkPayload),
@@ -200,6 +212,7 @@ test("check producer identity is mandatory and non-PR issue comments are refused
     response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
       method: "POST",
       headers: {
+        ...appHeaders,
         "x-github-delivery": crypto.randomUUID(),
         "x-github-event": "issue_comment",
         "x-hub-signature-256": await signature(commentPayload),
@@ -269,6 +282,7 @@ test("review and check facts remain valid when delivered before the PR update", 
       const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
         method: "POST",
         headers: {
+          ...appHeaders,
           "x-github-delivery": deliveryId,
           "x-github-event": event,
           "x-hub-signature-256": await signature(body),
@@ -304,6 +318,7 @@ test("a valid PR issue comment is admitted but remains explicitly unbound to a h
     const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
       method: "POST",
       headers: {
+        ...appHeaders,
         "x-github-delivery": commentDelivery,
         "x-github-event": "issue_comment",
         "x-hub-signature-256": await signature(commentPayload),
@@ -317,6 +332,82 @@ test("a valid PR issue comment is admitted but remains explicitly unbound to a h
       head_sha: null,
       sha_binding: "requires_pr_snapshot",
     });
+  } finally {
+    server.stop(true);
+  }
+});
+
+// ── App discrimination — "one webhook, one persistence machine" ────────────
+// Both fleet Apps can sign with the same shared secret, so a verified
+// signature must never admit a foreign App's delivery: same push fact, two
+// machines, double admission. A foreign App landing here is a webhook
+// misconfiguration and is refused 4xx so GitHub records the failure.
+
+test("a correctly signed delivery from a foreign App is refused 403 before publication", async () => {
+  const { replayStore, server } = fixture();
+  const baseHeaders = {
+    "x-github-delivery": delivery,
+    "x-github-event": "pull_request",
+    "x-hub-signature-256": await signature(payload),
+  };
+  const refusals: Record<string, string>[] = [
+    // Wrong App id — the other machine's App delivering here.
+    { ...baseHeaders, ...appHeaders, "x-github-hook-installation-target-id": String(appId + 1) },
+    // Non-numeric target id.
+    { ...baseHeaders, ...appHeaders, "x-github-hook-installation-target-id": "not-a-number" },
+    // Right id, wrong target type — not a GitHub App webhook at all.
+    { ...baseHeaders, ...appHeaders, "x-github-hook-installation-target-type": "repository" },
+    // No installation-target identity headers whatsoever.
+    baseHeaders,
+  ];
+  try {
+    for (const headers of refusals) {
+      const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
+        method: "POST",
+        headers,
+        body: payload,
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: "foreign_github_app",
+        expected_app_id: appId,
+      });
+    }
+    expect(await replayStore.projection(delivery)).toBeNull();
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a secret without a declared App identity refuses every delivery — no default-open", async () => {
+  const replayStore = new MemoryReplayStore(() => "2026-07-26T17:00:00.000Z");
+  const server = makeServer({
+    bind: "127.0.0.1",
+    port: 0,
+    store: new MemoryBusStore(),
+    replayStore,
+    onAppend: () => {},
+    build: { version: "test", git_sha: "test", bun: Bun.version },
+    machine: "test",
+    githubWebhookSecret: secret,
+    // githubWebhookAppId deliberately absent.
+    clock: () => "2026-07-26T17:00:00.000Z",
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
+      method: "POST",
+      headers: {
+        ...appHeaders,
+        "x-github-delivery": delivery,
+        "x-github-event": "pull_request",
+        "x-hub-signature-256": await signature(payload),
+      },
+      body: payload,
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ ok: false, error: "github_webhook_unconfigured" });
+    expect(await replayStore.projection(delivery)).toBeNull();
   } finally {
     server.stop(true);
   }
