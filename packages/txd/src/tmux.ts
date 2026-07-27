@@ -12,6 +12,7 @@
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
 import { readFile, readlink } from 'node:fs/promises';
+import { MAX_CLIPBOARD_BYTES } from '@terminus-os/contracts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
@@ -95,6 +96,10 @@ export interface TmuxControlPlane {
   presentSeats(windowMs: number, nowMs?: number): Promise<Set<string>>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
+  /** Replace the one transient, non-executing clipboard buffer. */
+  loadClipboard(text: string): Promise<number>;
+  /** Read the one transient clipboard buffer as raw bytes. */
+  readClipboard(): Promise<Uint8Array>;
 }
 
 const CANON_OPT = '@canonical_id';
@@ -119,7 +124,9 @@ const PREVIOUS_WINDOWS = {
 } as const;
 
 export type TmuxCommandResult = { code: number; stdout: string; stderr: string };
-type TmuxRunner = (socket: string, args: string[]) => Promise<TmuxCommandResult>;
+type TmuxRunner = (socket: string, args: string[], stdin?: Uint8Array) => Promise<TmuxCommandResult>;
+type TmuxBinaryResult = { code: number; stdout: Uint8Array; stderr: string; overflow?: boolean };
+type TmuxBinaryRunner = (socket: string, args: string[]) => Promise<TmuxBinaryResult>;
 type Sleep = (ms: number) => Promise<void>;
 
 export type TmuxAuditRecord = {
@@ -131,11 +138,71 @@ export type TmuxAuditRecord = {
 };
 type AuditSink = (record: TmuxAuditRecord) => void;
 
-async function run(socket: string, args: string[]): Promise<TmuxCommandResult> {
-  const proc = Bun.spawn(['tmux', '-L', socket, ...args], { stdout: 'pipe', stderr: 'pipe' });
-  const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-  const code = await proc.exited;
-  return { code, stdout, stderr };
+async function readLimited(
+  stream: ReadableStream<Uint8Array>,
+  limit: number,
+  onOverflow: () => void,
+): Promise<{ bytes: Uint8Array; overflow: boolean }> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  let overflow = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > limit) {
+        overflow = true;
+        onOverflow();
+        break;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (overflow) return { bytes: new Uint8Array(), overflow };
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { bytes, overflow };
+}
+
+async function spawnTmux(
+  socket: string,
+  args: string[],
+  stdin?: Uint8Array,
+  stdoutLimit = 8 * 1024 * 1024,
+): Promise<TmuxBinaryResult> {
+  const proc = Bun.spawn(['tmux', '-L', socket, ...args], {
+    stdin: stdin === undefined ? undefined : 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  if (stdin !== undefined) {
+    proc.stdin!.write(stdin);
+    proc.stdin!.end();
+  }
+  const [stdout, stderr, code] = await Promise.all([
+    readLimited(proc.stdout, stdoutLimit, () => proc.kill()),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { code, stdout: stdout.bytes, stderr, overflow: stdout.overflow };
+}
+
+async function run(socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> {
+  const result = await spawnTmux(socket, args, stdin);
+  if (result.overflow) return { code: 1, stdout: '', stderr: 'output exceeded limit' };
+  return { ...result, stdout: new TextDecoder().decode(result.stdout) };
+}
+
+async function runBytes(socket: string, args: string[]): Promise<TmuxBinaryResult> {
+  return spawnTmux(socket, args, undefined, MAX_CLIPBOARD_BYTES);
 }
 
 export class RealTmux implements TmuxControlPlane {
@@ -143,12 +210,14 @@ export class RealTmux implements TmuxControlPlane {
   private audit: AuditSink;
   private sleep: Sleep;
   private enterDelayMs: number;
+  private binaryRunner: TmuxBinaryRunner;
 
   constructor(
     private socket: string,
-    options: { run?: TmuxRunner; audit?: AuditSink; sleep?: Sleep; enterDelayMs?: number } = {},
+    options: { run?: TmuxRunner; runBytes?: TmuxBinaryRunner; audit?: AuditSink; sleep?: Sleep; enterDelayMs?: number } = {},
   ) {
     this.runner = options.run ?? run;
+    this.binaryRunner = options.runBytes ?? runBytes;
     this.audit = options.audit ?? ((record) => console.info(JSON.stringify({ level: 'info', event: 'tmux_operation', ...record })));
     this.sleep = options.sleep ?? ((ms) => Bun.sleep(ms));
     const configured = Number(process.env.TXD_SEND_ENTER_DELAY_MS);
@@ -172,11 +241,11 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   /** The sole command boundary. Arguments and raw tmux identifiers never enter its audit record. */
-  private async command(operation: string, target: string, args: string[]): Promise<TmuxCommandResult> {
+  private async command(operation: string, target: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> {
     const started = performance.now();
     let result: TmuxCommandResult;
     try {
-      result = await this.runner(this.socket, args);
+      result = await this.runner(this.socket, args, stdin);
     } catch {
       result = { code: 1, stdout: '', stderr: 'transport failure' };
     }
@@ -200,6 +269,53 @@ export class RealTmux implements TmuxControlPlane {
   async version(): Promise<string | null> {
     const r = await this.command('observe_version', 'server', ['-V']);
     return r.code === 0 ? r.stdout.trim() : null;
+  }
+
+  async loadClipboard(text: string): Promise<number> {
+    const bytes = new TextEncoder().encode(text);
+    if (bytes.byteLength === 0) {
+      await this.command('clipboard_pull', 'tx-clipboard', ['delete-buffer', '-b', 'tx-clipboard']);
+    } else {
+      const result = await this.command('clipboard_pull', 'tx-clipboard', ['load-buffer', '-b', 'tx-clipboard', '-'], bytes);
+      if (result.code !== 0) throw new Error(`txd clipboard pull failed: ${this.stderrCategory(result)}`);
+    }
+    const marker = await this.command('clipboard_pull', 'tx-clipboard', ['set-option', '-g', '@tx_clipboard_empty', bytes.byteLength === 0 ? '1' : '0']);
+    if (marker.code !== 0) throw new Error(`txd clipboard pull failed: ${this.stderrCategory(marker)}`);
+    return bytes.byteLength;
+  }
+
+  async readClipboard(): Promise<Uint8Array> {
+    const started = performance.now();
+    let result: TmuxBinaryResult;
+    try {
+      result = await this.binaryRunner(this.socket, ['save-buffer', '-b', 'tx-clipboard', '-']);
+    } catch {
+      result = { code: 1, stdout: new Uint8Array(), stderr: 'transport failure' };
+    }
+    const classified = { code: result.code, stdout: '', stderr: result.stderr };
+    if (result.overflow) {
+      this.audit({
+        operation: 'clipboard_push',
+        target: 'tx-clipboard',
+        outcome: 'failed',
+        duration_ms: Math.max(0, performance.now() - started),
+        stderr_category: this.stderrCategory(classified),
+      });
+      throw new Error('clipboard payload exceeds 1 MiB');
+    }
+    this.audit({
+      operation: 'clipboard_push',
+      target: 'tx-clipboard',
+      outcome: result.code === 0 ? 'succeeded' : 'failed',
+      duration_ms: Math.max(0, performance.now() - started),
+      stderr_category: this.stderrCategory(classified),
+    });
+    if (result.code !== 0) {
+      const marker = await this.command('clipboard_push', 'tx-clipboard', ['show-options', '-gqv', '@tx_clipboard_empty']);
+      if (marker.code === 0 && marker.stdout.trim() === '1') return new Uint8Array();
+      throw new Error(`txd clipboard push failed: ${this.stderrCategory(classified)}`);
+    }
+    return result.stdout;
   }
 
   async workloads(): Promise<SeatWorkload[]> {
@@ -821,6 +937,7 @@ export class FakeTmux implements TmuxControlPlane {
   private tintClearFailures = new Set<string>();
   private tintMisapplications = new Set<string>();
   private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
+  private clipboard = new Uint8Array();
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
@@ -835,6 +952,11 @@ export class FakeTmux implements TmuxControlPlane {
     });
   }
   async killServer(): Promise<boolean> { this.killed = true; this.reachableFlag = false; return true; }
+  async loadClipboard(text: string): Promise<number> {
+    this.clipboard = new TextEncoder().encode(text);
+    return this.clipboard.byteLength;
+  }
+  async readClipboard(): Promise<Uint8Array> { return this.clipboard.slice(); }
   setCommand(seatId: string, command: string): void { this.commands.set(seatId, command); }
   async listSeats(): Promise<SeatObservation[]> {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));

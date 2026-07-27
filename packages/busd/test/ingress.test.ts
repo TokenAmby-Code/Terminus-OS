@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { BUS_SCHEMA_VERSION } from '@terminus-os/contracts';
 import { MemoryBusStore } from '../src/store.ts';
+import { MemoryReplayStore } from '../src/replay-store.ts';
 import { makeServer } from '../src/server.ts';
 
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
@@ -12,6 +13,7 @@ function fixture() {
     bind: '127.0.0.1',
     port: 0,
     store,
+    replayStore: new MemoryReplayStore(),
     onAppend: () => {
       wakes += 1;
     },
@@ -160,7 +162,7 @@ test('a dead store 5xxs the doors — the ruled no-fallback posture', async () =
   store.append = async () => {
     throw new Error('db down');
   };
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, store, onAppend: () => {}, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, store, replayStore: new MemoryReplayStore(), onAppend: () => {}, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/stop`, {
       method: 'POST',

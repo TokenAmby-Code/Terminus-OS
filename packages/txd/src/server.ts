@@ -32,9 +32,12 @@
 
 import {
   BUS_SCHEMA_VERSION,
+  MAX_CLIPBOARD_BYTES,
   SCHEMA_VERSION,
   BusDeliverySchema,
   CloseRequestSchema,
+  ClipboardPullRequestSchema,
+  ClipboardPushRequestSchema,
   CommHookSchema,
   CommRequestSchema,
   CommWaitRequestSchema,
@@ -135,6 +138,53 @@ async function parseMutation<T>(req: Request, schema: MutationSchema<T>, error: 
   return parsed.data;
 }
 
+async function parseSensitive<T>(req: Request, schema: MutationSchema<T>, error: string): Promise<T | Response> {
+  const maxBody = (MAX_CLIPBOARD_BYTES * 6) + 4096;
+  const declared = Number(req.headers.get('content-length') ?? 0);
+  if (Number.isFinite(declared) && declared > maxBody) return json({ ok: false, error, field: '$' }, 413);
+  const reader = req.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    if (!reader) return json({ ok: false, error, field: '$' }, 422);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > maxBody) {
+        await reader.cancel();
+        return json({ ok: false, error, field: '$' }, 413);
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return json({ ok: false, error, field: '$' }, 422);
+  } finally {
+    reader?.releaseLock();
+  }
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let body: unknown;
+  try { body = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+  catch { return json({ ok: false, error, field: '$' }, 422); }
+  const parsed = schema.safeParse(body);
+  if (!parsed.success) {
+    return json({ ok: false, error, field: issuePath(parsed.error.issues[0]?.path ?? []) }, 422);
+  }
+  return parsed.data;
+}
+
+function clipboardFailure(error: unknown, direction: 'pull' | 'push'): Response {
+  const message = error instanceof Error ? error.message : '';
+  if (message.includes('exceeds')) return json({ ok: false, error: 'clipboard_too_large', direction }, 422);
+  if (message.includes('valid UTF-8')) return json({ ok: false, error: 'clipboard_invalid_utf8', direction }, 422);
+  return json({ ok: false, error: 'clipboard_unavailable', direction }, 409);
+}
+
 async function rejectRawMutation(req: Request, error: string): Promise<Response | null> {
   const body = await readJson(req);
   const rawIdPath = findTmuxIdDeep(body);
@@ -190,6 +240,36 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const res = await daemon.reconcile(receipt(req));
         // Bring-up mode: p0 contradiction ⇒ fail loud with a non-2xx.
         return json(res, res.p0 ? 409 : 200);
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ctl/clipboard/pull'),
+      label: 'POST /ctl/clipboard/pull',
+      handler: async (req) => {
+        // Clipboard bodies are sensitive: validation reports only a field path,
+        // and neither the payload nor caught error detail is serialized/logged.
+        const parsed = await parseSensitive(req, ClipboardPullRequestSchema, 'invalid_clipboard_pull_request');
+        if (parsed instanceof Response) return parsed;
+        try {
+          return json({ ok: true, target: machine, ...await daemon.clipboardPull(parsed) });
+        } catch (error) {
+          return clipboardFailure(error, 'pull');
+        }
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ctl/clipboard/push'),
+      label: 'POST /ctl/clipboard/push',
+      handler: async (req) => {
+        const parsed = await parseSensitive(req, ClipboardPushRequestSchema, 'invalid_clipboard_push_request');
+        if (parsed instanceof Response) return parsed;
+        try {
+          return json({ ok: true, target: machine, ...await daemon.clipboardPush(parsed) });
+        } catch (error) {
+          return clipboardFailure(error, 'push');
+        }
       },
     },
     {

@@ -14,3 +14,5 @@ export * from "./txd.ts";
 export * from "./hooks.ts";
 export * from "./desktop-telemetry.ts";
 export * from "./bus.ts";
+export * from "./replay.ts";
+export * from "./github-replay.ts";

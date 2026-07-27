@@ -51,7 +51,7 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
 
   beforeAll(async () => {
     sql = await connectDb(endpoint!);
-    await sql`drop table if exists schema_migrations`;
+    await resetTestDatabase(sql);
   });
 
   afterAll(async () => {
@@ -60,31 +60,31 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
 
   test("the migrations apply and land their ledger rows", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
-    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3, 4, 5]);
+    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     expect(report.alreadyApplied).toBe(0);
   });
 
   test("re-running the runner is a no-op (idempotence)", async () => {
     const report = await runMigrations(sql, MIGRATIONS_DIR);
     expect(report.applied).toEqual([]);
-    expect(report.alreadyApplied).toBe(5);
+    expect(report.alreadyApplied).toBe(11);
   });
 
   test("concurrent boot: two connections migrate simultaneously without racing the ledger", async () => {
     // txd and busd both run runMigrations at boot. The advisory-lock guard
     // serializes them: exactly one applies each pending id, the other re-plans
     // under the lock to a no-op — never a duplicate ledger insert.
-    await sql`drop table if exists schema_migrations`;
+    await resetTestDatabase(sql);
     const sql2 = await connectDb(endpoint!);
     try {
       const [a, b] = await Promise.all([
         runMigrations(sql, MIGRATIONS_DIR),
         runMigrations(sql2, MIGRATIONS_DIR),
       ]);
-      expect(a.applied.length + b.applied.length).toBe(5);
+      expect(a.applied.length + b.applied.length).toBe(11);
       const LedgerRow = z.object({ id: z.number().int() });
       const rows = await typedRows(sql, LedgerRow)`select id from schema_migrations order by id`;
-      expect(rows.map(r => r.id)).toEqual([1, 2, 3, 4, 5]);
+      expect(rows.map(r => r.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
     } finally {
       await sql2.close();
     }
@@ -109,12 +109,40 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
       { id: 3, name: "desktop_telemetry" },
       { id: 4, name: "bus" },
       { id: 5, name: "txd_events_jsonb_normalize" },
+      { id: 6, name: "replay_authority" },
+      { id: 7, name: "replay_immutability" },
+      { id: 8, name: "replay_constraints" },
+      { id: 9, name: "replay_runtime_parity" },
+      { id: 10, name: "managed_bus_subscriptions" },
+      { id: 11, name: "replay_delivery_indexes" },
     ]);
 
     const WrongRow = z.object({ id: z.string() });
     await expect(
       typedRows(sql, WrongRow)`select id from schema_migrations`,
     ).rejects.toThrow();
+  });
+
+  test("replay timestamp validation is immutable without accepting impossible dates", async () => {
+    const rows = (await sql`
+      SELECT p.provolatile,
+             replay.is_timestamptz('2026-07-26T17:00:00.000Z') AS valid,
+             replay.is_timestamptz('2026-02-31T17:00:00.000Z') AS impossible
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'replay' AND p.proname = 'is_timestamptz'`) as Array<{
+        provolatile: string;
+        valid: boolean;
+        impossible: boolean;
+      }>;
+    expect(rows).toEqual([{ provolatile: "i", valid: true, impossible: false }]);
+
+    const indexes = (await sql`
+      SELECT indexname
+      FROM pg_indexes
+      WHERE schemaname = 'replay'
+        AND indexname = 'replay_delivery_attempts_success'`) as Array<{ indexname: string }>;
+    expect(indexes).toEqual([{ indexname: "replay_delivery_attempts_success" }]);
   });
 
   test("connectDb fails loud on a dead endpoint (no retry-forever)", async () => {
@@ -127,3 +155,13 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
     await expect(connectDb(dead)).rejects.toThrow(/connect failed/);
   });
 });
+
+async function resetTestDatabase(sql: SQL): Promise<void> {
+  await sql.unsafe(`
+    DROP SCHEMA IF EXISTS replay CASCADE;
+    DROP SCHEMA IF EXISTS bus CASCADE;
+    DROP SCHEMA IF EXISTS telemetry CASCADE;
+    DROP SCHEMA IF EXISTS txd CASCADE;
+    DROP TABLE IF EXISTS public.schema_migrations;
+  `);
+}

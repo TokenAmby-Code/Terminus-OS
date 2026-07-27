@@ -16,7 +16,7 @@ describe('tmux/tx.conf', () => {
     expect(conf).toContain('bind r source-file ~/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf');
   });
 
-  test('contains native pane navigation, expansion, and copy-mode traps', () => {
+  test('contains native pane navigation and expansion', () => {
     const paneUx = conf.slice(conf.indexOf('# Pane navigation and expansion.'), conf.indexOf('bind -r H'));
 
     expect(paneUx).toContain('bind e resize-pane -Z');
@@ -35,10 +35,45 @@ describe('tmux/tx.conf', () => {
     for (const binding of [
       'bind -r H resize-pane -L 5', 'bind -r J resize-pane -D 3',
       'bind -r K resize-pane -U 3', 'bind -r L resize-pane -R 5',
-      'bind -n C-k copy-mode -u', 'unbind -T copy-mode g', 'unbind -T copy-mode f',
-      'unbind -T copy-mode F', 'unbind -T copy-mode t', 'unbind -T copy-mode T',
-      'unbind -T copy-mode \\;', 'unbind -T copy-mode ,',
     ]) expect(conf).toContain(binding);
+  });
+
+  test('pins the keyboard-first selection table and current-viewport entry', () => {
+    const selection = conf.slice(conf.indexOf('# Pane-local selection.'), conf.indexOf('%if '));
+    for (const binding of [
+      'set -g mode-keys emacs',
+      'set -g set-clipboard off',
+      'bind -n C-k copy-mode',
+      'bind -T copy-mode Space send-keys -X begin-selection',
+      'bind -T copy-mode Left send-keys -X cursor-left',
+      'bind -T copy-mode Right send-keys -X cursor-right',
+      'bind -T copy-mode Up send-keys -X cursor-up',
+      'bind -T copy-mode Down send-keys -X cursor-down',
+      'bind -T copy-mode C-Left send-keys -X previous-word',
+      'bind -T copy-mode C-Right send-keys -X next-word',
+      'bind -T copy-mode Home send-keys -X start-of-line',
+      'bind -T copy-mode End send-keys -X end-of-line',
+      'bind -T copy-mode PPage send-keys -X page-up',
+      'bind -T copy-mode NPage send-keys -X page-down',
+      'bind -T copy-mode Tab send-keys -X other-end',
+      'bind -T copy-mode Escape send-keys -X cancel',
+    ]) expect(selection).toContain(binding);
+    expect(selection).not.toContain('copy-mode -u');
+    const movementLines = selection.split('\n').filter((line) =>
+      /copy-mode (?:Space|Left|Right|Up|Down|C-Left|C-Right|Home|End|PPage|NPage|Tab) /.test(line),
+    );
+    expect(movementLines.join('\n')).not.toMatch(/run-shell|txd|tx-osc52|typing.guard/);
+  });
+
+  test('keeps mouse selections visible and invokes one targeted helper only on commit', () => {
+    const selection = conf.slice(conf.indexOf('# Pane-local selection.'), conf.indexOf('%if '));
+    expect(selection).toContain('unbind -T copy-mode MouseDragEnd1Pane');
+    expect(selection).toContain('unbind -T copy-mode-vi MouseDragEnd1Pane');
+    const enter = selection.split('\n').find((line) => line.startsWith('bind -T copy-mode Enter '));
+    expect(enter).toContain('copy-pipe-and-cancel -P');
+    expect(enter).toContain('tx-osc52');
+    expect(enter).toContain('#{client_tty}');
+    expect(selection.match(/tx-osc52/g)).toHaveLength(1);
   });
 
   test('wheel scrolling targets only the active pane with native tmux commands', () => {

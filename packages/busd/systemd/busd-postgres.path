@@ -1,0 +1,13 @@
+# Event-driven startup edge from the system PostgreSQL peer socket to the
+# user-scoped replay authority. PathExists uses systemd's path monitor; no
+# interval, timeout, or compatibility socket listener is involved.
+
+[Unit]
+Description=Start busd when the PostgreSQL 18 peer socket exists
+
+[Path]
+PathExists=/var/run/postgresql/.s.PGSQL.5432
+Unit=busd.service
+
+[Install]
+WantedBy=default.target
