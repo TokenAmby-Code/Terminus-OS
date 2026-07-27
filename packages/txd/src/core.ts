@@ -246,7 +246,15 @@ export class Daemon {
         })
         : null;
       if (snapshots === null) {
-        throw new Error(`txd cannot resume scoped reset ${request.entity_id} without binding generations`);
+        await this.store.append({
+          entity_type: 'estate',
+          entity_id: request.entity_id,
+          event_type: 'estate.scoped_reset_failed',
+          payload: { ...request.payload, reason: 'binding_generation_snapshot_absent' },
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+        continue;
       }
       const current = (await this.projections()).currentBindings
         .filter((binding) => seats.includes(binding.seat_id));

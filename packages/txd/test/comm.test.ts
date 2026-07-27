@@ -24,11 +24,11 @@ test('identity trinity resolves instance, singleton persona, and canonical pane 
 test('absence and ambiguity refuse before communication effects', async () => {
   const { store, daemon } = await setup();
   const before = await store.count();
-  expect(daemon.comm({ schema_version: 8, source_instance_id: 'source', target: 'absent', message: 'x', ask: false, reply: false })).rejects.toThrow('identity_absent');
+  await expect(daemon.comm({ schema_version: 8, source_instance_id: 'source', target: 'absent', message: 'x', ask: false, reply: false })).rejects.toThrow('identity_absent');
   expect(await store.count()).toBe(before);
   await daemon.launch({ seat_id: 'palace:E', schema_version: 8, identity: 'other-pax', persona: 'pax', tint: '#4' });
   const beforeAmbiguous = await store.count();
-  expect(daemon.comm({ schema_version: 8, source_instance_id: 'source', target: 'pax', message: 'x', ask: false, reply: false })).rejects.toThrow('identity_ambiguous');
+  await expect(daemon.comm({ schema_version: 8, source_instance_id: 'source', target: 'pax', message: 'x', ask: false, reply: false })).rejects.toThrow('identity_ambiguous');
   expect(await store.count()).toBe(beforeAmbiguous);
 });
 
@@ -59,7 +59,7 @@ test('pending scoped reset fences comm before acceptance or physical transport',
   });
   const before = await store.count();
 
-  expect(daemon.comm({
+  await expect(daemon.comm({
     schema_version: 8,
     source_instance_id: 'source',
     target: 'target-a',
