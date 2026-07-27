@@ -65,7 +65,9 @@ export interface TmuxControlPlane {
    * bare (kill the running command, restart the shell). The pane id and its
    * canonical-id tag survive, so the seat stays in the estate and returns to the
    * freelist live+empty. Returns false if the pane could not be resolved/respawned
-   * (caller must NOT attest process_reaped/seat_cleared on a failed reap).
+   * (caller must NOT attest process_reaped/seat_cleared on a failed reap). A
+   * failed respawn restores an explicitly supplied prior tint, or the exact tint
+   * observed before clearing when the caller omits it.
    */
   reapSeat(seatId: string, previousTint?: string | null): Promise<boolean>;
   /** Clear pane history, replace its process, and re-verify its canonical tag. */
@@ -749,9 +751,13 @@ export class RealTmux implements TmuxControlPlane {
     if (paneId) await this.command('kill_seat', seatId, ['kill-pane', '-t', paneId]);
   }
 
-  async reapSeat(seatId: string, previousTint: string | null = null): Promise<boolean> {
+  async reapSeat(seatId: string, previousTint?: string | null): Promise<boolean> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return false;
+    const tintToRestore = previousTint === undefined
+      ? await this.seatTint(seatId)
+      : previousTint;
+    if (tintToRestore === undefined) return false;
     // Clear and attest the identity signal before killing the bound process.
     // If respawn then fails, restore the still-current binding's tint.
     if (!(await this.setSeatTint(seatId, null))) return false;
@@ -759,7 +765,7 @@ export class RealTmux implements TmuxControlPlane {
     // is REUSED and a fresh default shell is started — the estate seat persists.
     const r = await this.command('reap_seat', seatId, ['respawn-pane', '-k', '-t', paneId]);
     if (r.code === 0) return true;
-    if (previousTint !== null && !(await this.setSeatTint(seatId, previousTint))) {
+    if (tintToRestore !== null && !(await this.setSeatTint(seatId, tintToRestore))) {
       throw new Error(`txd failed to restore binding tint after reap failure for ${seatId}`);
     }
     return false;
@@ -1071,17 +1077,18 @@ export class FakeTmux implements TmuxControlPlane {
     const s = this.seats.get(seatId);
     if (s) s.pane = 'dead';
   }
-  async reapSeat(seatId: string, previousTint: string | null = null): Promise<boolean> {
+  async reapSeat(seatId: string, previousTint?: string | null): Promise<boolean> {
     // Respawn keeps the pane LIVE (bare shell) — a live seat is reapable; a dead
     // or missing pane is not (nothing to respawn without a teardown+recreate).
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') return false;
-    const tint = this.tints.get(seatId) ?? null;
+    const tintToRestore = previousTint === undefined
+      ? this.tints.get(seatId) ?? null
+      : previousTint;
     if (this.tintClearFailures.has(seatId)) return false;
     this.tints.delete(seatId);
     if (this.failReap.has(seatId)) {
-      if (previousTint !== null) this.tints.set(seatId, previousTint);
-      else if (tint !== null) this.tints.set(seatId, tint);
+      if (tintToRestore !== null) this.tints.set(seatId, tintToRestore);
       return false;
     }
     s.pane = 'live';

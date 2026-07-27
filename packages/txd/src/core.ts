@@ -184,6 +184,34 @@ export class Daemon {
     });
   }
 
+  private async compensateBindingCommitFailure(
+    seatId: string,
+    prepareId: string,
+    provenance: Provenance,
+    originalError: unknown,
+  ): Promise<never> {
+    const failedSteps: string[] = [];
+    try {
+      await this.clearBindingTint(seatId);
+    } catch {
+      failedSteps.push('tint_clear');
+    }
+    try {
+      await this.abortBinding(seatId, prepareId, 'bound_commit_failed', provenance);
+    } catch {
+      failedSteps.push('binding_abort');
+    }
+    if (failedSteps.length > 0) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'binding_commit_compensation_failed',
+        seat_id: seatId,
+        failed_steps: failedSteps,
+      }));
+    }
+    throw originalError;
+  }
+
   /** Fail-dark recovery for a crash after physical style mutation but before reg.bound. */
   private async recoverBindingPreparations(): Promise<void> {
     const events = await this.store.readAll();
@@ -212,8 +240,9 @@ export class Daemon {
     }
   }
 
-  /** Resume every requested scoped reconstruction from event truth on boot. */
-  private async recoverScopedResets(): Promise<void> {
+  /** Resume every requested scoped reconstruction from event truth. */
+  private async recoverScopedResets(): Promise<boolean> {
+    let councilRebuilt = false;
     const events = await this.store.readAll();
     const closed = new Set(events
       .filter((event) =>
@@ -279,6 +308,7 @@ export class Daemon {
         if (!(await this.tmux.rebuildPage(page))) {
           throw new Error(`txd failed to resume pending ${page} page reconstruction`);
         }
+        if (page === 'council') councilRebuilt = true;
       } else if (!(await this.tmux.resetSeat(seats[0]!))) {
         throw new Error(`txd failed to resume pending ${seats[0]} pane reconstruction`);
       }
@@ -297,6 +327,7 @@ export class Daemon {
       await this.store.appendAll(inputs);
       closed.add(request.entity_id);
     }
+    return councilRebuilt;
   }
 
   private wakeAsk(askId: string): void {
@@ -644,9 +675,7 @@ export class Daemon {
           occurred_at,
         });
       } catch (error) {
-        await this.clearBindingTint(req.seat_id);
-        await this.abortBinding(req.seat_id, prepareId, 'bound_commit_failed', prov);
-        throw error;
+        await this.compensateBindingCommitFailure(req.seat_id, prepareId, prov, error);
       }
 
       return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null };
@@ -1295,8 +1324,10 @@ export class Daemon {
   // Pure replay rebuild; observes tmux and emits contradiction_flagged for
   // discrepancies (NEVER a synthesized lifecycle event). Bring-up mode: every
   // open contradiction is p0 — fail loud, ok=false.
-  reconcile(transportReceipt: string | null = null): Promise<ReconcileResponse> {
-    return this.locked(async () => {
+  async reconcile(transportReceipt: string | null = null): Promise<ReconcileResponse> {
+    let councilRebuilt = false;
+    const response = await this.locked(async () => {
+      councilRebuilt = await this.recoverScopedResets();
       const events = await this.store.readAll();
       const t0 = performance.now();
       const proj = buildProjections(events);
@@ -1405,6 +1436,8 @@ export class Daemon {
         p0,
       };
     });
+    if (councilRebuilt) await this.provisionStaticPersonas();
+    return response;
   }
 
   // ── Read model (spec §7 rung 6, reshaped [[txd-extraction-spec]] §6) ────────
@@ -1686,9 +1719,12 @@ export class Daemon {
           occurred_at,
         });
       } catch (error) {
-        await this.clearBindingTint(declaration.seat);
-        await this.abortBinding(declaration.seat, prepareId, 'bound_commit_failed', provenance);
-        throw error;
+        await this.compensateBindingCommitFailure(
+          declaration.seat,
+          prepareId,
+          provenance,
+          error,
+        );
       }
       return { ok: true, acknowledged: true, reason: null };
     });

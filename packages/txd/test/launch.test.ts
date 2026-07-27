@@ -145,6 +145,30 @@ test('event-store failure after tint application compensates the pane fail-dark'
   expect((await store.readAll()).filter((event) => event.event_type === 'reg.binding_aborted')).toHaveLength(1);
 });
 
+test('binding cleanup attempts abort and preserves the commit error when tint clear fails', async () => {
+  class FailingBoundStore extends MemoryEventStore {
+    override append(input: EventInput) {
+      if (input.event_type === 'reg.bound') return Promise.reject(new Error('forced reg.bound failure'));
+      return super.append(input);
+    }
+  }
+  const store = new FailingBoundStore();
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux);
+  tmux.failTintClearSeat('palace:W');
+
+  await expect(d.launch({
+    seat_id: 'palace:W',
+    schema_version: 8,
+    identity: 'i1',
+    persona: 'salamander',
+    tint: '#302800',
+  })).rejects.toThrow('forced reg.bound failure');
+
+  expect(await tmux.seatTint('palace:W')).toBe('#302800');
+  expect((await store.readAll()).filter((event) => event.event_type === 'reg.binding_aborted')).toHaveLength(1);
+});
+
 test('boot clears a prepared tint left by a crash before reg.bound', async () => {
   const { store, tmux, d } = setup();
   await d.constructEstate();

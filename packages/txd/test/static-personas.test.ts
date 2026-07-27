@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { SCHEMA_VERSION, type StaticLaunchHandshake } from '@terminus-os/contracts';
+import { SCHEMA_VERSION, type EventInput, type StaticLaunchHandshake } from '@terminus-os/contracts';
 import { Daemon, type StaticLaunchRuntime } from '../src/core.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
@@ -89,6 +89,29 @@ test('static tint application failure leaves the persona unbound and the pane un
   expect((await store.readAll()).filter((event) =>
     event.event_type === 'reg.bound' && event.entity_id === 'council:custodes',
   )).toHaveLength(0);
+});
+
+test('static binding cleanup attempts abort and preserves the commit error when tint clear fails', async () => {
+  class FailingBoundStore extends MemoryEventStore {
+    override append(input: EventInput) {
+      if (input.event_type === 'reg.bound') return Promise.reject(new Error('forced static reg.bound failure'));
+      return super.append(input);
+    }
+  }
+  const store = new FailingBoundStore();
+  const tmux = new FakeTmux();
+  const daemon = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  await daemon.constructEstate();
+  tmux.failTintClearSeat('council:custodes');
+
+  await expect(
+    daemon.acknowledgeStaticLaunch(handshakeFor(tmux, 'council:custodes')),
+  ).rejects.toThrow('forced static reg.bound failure');
+
+  expect(await tmux.seatTint('council:custodes')).toBe('#302800');
+  expect((await store.readAll()).filter((event) =>
+    event.entity_id === 'council:custodes' && event.event_type === 'reg.binding_aborted',
+  )).toHaveLength(1);
 });
 
 test('bound static tint drift is physically mismatched and makes health false', async () => {
@@ -282,7 +305,10 @@ test('schema-7 untinted static bindings rotate through the typed Council reset o
   tmux.forceSeatTint('council:fabricator-general', null);
   const events = await store.readAll();
   const legacy = events.filter((event) => event.event_type === 'reg.bound');
-  for (const event of legacy) event.payload.tint = null;
+  for (const event of legacy) {
+    event.payload.tint = null;
+    event.provenance.emitter_version = 7;
+  }
 
   const restarted = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
   await restarted.constructEstate();
