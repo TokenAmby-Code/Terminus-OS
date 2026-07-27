@@ -101,6 +101,23 @@ describe('disposable canonical estate geometry', () => {
     });
   }
 
+  test('untagged operator panes are preserved outside estate identity while unknown tagged seats stay foreign', async () => {
+    const socket = `txd-geometry-untagged-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const adapter = new RealTmux(socket);
+    await adapter.ensureEstate();
+    const operator = await tmux(socket, 'new-window', '-d', '-P', '-F', '#{pane_id}', '-t', 'main', '-n', 'operator');
+    const operatorPid = await tmux(socket, 'display-message', '-p', '-t', operator, '#{pane_pid}');
+
+    expect(await adapter.estateGeneration()).toBe('canonical');
+    expect(await adapter.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
+    expect(await tmux(socket, 'display-message', '-p', '-t', operator, '#{pane_pid}')).toBe(operatorPid);
+
+    await tmux(socket, 'set-option', '-p', '-t', operator, '@canonical_id', 'foreign:operator');
+    expect(await adapter.estateGeneration()).toBe('foreign');
+  });
+
   test('canonical labels in a foreign Council split are not accepted as canonical geometry', async () => {
     const socket = `txd-geometry-foreign-${process.pid}`;
     sockets.push(socket);

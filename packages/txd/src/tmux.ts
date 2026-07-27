@@ -396,7 +396,7 @@ export class RealTmux implements TmuxControlPlane {
         windowWidth: Number(windowWidth),
         windowHeight: Number(windowHeight),
       };
-    });
+    }).filter((row) => row.seat.length > 0);
   }
 
   private pageGeometryMatches(window: string, seats: readonly string[], rows: EstateRow[]): boolean {
