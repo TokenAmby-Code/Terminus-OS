@@ -97,14 +97,24 @@ test('absent pane-local style options attest an untinted seat', async () => {
   expect(await tmux.seatTint('palace:N')).toBeNull();
 });
 
-test('failed reap restores the observed binding tint when the caller omits it', async () => {
-  let style = 'bg=#302800';
+test('failed reap restores the exact observed pane styles when the caller omits a prior tint', async () => {
+  const styles = new Map([
+    ['window-style', 'fg=#c0ffee'],
+    ['window-active-style', 'bg=#302800,italics'],
+  ]);
   const tmux = new RealTmux('scratch', {
     run: async (_socket, args) => {
       if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
-      if (args[0] === 'show-options') return { code: 0, stdout: `${style}\n`, stderr: '' };
+      if (args[0] === 'show-options') {
+        return { code: 0, stdout: `${styles.get(args.at(-1)!) ?? ''}\n`, stderr: '' };
+      }
       if (args[0] === 'select-pane') {
-        style = args.at(-1) ?? '';
+        styles.set('window-style', args.at(-1) ?? '');
+        styles.set('window-active-style', args.at(-1) ?? '');
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'set-option') {
+        styles.set(args.at(-2)!, args.at(-1) ?? '');
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'respawn-pane') return { code: 1, stdout: '', stderr: 'forced failure' };
@@ -114,7 +124,10 @@ test('failed reap restores the observed binding tint when the caller omits it', 
   });
 
   expect(await tmux.reapSeat('palace:N')).toBe(false);
-  expect(style).toBe('bg=#302800');
+  expect(Object.fromEntries(styles)).toEqual({
+    'window-style': 'fg=#c0ffee',
+    'window-active-style': 'bg=#302800,italics',
+  });
 });
 
 test('static launch execs the wrapper as the pane process for physical attestation', async () => {
