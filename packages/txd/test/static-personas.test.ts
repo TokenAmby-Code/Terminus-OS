@@ -29,6 +29,7 @@ function handshakeFor(tmux: FakeTmux, seat: 'council:custodes' | 'council:fabric
     engine: agent.engine,
     wrapper_pid: agent.wrapperPid,
     engine_pid: agent.enginePid,
+    engine_executable: `/sanctioned/${agent.engine}`,
   };
 }
 
@@ -56,9 +57,15 @@ test('provisions exactly Custodes and Fabricator-General, then binds only after 
   });
   expect(tmux.staticAgent('council:pax')).toBeUndefined();
   expect(tmux.staticAgent('council:orchestrator')).toBeUndefined();
+  expect(await tmux.seatTint('council:custodes')).toBeNull();
+  expect(await tmux.seatTint('council:fabricator-general')).toBeNull();
+  expect(await tmux.seatTint('council:pax')).toBeNull();
+  expect(await tmux.seatTint('council:orchestrator')).toBeNull();
 
   const handshakes = await acknowledgeBoth(daemon, tmux);
   expect((await daemon.staticPersonaReadiness()).map((row) => row.state)).toEqual(['ready', 'ready']);
+  expect(await tmux.seatTint('council:custodes')).toBe('#302800');
+  expect(await tmux.seatTint('council:fabricator-general')).toBe('#300808');
   const bindings = (await daemon.estateRows()).filter((row) => row.binding === 'bound');
   expect(bindings.map((row) => row.seat_id)).toEqual(['council:custodes', 'council:fabricator-general']);
   expect((await daemon.health('k12-personal', BUILD)).ok).toBe(true);
@@ -66,6 +73,38 @@ test('provisions exactly Custodes and Fabricator-General, then binds only after 
   const duplicate = await daemon.acknowledgeStaticLaunch(handshakes.custodes);
   expect(duplicate).toEqual({ ok: false, acknowledged: false, reason: 'launch_absent_or_closed' });
   expect((await store.readAll()).filter((event) => event.event_type === 'reg.bound')).toHaveLength(2);
+});
+
+test('static tint application failure leaves the persona unbound and the pane untinted', async () => {
+  const { store, tmux, daemon } = setup();
+  await daemon.constructEstate();
+  tmux.failTintSeat('council:custodes');
+
+  expect(await daemon.acknowledgeStaticLaunch(handshakeFor(tmux, 'council:custodes'))).toEqual({
+    ok: false,
+    acknowledged: false,
+    reason: 'tint_attestation_failed',
+  });
+  expect(await tmux.seatTint('council:custodes')).toBeNull();
+  expect((await store.readAll()).filter((event) =>
+    event.event_type === 'reg.bound' && event.entity_id === 'council:custodes',
+  )).toHaveLength(0);
+});
+
+test('bound static tint drift is physically mismatched and makes health false', async () => {
+  const { tmux, daemon } = setup();
+  await daemon.constructEstate();
+  await acknowledgeBoth(daemon, tmux);
+  tmux.forceSeatTint('council:custodes', '#000000');
+
+  expect((await daemon.staticPersonaReadiness()).find((row) =>
+    row.seat_id === 'council:custodes',
+  )).toMatchObject({
+    state: 'mismatched',
+    tint: '#302800',
+    tint_attested: false,
+  });
+  expect((await daemon.health('k12-personal', BUILD)).ok).toBe(false);
 });
 
 test('bad tokens, tuple mismatches, stale replays, and physical mismatches never bind', async () => {
@@ -137,6 +176,7 @@ test('a crash after request persistence but before wrapper start cannot orphan r
       commander: null,
       authority_principal: 'emperor',
       continuity_kind: 'daily_note',
+      tint: '#302800',
       token_hash: 'a'.repeat(64),
     },
     provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
@@ -193,6 +233,13 @@ test('boot resumes an interrupted Council reconstruction and retires both identi
   const { store, tmux, daemon } = setup();
   await daemon.constructEstate();
   const first = await acknowledgeBoth(daemon, tmux);
+  const boundGenerations = (await store.readAll())
+    .filter((event) => event.event_type === 'reg.bound' && event.entity_id.startsWith('council:'))
+    .map((event) => ({
+      seat_id: event.entity_id,
+      bound_seq: event.seq,
+      pane_generation: event.payload.pane_generation,
+    }));
   const rotationId = crypto.randomUUID();
   const seats = ['council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator'];
   await store.append({
@@ -204,6 +251,7 @@ test('boot resumes an interrupted Council reconstruction and retires both identi
       seats,
       force: true,
       bound_seats: ['council:custodes', 'council:fabricator-general'],
+      bound_generations: boundGenerations,
       foreground_workloads: [],
       trigger: 'pane-died',
     },
@@ -224,4 +272,28 @@ test('boot resumes an interrupted Council reconstruction and retires both identi
     && [first.custodes.instance_id, first.fabricator.instance_id].includes(event.entity_id),
   )).toHaveLength(2);
   expect((await restarted.staticPersonaReadiness()).map((row) => row.state)).toEqual(['awaiting_ack', 'awaiting_ack']);
+});
+
+test('schema-7 untinted static bindings rotate through the typed Council reset on boot', async () => {
+  const { store, tmux, daemon } = setup();
+  await daemon.constructEstate();
+  const first = await acknowledgeBoth(daemon, tmux);
+  tmux.forceSeatTint('council:custodes', null);
+  tmux.forceSeatTint('council:fabricator-general', null);
+  const events = await store.readAll();
+  const legacy = events.filter((event) => event.event_type === 'reg.bound');
+  for (const event of legacy) event.payload.tint = null;
+
+  const restarted = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  await restarted.constructEstate();
+
+  expect(tmux.rebuiltPages()).toContain('council');
+  expect((await store.readAll()).filter((event) =>
+    event.event_type === 'reg.retired'
+    && [first.custodes.instance_id, first.fabricator.instance_id].includes(event.entity_id),
+  )).toHaveLength(2);
+  expect((await restarted.staticPersonaReadiness()).map((row) => row.state)).toEqual(['awaiting_ack', 'awaiting_ack']);
+  await acknowledgeBoth(restarted, tmux);
+  expect(await tmux.seatTint('council:custodes')).toBe('#302800');
+  expect(await tmux.seatTint('council:fabricator-general')).toBe('#300808');
 });

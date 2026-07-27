@@ -35,9 +35,18 @@ contracts source, and the public route shape.
 - **Static Council singletons.** Custodes (Claude) and Fabricator-General
   (Codex) are compile-time declarations launched through the Fleet wrapper.
   A private one-time handshake binds each fresh instance only after txd
-  attests the expected engine process in the expected physical seat. Pax and
-  Orchestrator remain live, unbound shells. Any Council reconstruction wipes
-  all four panes and launches fresh Custodes and Fabricator-General instances.
+  attests the wrapper-selected executable, process pair, and expected physical
+  seat, then applies
+  and reads back the declaration's pane tint. Custodes is `#302800`;
+  Fabricator-General is `#300808`. Pax and Orchestrator remain live, unbound,
+  untinted shells. Any Council reconstruction wipes all four panes and launches
+  fresh Custodes and Fabricator-General instances.
+- **Tint is binding evidence.** A bound pane's declared tint is applied and
+  physically verified before `reg.bound`; bind failure compensates fail-dark.
+  Close and reconstruction clear it. Health and estate reads expose tint
+  readiness, and reconcile reports physical drift as a binding contradiction.
+  There is no public tint mutation route or CLI. The ruled future birth-service
+  boundary is recorded in [registration-architecture.md](registration-architecture.md).
 
 ## HTTP surface — the RATIFIED planes
 
@@ -47,7 +56,7 @@ each route is the ruled daemon behavior, unchanged.
 
 | Method | Path                    | Purpose                                          |
 |--------|-------------------------|--------------------------------------------------|
-| GET    | `/ctl/health`           | Honest liveness + build + tmux reachability      |
+| GET    | `/ctl/health`           | Honest liveness + build + tmux/tint attestation  |
 | POST   | `/ctl/reconcile`        | Replay-driven reconcile; p0 on contradiction     |
 | POST   | `/ctl/estate/rotate`    | Explicit estate, border-total page, or pane reset |
 | POST   | `/ctl/clipboard/push`   | Read the transient `tx-clipboard` buffer for an explicit client-side push |
@@ -59,7 +68,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
 | POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
 | POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost; fires auto-close) and `hook.user_prompt_submit`; acks everything else |
-| GET    | `/tmux/read/estate`     | Estate observation: seats, panes, occupancy incl. bindings |
+| GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.

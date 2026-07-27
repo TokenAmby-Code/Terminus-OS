@@ -20,7 +20,8 @@ test('adapter emits sanitized structured audit records without arguments or raw 
   expect(audits.map(({ operation, target, outcome, stderr_category }) => ({ operation, target, outcome, stderr_category }))).toEqual([
     { operation: 'observe_seats', target: 'estate', outcome: 'succeeded', stderr_category: 'none' },
     { operation: 'resolve_seat', target: 'palace:N', outcome: 'succeeded', stderr_category: 'none' },
-    { operation: 'reap_seat', target: 'palace:N', outcome: 'failed', stderr_category: 'not_found' },
+    { operation: 'resolve_seat', target: 'palace:N', outcome: 'succeeded', stderr_category: 'none' },
+    { operation: 'set_seat_tint', target: 'palace:N', outcome: 'failed', stderr_category: 'not_found' },
   ]);
   for (const record of audits) {
     expect(Object.keys(record).sort()).toEqual(['duration_ms', 'operation', 'outcome', 'stderr_category', 'target']);
@@ -47,12 +48,40 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
       operations.push(args[0]!);
       if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
       if (args[0] === 'display-message') return { code: 0, stdout: 'palace:N\n', stderr: '' };
+      if (args[0] === 'show-options') return { code: 0, stdout: 'default\n', stderr: '' };
       return { code: 0, stdout: '', stderr: '' };
     },
     audit: () => {},
   });
   expect(await tmux.resetSeat('palace:N')).toBe(true);
-  expect(operations).toEqual(['list-panes', 'clear-history', 'respawn-pane', 'display-message']);
+  expect(operations).toEqual([
+    'list-panes', 'clear-history', 'respawn-pane', 'display-message',
+    'list-panes', 'select-pane', 'list-panes', 'show-options', 'show-options',
+  ]);
+});
+
+test('persona tint writes both pane-local styles and accepts only exact read-back', async () => {
+  let tint = 'default';
+  const calls: string[][] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
+      if (args[0] === 'select-pane') {
+        tint = args.at(-1) ?? '';
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'show-options') return { code: 0, stdout: `${tint}\n`, stderr: '' };
+      throw new Error(`unexpected command ${args[0]}`);
+    },
+    audit: () => {},
+  });
+
+  expect(await tmux.setSeatTint('palace:N', '#302800')).toBe(true);
+  expect(await tmux.seatTint('palace:N')).toBe('#302800');
+  expect(await tmux.setSeatTint('palace:N', null)).toBe(true);
+  expect(await tmux.seatTint('palace:N')).toBeNull();
+  expect(calls.some((args) => args[0] === 'select-pane' && args.at(-1) === 'bg=#302800')).toBe(true);
 });
 
 test('static launch execs the wrapper as the pane process for physical attestation', async () => {
@@ -99,7 +128,61 @@ test('physical attestation reads live procfs parent and engine identity', async 
       audit: () => {},
     });
 
-    expect(await tmux.attestStaticAgent('council:custodes', process.pid, child.pid, 'claude')).toBe(true);
+    expect(await tmux.attestStaticAgent('council:custodes', process.pid, child.pid, 'claude', engine)).toBe(true);
+  } finally {
+    child.kill(9);
+    await child.exited;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('physical attestation rejects prefix-spoofed engine process names', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'txd-attestation-spoof-'));
+  const engine = join(directory, 'claude-rogue');
+  copyFileSync('/usr/bin/sleep', engine);
+  chmodSync(engine, 0o700);
+  const child = Bun.spawn([engine, '600'], { stdout: 'ignore', stderr: 'ignore' });
+  try {
+    const tmux = new RealTmux('scratch', {
+      run: async (_socket, args) => {
+        if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tcouncil:custodes\n', stderr: '' };
+        if (args[0] === 'display-message') return { code: 0, stdout: `${process.pid}\t0\n`, stderr: '' };
+        throw new Error(`unexpected tmux call: ${args[0]}`);
+      },
+      audit: () => {},
+    });
+
+    expect(await tmux.attestStaticAgent('council:custodes', process.pid, child.pid, 'claude', engine)).toBe(false);
+  } finally {
+    child.kill(9);
+    await child.exited;
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('physical attestation rejects an exact-name rogue executable', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'txd-attestation-exe-spoof-'));
+  const rogue = join(directory, 'claude');
+  copyFileSync('/usr/bin/sleep', rogue);
+  chmodSync(rogue, 0o700);
+  const child = Bun.spawn([rogue, '600'], { stdout: 'ignore', stderr: 'ignore' });
+  try {
+    const tmux = new RealTmux('scratch', {
+      run: async (_socket, args) => {
+        if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tcouncil:custodes\n', stderr: '' };
+        if (args[0] === 'display-message') return { code: 0, stdout: `${process.pid}\t0\n`, stderr: '' };
+        throw new Error(`unexpected tmux call: ${args[0]}`);
+      },
+      audit: () => {},
+    });
+
+    expect(await tmux.attestStaticAgent(
+      'council:custodes',
+      process.pid,
+      child.pid,
+      'claude',
+      '/sanctioned/claude',
+    )).toBe(false);
   } finally {
     child.kill(9);
     await child.exited;

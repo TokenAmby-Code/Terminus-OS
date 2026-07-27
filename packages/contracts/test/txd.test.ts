@@ -18,15 +18,15 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 7 (v7 = Council static personas)", () => {
-    expect(SCHEMA_VERSION).toBe(7);
+  test("schema_version pins at 8 (v8 = physically attested persona tint)", () => {
+    expect(SCHEMA_VERSION).toBe(8);
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(36);
+    expect(EVENT_TYPES).toHaveLength(38);
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
-    expect(REG_EVENT_NAMES).toHaveLength(16);
+    expect(REG_EVENT_NAMES).toHaveLength(18);
     expect(ACT_EVENT_NAMES).toHaveLength(11);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
@@ -56,14 +56,14 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test('tmux lifecycle ingress accepts only typed pane events with canonical page input', () => {
-    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 7, event: 'pane-exited', page: 'palace' })).toEqual({
-      schema_version: 7, event: 'pane-exited', page: 'palace',
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 8, event: 'pane-exited', page: 'palace' })).toEqual({
+      schema_version: 8, event: 'pane-exited', page: 'palace',
     });
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 7, event: 'pane-vanished', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 8, event: 'pane-vanished', page: 'palace' })).toThrow();
   });
 
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
-    const base = { schema_version: 7, source_instance_id: "source", target: "target", ask: false, reply: false };
+    const base = { schema_version: 8, source_instance_id: "source", target: "target", ask: false, reply: false };
     expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
     expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
@@ -82,7 +82,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(SendReceiptSchema.parse({ ...base, bytes_delivered: 3 }).bytes_delivered).toBe(3);
   });
 
-  test("cancelled receipts name only the binding generation reason", () => {
+  test("cancelled receipts carry an explicit typed cause", () => {
     expect(SendReceiptSchema.parse({
       verdict: "cancelled",
       resolution: { target: "somnium:NE", seat_id: "somnium:NE", bound_seq: 42 },
@@ -107,6 +107,7 @@ describe("txd lifecycle vocabulary", () => {
       open_contradictions: 0,
       tmux_reachable: true,
       static_personas: [],
+      tints: [],
     };
     expect(HealthSchema.parse(health).service).toBe("txd");
     expect(() => HealthSchema.parse({ ...health, service: "k12_daemon" })).toThrow();

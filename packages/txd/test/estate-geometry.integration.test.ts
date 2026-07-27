@@ -162,6 +162,7 @@ describe('disposable canonical estate geometry', () => {
     const before = (await tmux(socket, 'list-panes', '-t', 'main:palace', '-F', '#{pane_pid}')).split('\n');
     await tmux(socket, 'set-option', '-p', '-t', 'main:palace.0', '@scratch', 'must-die');
     await tmux(socket, 'set-option', '-w', '-t', 'main:palace', '@page_scratch', 'must-die');
+    await tmux(socket, 'select-pane', '-t', 'main:palace.0', '-P', 'bg=#302800');
     await tmux(socket, 'resize-pane', '-Z', '-t', 'main:palace.0');
     // A reconstructed seed must not inherit its prior workload command. Static
     // Council panes otherwise replay a stale wrapper launch before txd can
@@ -185,5 +186,33 @@ describe('disposable canonical estate geometry', () => {
     expect(rebuilt.every(([, pid, scratch, dead]) => !before.includes(pid!) && scratch === '' && dead === '0')).toBe(true);
     expect(rebuilt.find(([seat]) => seat === 'palace:W')?.[4]).toBe(defaultShell);
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{window_zoomed_flag}\t#{@page_scratch}')).toBe('0');
+    for (const seat of TXD_WINDOWS.palace) expect(await control.seatTint(seat)).toBeNull();
+  });
+
+  test('Council reconstruction replaces all four Council processes, clears tint, and preserves every other process', async () => {
+    const socket = `txd-council-rebuild-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    expect(await control.setSeatTint('council:custodes', '#302800')).toBe(true);
+    expect(await control.setSeatTint('council:fabricator-general', '#300808')).toBe(true);
+
+    const before = new Map((await tmux(
+      socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
+    )).split('\n').map((row) => row.split('\t') as [string, string]));
+
+    expect(await control.rebuildPage('council')).toBe(true);
+
+    const after = new Map((await tmux(
+      socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
+    )).split('\n').map((row) => row.split('\t') as [string, string]));
+    for (const seat of TXD_WINDOWS.council) {
+      expect(after.get(seat)).not.toBe(before.get(seat));
+      expect(await control.seatTint(seat)).toBeNull();
+    }
+    for (const seat of Object.values(TXD_WINDOWS).flat().filter((seat) => !seat.startsWith('council:'))) {
+      expect(after.get(seat)).toBe(before.get(seat));
+    }
   });
 });
