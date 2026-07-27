@@ -830,7 +830,7 @@ export class RealTmux implements TmuxControlPlane {
     ]);
     if (inactive.code !== 0 || active.code !== 0) return undefined;
     const styles = [inactive.stdout.trim(), active.stdout.trim()];
-    if (styles.every((style) => style === 'default')) return null;
+    if (styles.every((style) => style === '' || style === 'default')) return null;
     if (styles[0] === styles[1] && styles[0]?.startsWith('bg=')) return styles[0].slice(3);
     return styles.join('|');
   }

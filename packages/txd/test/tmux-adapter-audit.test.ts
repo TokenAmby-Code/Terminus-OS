@@ -84,6 +84,19 @@ test('persona tint writes both pane-local styles and accepts only exact read-bac
   expect(calls.some((args) => args[0] === 'select-pane' && args.at(-1) === 'bg=#302800')).toBe(true);
 });
 
+test('absent pane-local style options attest an untinted seat', async () => {
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
+      if (args[0] === 'show-options') return { code: 0, stdout: '', stderr: '' };
+      throw new Error(`unexpected command ${args[0]}`);
+    },
+    audit: () => {},
+  });
+
+  expect(await tmux.seatTint('palace:N')).toBeNull();
+});
+
 test('static launch execs the wrapper as the pane process for physical attestation', async () => {
   const calls: string[][] = [];
   const tmux = new RealTmux('scratch', {
