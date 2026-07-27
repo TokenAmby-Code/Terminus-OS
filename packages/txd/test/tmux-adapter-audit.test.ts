@@ -15,7 +15,7 @@ test('adapter emits sanitized structured audit records without arguments or raw 
   const tmux = new RealTmux('scratch', { run, audit: (record) => audits.push(record) });
 
   expect(await tmux.listSeats()).toEqual([{ seat_id: 'palace:N', pane: 'live' }]);
-  expect(await tmux.reapSeat('palace:N')).toBe(false);
+  expect(await tmux.reapSeat('palace:N', null)).toBe(false);
 
   expect(audits.map(({ operation, target, outcome, stderr_category }) => ({ operation, target, outcome, stderr_category }))).toEqual([
     { operation: 'observe_seats', target: 'estate', outcome: 'succeeded', stderr_category: 'none' },
@@ -82,6 +82,52 @@ test('persona tint writes both pane-local styles and accepts only exact read-bac
   expect(await tmux.setSeatTint('palace:N', null)).toBe(true);
   expect(await tmux.seatTint('palace:N')).toBeNull();
   expect(calls.some((args) => args[0] === 'select-pane' && args.at(-1) === 'bg=#302800')).toBe(true);
+});
+
+test('absent pane-local style options attest an untinted seat', async () => {
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
+      if (args[0] === 'show-options') return { code: 0, stdout: '', stderr: '' };
+      throw new Error(`unexpected command ${args[0]}`);
+    },
+    audit: () => {},
+  });
+
+  expect(await tmux.seatTint('palace:N')).toBeNull();
+});
+
+test('failed reap restores the exact observed pane styles when the caller omits a prior tint', async () => {
+  const styles = new Map([
+    ['window-style', 'fg=#c0ffee'],
+    ['window-active-style', 'bg=#302800,italics'],
+  ]);
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
+      if (args[0] === 'show-options') {
+        return { code: 0, stdout: `${styles.get(args.at(-1)!) ?? ''}\n`, stderr: '' };
+      }
+      if (args[0] === 'select-pane') {
+        styles.set('window-style', args.at(-1) ?? '');
+        styles.set('window-active-style', args.at(-1) ?? '');
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'set-option') {
+        styles.set(args.at(-2)!, args.at(-1) ?? '');
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'respawn-pane') return { code: 1, stdout: '', stderr: 'forced failure' };
+      throw new Error(`unexpected command ${args[0]}`);
+    },
+    audit: () => {},
+  });
+
+  expect(await tmux.reapSeat('palace:N')).toBe(false);
+  expect(Object.fromEntries(styles)).toEqual({
+    'window-style': 'fg=#c0ffee',
+    'window-active-style': 'bg=#302800,italics',
+  });
 });
 
 test('static launch execs the wrapper as the pane process for physical attestation', async () => {

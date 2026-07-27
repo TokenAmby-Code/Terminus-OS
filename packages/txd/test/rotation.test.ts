@@ -162,6 +162,73 @@ test('boot resumes a pending pane reconstruction and retires its exact binding',
   )).toHaveLength(1);
 });
 
+test('reconcile resumes an admitted scoped reset after a transient physical failure', async () => {
+  class FlakyResetTmux extends FakeTmux {
+    private failures = 1;
+    override async resetSeat(seatId: string): Promise<boolean> {
+      if (this.failures-- > 0) return false;
+      return super.resetSeat(seatId);
+    }
+  }
+  const store = new MemoryEventStore();
+  const tmux = new FlakyResetTmux();
+  const daemon = new Daemon(store, tmux);
+  await daemon.constructEstate();
+  await daemon.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'ne', persona: 'ne', tint: '#1' });
+
+  const reset = await daemon.resetEstateScope({
+    schema_version: SCHEMA_VERSION,
+    force: true,
+    scope: 'pane',
+    pane: 'somnium:NE',
+  });
+  expect(reset).toMatchObject({ ok: false, accepted: false, reason: 'reset_failed' });
+
+  await daemon.reconcile();
+
+  expect(tmux.resetSeats()).toEqual(['somnium:NE']);
+  expect((await daemon.estateRows()).find((row) => row.seat_id === 'somnium:NE')).toMatchObject({
+    binding: 'unbound',
+  });
+  expect((await store.readAll()).filter((event) =>
+    event.entity_id === reset.rotation_id && event.event_type === 'estate.scoped_reset_completed',
+  )).toHaveLength(1);
+});
+
+test('boot closes an unresumable scoped reset without touching the current binding', async () => {
+  const { store, tmux, daemon } = await setup();
+  await daemon.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'ne', persona: 'ne', tint: '#1' });
+  const resetId = crypto.randomUUID();
+  await store.append({
+    entity_type: 'estate',
+    entity_id: resetId,
+    event_type: 'estate.scoped_reset_requested',
+    payload: {
+      scope: 'pane',
+      seats: ['somnium:NE'],
+      force: true,
+      bound_seats: ['somnium:NE'],
+      foreground_workloads: [],
+      trigger: 'operator',
+    },
+    provenance: { source: 'wrapper', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: new Date().toISOString(),
+  });
+
+  const restarted = new Daemon(store, tmux);
+  await restarted.constructEstate();
+
+  expect(tmux.resetSeats()).toEqual([]);
+  expect((await restarted.estateRows()).find((row) => row.seat_id === 'somnium:NE')).toMatchObject({
+    binding: 'bound',
+    entity_id: 'ne',
+  });
+  expect(await tmux.seatTint('somnium:NE')).toBe('#1');
+  expect((await store.readAll()).filter((event) =>
+    event.entity_id === resetId && event.event_type === 'estate.scoped_reset_failed',
+  )).toHaveLength(1);
+});
+
 test('a pending scoped reset fences new bindings and sends on every reserved seat', async () => {
   const { store, tmux, daemon } = await setup();
   await store.append({
