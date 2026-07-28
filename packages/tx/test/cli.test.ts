@@ -77,3 +77,10 @@ test('invalid mode arguments never reach txd', async () => {
   expect(h.calls).toEqual([]);
   expect(h.stderr[0]).toContain('--trigger must be preplan or context_cycle');
 });
+
+test('mode target cannot consume the next option token', async () => {
+  const h = harness();
+  expect(await runCli(['mode', 'enter', '--target', '--trigger', 'preplan'], h.deps)).toBe(1);
+  expect(h.calls).toEqual([]);
+  expect(h.stderr[0]).toContain('--target requires a logical identity');
+});

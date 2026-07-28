@@ -95,8 +95,11 @@ export const COMMANDS: readonly Command[] = [
       for (let index = 1; index < args.length; index += 1) {
         const arg = args[index];
         if (arg === '--target' && target === undefined) {
-          target = args[++index];
-          if (!target) throw new Error('--target requires a logical identity');
+          const value = args[++index];
+          if (!value || value.startsWith('--')) {
+            throw new Error('--target requires a logical identity');
+          }
+          target = value;
         } else if (arg === '--trigger' && trigger === 'operator') {
           const value = args[++index];
           if (value !== 'preplan' && value !== 'context_cycle') {

@@ -64,6 +64,18 @@ describe("txd lifecycle vocabulary", () => {
       intent: "send_keys",
       trigger: "operator",
     })).toThrow();
+    for (const raw of [
+      { pane_id: "%13" },
+      { keys: ["BTab"] },
+    ]) {
+      expect(() => ModeTransitionRequestSchema.parse({
+        schema_version: 9,
+        target: "council:custodes",
+        intent: "enter_plan",
+        trigger: "preplan",
+        ...raw,
+      })).toThrow();
+    }
   });
 
   test("event input holds dumb facts only — the 6 pre-store columns", () => {

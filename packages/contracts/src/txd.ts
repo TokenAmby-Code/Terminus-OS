@@ -601,7 +601,7 @@ export const MODE_TRANSITION_MECHANISMS = ['none', 'slash_command', 'mode_cycle'
 export type ModeTransitionMechanism = (typeof MODE_TRANSITION_MECHANISMS)[number];
 export const ModeTransitionMechanismSchema = z.enum(MODE_TRANSITION_MECHANISMS);
 
-export const ModeTransitionRequestSchema = z.object({
+export const ModeTransitionRequestSchema = z.strictObject({
   schema_version: z.number().int(),
   target: z.string().min(1),
   intent: ModeTransitionIntentSchema,
