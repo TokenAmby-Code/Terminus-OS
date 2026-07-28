@@ -38,6 +38,16 @@ describe('tmux/tx.conf', () => {
     ]) expect(conf).toContain(binding);
   });
 
+  test('routes bare Shift+Tab through the typed logical mode action', () => {
+    const binding = conf.split('\n').find((line) => line.startsWith('bind -n BTab '));
+    expect(binding).toContain('#{pane_current_command},claude');
+    expect(binding).toContain('#{pane_current_command},codex');
+    expect(binding).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx mode toggle');
+    expect(binding).toContain('--target "#{@canonical_id}"');
+    expect(binding).toContain('{ send-keys BTab }');
+    expect(binding).not.toMatch(/pane_id|tmuxctld|capture-pane|grep/);
+  });
+
   test('pins the keyboard-first selection table and current-viewport entry', () => {
     const selection = conf.slice(conf.indexOf('# Pane-local selection.'), conf.indexOf('%if '));
     for (const binding of [

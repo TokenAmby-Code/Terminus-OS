@@ -26,6 +26,8 @@ import {
   type EstateRotateResponse,
   type LaunchRequest,
   type LaunchResponse,
+  type ModeTransitionRequest,
+  type ModeTransitionResponse,
   type OpenContradiction,
   type Provenance,
   type ProvenanceSource,
@@ -398,6 +400,89 @@ export class Daemon {
       }
       if (replyingToAsk) await this.assertCallback(replyingToAsk, req.source_instance_id, req.message, 'reply', null, transportReceipt);
       return { ok: true, message_id: messageId, ask_id: askId, source_instance_id: req.source_instance_id, targets, bytes_sent: true, event_ids };
+    });
+  }
+
+  transitionMode(
+    req: ModeTransitionRequest,
+    transportReceipt: string | null = null,
+  ): Promise<ModeTransitionResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) {
+        throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      }
+      const proj = await this.projections();
+      const matches = proj.currentBindings.filter((binding) =>
+        binding.instance_id === req.target
+        || binding.persona === req.target
+        || binding.seat_id === req.target,
+      );
+      if (matches.length === 0) throw new Error(`identity_absent: ${req.target}`);
+      if (matches.length > 1) throw new Error(`identity_ambiguous: ${req.target}`);
+      const binding = matches[0]!;
+      if (!binding.instance_id || !binding.engine) {
+        throw new Error(`engine_unattested: ${req.target}`);
+      }
+      const occurred_at = this.now();
+      const requested = await this.store.append({
+        entity_type: 'instance',
+        entity_id: binding.instance_id,
+        event_type: 'act.mode_transition_requested',
+        payload: {
+          seat_id: binding.seat_id,
+          engine: binding.engine,
+          intent: req.intent,
+          trigger: req.trigger,
+        },
+        provenance: this.prov('wrapper', transportReceipt),
+        occurred_at,
+      });
+
+      let outcome: Awaited<ReturnType<TmuxControlPlane['transitionAgentMode']>>;
+      try {
+        outcome = await this.tmux.transitionAgentMode(binding.seat_id, binding.engine, req.intent);
+      } catch {
+        outcome = {
+          before: 'unknown',
+          after: 'unknown',
+          changed: false,
+          verified: false,
+          mechanism: 'none',
+        };
+      }
+      const terminal = await this.store.append({
+        entity_type: 'instance',
+        entity_id: binding.instance_id,
+        event_type: outcome.verified
+          ? 'act.mode_transition_attested'
+          : 'act.mode_transition_failed',
+        payload: {
+          request_seq: requested.seq,
+          seat_id: binding.seat_id,
+          engine: binding.engine,
+          intent: req.intent,
+          trigger: req.trigger,
+          before: outcome.before,
+          after: outcome.after,
+          changed: outcome.changed,
+          mechanism: outcome.mechanism,
+          reason: outcome.verified ? null : 'transition_unverified',
+        },
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: this.now(),
+      });
+      return {
+        ok: outcome.verified,
+        target: req.target,
+        seat_id: binding.seat_id,
+        instance_id: binding.instance_id,
+        engine: binding.engine,
+        intent: req.intent,
+        trigger: req.trigger,
+        ...outcome,
+        event_ids: [requested.seq, terminal.seq],
+        reason: outcome.verified ? null : 'transition_unverified',
+      };
     });
   }
 
