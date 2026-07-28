@@ -460,7 +460,46 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   private isCanonicalEstate(rows: EstateRow[]): boolean {
-    return this.exactShape(rows, TXD_WINDOWS);
+    return this.canonicalDivergence(rows) === null;
+  }
+
+  /** Human-readable live geometry for one page — the observed value an operator needs. */
+  private describePage(page: string, rows: EstateRow[]): string {
+    const panes = rows.filter((row) => row.session === TXD_SESSION && row.window === page);
+    if (panes.length === 0) return 'no tagged panes';
+    const window = `window ${panes[0]!.windowWidth}x${panes[0]!.windowHeight}`;
+    const seats = panes
+      .map((pane) => `${pane.seat || '<untagged>'}@${pane.left},${pane.top}+${pane.width}x${pane.height}`)
+      .sort()
+      .join(' ');
+    return `${window}; ${seats}`;
+  }
+
+  /**
+   * The single canonical acceptance predicate, stated as its own divergence.
+   * Returns null when `rows` are canonical, otherwise the exact mismatch —
+   * a postcondition an operator cannot act on is a postcondition that turns a
+   * repairable estate into an anonymous outage.
+   */
+  private canonicalDivergence(rows: EstateRow[]): string | null {
+    const expected = Object.entries(TXD_WINDOWS)
+      .flatMap(([window, seats]) => seats.map((seat) => `${TXD_SESSION}\t${window}\t${seat}`))
+      .sort();
+    const actual = rows.map((row) => `${row.session}\t${row.window}\t${row.seat}`).sort();
+    if (actual.length !== expected.length || !actual.every((row, index) => row === expected[index])) {
+      const render = (list: string[]): string =>
+        list.length === 0 ? 'none' : list.map((row) => row.split('\t').join(':')).join(', ');
+      return 'estate seats diverged'
+        + ` (missing: ${render(expected.filter((row) => !actual.includes(row)))};`
+        + ` unexpected: ${render(actual.filter((row) => !expected.includes(row)))};`
+        + ` observed ${actual.length} of ${expected.length} canonical panes)`;
+    }
+    for (const [window, seats] of Object.entries(TXD_WINDOWS)) {
+      if (!this.pageGeometryMatches(window, seats, rows)) {
+        return `page ${window} geometry is not canonical: ${this.describePage(window, rows)}`;
+      }
+    }
+    return null;
   }
 
   async estateGeneration(): Promise<EstateGeneration> {
@@ -564,6 +603,46 @@ export class RealTmux implements TmuxControlPlane {
     return panes;
   }
 
+  /**
+   * Clear display-only zoom on a page. Zoom is the one canonical-shape
+   * violation that costs nothing to correct: every pane is the right process in
+   * the right place, so un-zooming restores canonical geometry without
+   * replacing a single terminal.
+   */
+  private async clearPageZoom(page: string, target: string): Promise<boolean> {
+    const zoomed = await this.command('observe_page_zoom', page, ['display-message', '-p', '-t', target, '#{window_zoomed_flag}']);
+    if (zoomed.code !== 0) return false;
+    if (zoomed.stdout.trim() !== '1') return true;
+    return (await this.command('clear_page_zoom', page, ['resize-pane', '-Z', '-t', target])).code === 0;
+  }
+
+  /** The canonical acceptance predicate for one page: live seats and geometry. */
+  private async pageIsCanonical(page: string, expected: readonly string[]): Promise<boolean> {
+    const live = (await this.listSeats())
+      .filter((seat) => seat.pane === 'live' && seat.seat_id.split(':', 1)[0] === page)
+      .map((seat) => seat.seat_id)
+      .sort();
+    const want = [...expected].sort();
+    if (live.length !== want.length || !live.every((seat, index) => seat === want[index])) return false;
+    return this.pageGeometryMatches(page, expected, await this.estateRows());
+  }
+
+  /**
+   * Drive one canonical page to canonical shape. Recovery enforces rather than
+   * observes: it acts, then re-reads the estate to attest what the action did.
+   * Enforcement escalates so repair stays proportionate to the damage —
+   * display-only drift is corrected in place, and only damage that survives
+   * that earns the destructive rebuild which replaces every process on the page.
+   */
+  private async enforcePage(page: string, expected: readonly string[]): Promise<{ canonical: boolean; rebuilt: boolean }> {
+    if (await this.pageIsCanonical(page, expected)) return { canonical: true, rebuilt: false };
+    if (await this.clearPageZoom(page, `${TXD_SESSION}:${page}`) && await this.pageIsCanonical(page, expected)) {
+      return { canonical: true, rebuilt: false };
+    }
+    if (!(await this.rebuildPage(page))) return { canonical: false, rebuilt: true };
+    return { canonical: await this.pageIsCanonical(page, expected), rebuilt: true };
+  }
+
   async rebuildPage(page: string): Promise<boolean> {
     if (!Object.hasOwn(TXD_WINDOWS, page)) return false;
     const target = `${TXD_SESSION}:${page}`;
@@ -573,9 +652,7 @@ export class RealTmux implements TmuxControlPlane {
       if (listed.code === 0) {
         seed = listed.stdout.trim().split('\n').filter(Boolean)[0];
         if (seed) {
-          const zoomed = await this.command('observe_page_zoom', page, ['display-message', '-p', '-t', seed, '#{window_zoomed_flag}']);
-          if (zoomed.code !== 0) return false;
-          if (zoomed.stdout.trim() === '1' && (await this.command('clear_page_zoom', page, ['resize-pane', '-Z', '-t', seed])).code !== 0) return false;
+          if (!(await this.clearPageZoom(page, seed))) return false;
           if ((await this.command('clear_page_to_seed', page, ['kill-pane', '-a', '-t', seed])).code !== 0) return false;
           if ((await this.command('clear_page_history', page, ['clear-history', '-t', seed])).code !== 0) return false;
           await this.clearPaneUserOptions(seed, page);
@@ -621,26 +698,24 @@ export class RealTmux implements TmuxControlPlane {
         return row.session === TXD_SESSION && seats !== undefined && (row.seat === '' || seats.includes(row.seat));
       });
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
-      const observed = await this.listSeats();
-      const observedByPage = new Map<string, SeatObservation[]>();
+      // Canonical recovery is enforcement, not assertion. Every page is driven
+      // to canonical shape against the same predicate that later accepts it;
+      // a repair trigger weaker than the acceptance predicate leaves drift that
+      // is observed, called recoverable, never repaired, and then fatal.
       const rebuilt_pages: TxdPage[] = [];
-      for (const seat of observed) {
-        const page = seat.seat_id.split(':', 1)[0]!;
-        observedByPage.set(page, [...(observedByPage.get(page) ?? []), seat]);
-      }
       for (const [page, expectedSeats] of Object.entries(TXD_WINDOWS)) {
-        const pageSeats = observedByPage.get(page) ?? [];
-        const live = pageSeats.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id).sort();
-        const expected = [...expectedSeats].sort();
-        const healthy = live.length === expected.length && live.every((seat, index) => seat === expected[index]);
-        if (!healthy && !(await this.rebuildPage(page))) throw new Error(`txd failed to reconstruct damaged canonical page ${page}`);
-        if (!healthy) rebuilt_pages.push(page as TxdPage);
+        const enforced = await this.enforcePage(page, expectedSeats);
+        if (enforced.rebuilt) rebuilt_pages.push(page as TxdPage);
+        if (!enforced.canonical) {
+          throw new Error(
+            `txd could not drive canonical page ${page} to canonical shape: ${this.describePage(page, await this.estateRows())}`,
+          );
+        }
       }
-      if (this.isCanonicalEstate(await this.estateRows())) {
-        for (const seat of TXD_ESTATE) await this.ensureSeatGeneration(seat);
-        return { state: 'existing', rebuilt_pages };
-      }
-      throw new Error('txd canonical estate recovery postcondition failed');
+      const divergence = this.canonicalDivergence(await this.estateRows());
+      if (divergence) throw new Error(`txd canonical estate recovery could not converge: ${divergence}`);
+      for (const seat of TXD_ESTATE) await this.ensureSeatGeneration(seat);
+      return { state: 'existing', rebuilt_pages };
     }
 
     let sessionCreated = false;
@@ -699,7 +774,11 @@ export class RealTmux implements TmuxControlPlane {
       const councilPanes = [council, councilSW, councilNE, councilSE];
       await Promise.all(TXD_WINDOWS.council.map((seat, index) => this.tag(councilPanes[index]!, seat)));
 
-      if (!this.isCanonicalEstate(await this.estateRows())) throw new Error('txd canonical estate postcondition failed');
+      // Construction owns an empty socket and every pane it just made. A shape
+      // that is still wrong here is not estate drift to be enforced away — it
+      // is a broken constructor, so roll the whole session back and say why.
+      const divergence = this.canonicalDivergence(await this.estateRows());
+      if (divergence) throw new Error(`txd canonical estate construction postcondition failed: ${divergence}`);
       return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
     } catch (error) {
       if (sessionCreated) await this.command('rollback_estate', 'estate', ['kill-session', '-t', TXD_SESSION]);
