@@ -76,6 +76,26 @@ function issuePath(path: PropertyKey[]): string {
 
 const GITHUB_WEBHOOK_BODY_LIMIT = 1024 * 1024;
 
+// Refusals at the github door are 4xx facts GitHub records, but without a
+// local log line a dead delivery is invisible from this side. Every
+// interpretation refusal logs loudly before the response leaves.
+function refuseGithubDelivery(
+  reason: string,
+  deliveryId: string,
+  githubEvent: string,
+  extra: Record<string, unknown> = {},
+): void {
+  console.error(JSON.stringify({
+    level: 'warn',
+    event: 'github_delivery_refused',
+    route: 'POST /ingress/github',
+    reason,
+    delivery_id: deliveryId,
+    github_event: githubEvent,
+    ...extra,
+  }));
+}
+
 async function readBodyBounded(req: Request, limit: number): Promise<string | null> {
   const declared = req.headers.get('content-length');
   if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > limit)) return null;
@@ -209,13 +229,17 @@ export function buildRoutes(deps: ServerDeps): Route[] {
           }, 403);
         }
         const eventType = Object.hasOwn(GITHUB_EVENTS, githubEvent) ? GITHUB_EVENTS[githubEvent] : undefined;
-        if (!eventType) return json({ ok: false, error: 'unsupported_github_event' }, 422);
+        if (!eventType) {
+          refuseGithubDelivery('unsupported_github_event', deliveryId, githubEvent);
+          return json({ ok: false, error: 'unsupported_github_event' }, 422);
+        }
         let document: Record<string, unknown>;
         try {
           const parsed = JSON.parse(raw) as unknown;
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
           document = parsed as Record<string, unknown>;
         } catch {
+          refuseGithubDelivery('invalid_github_payload', deliveryId, githubEvent);
           return json({ ok: false, error: 'invalid_github_payload' }, 422);
         }
         const requestHash = await sha256(`${githubEvent}\n${canonicalJson(document)}`);
@@ -257,6 +281,9 @@ export function buildRoutes(deps: ServerDeps): Route[] {
             return json({ ok: false, error: 'github_delivery_conflict' }, 409);
           }
           if (error instanceof z.ZodError) {
+            refuseGithubDelivery('normalized_payload_invalid', deliveryId, githubEvent, {
+              issues: error.issues.map((issue) => `${issuePath(issue.path)}: ${issue.code}`),
+            });
             return json({ ok: false, error: 'invalid_github_delivery_identity' }, 422);
           }
           throw error;
@@ -559,7 +586,10 @@ function normalizeGithubPayload(event: string, document: Record<string, unknown>
     normalized.head_sha = text(document.sha);
     normalized.check_name = text(document.context);
     normalized.status = text(document.state);
-    normalized.producer_login = text(record(document.creator).login);
+    // The webhook surface carries the commit-status creator as the delivery
+    // sender; a top-level `creator` exists only on the REST commit-status
+    // object and is never delivered here.
+    normalized.producer_login = text(sender.login);
   }
   if (event === 'push') {
     normalized.before_sha = text(document.before);

@@ -412,3 +412,96 @@ test("a secret without a declared App identity refuses every delivery — no def
     server.stop(true);
   }
 });
+
+// ── Commit-status producer identity — sender, never creator ────────────────
+// GitHub's `status` WEBHOOK delivers the commit-status creator as the
+// top-level `sender`; a `creator` field exists only on the REST commit-status
+// OBJECT and never rides the webhook payload. A normalizer that reads
+// `creator` nulls producer_login, so the strict schema refuses every real
+// status delivery (e.g. CodeRabbit) at the door.
+
+test("a real-shaped commit-status delivery is admitted with producer identity from sender", async () => {
+  const { replayStore, server } = fixture();
+  const statusDelivery = crypto.randomUUID();
+  // Modeled on the real CodeRabbit status delivery: top-level sender, no
+  // `creator` field anywhere in the payload.
+  const statusPayload = JSON.stringify({
+    id: 33001,
+    sha: "a".repeat(40),
+    state: "success",
+    context: "CodeRabbit",
+    description: "Review completed",
+    target_url: "https://coderabbit.ai/reviews/263",
+    branches: [{ name: "feat/replay" }],
+    repository: { id: 42, full_name: "TokenAmby-Code/Terminus-OS" },
+    sender: { login: "coderabbitai[bot]" },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
+      method: "POST",
+      headers: {
+        ...appHeaders,
+        "x-github-delivery": statusDelivery,
+        "x-github-event": "status",
+        "x-hub-signature-256": await signature(statusPayload),
+      },
+      body: statusPayload,
+    });
+    expect(response.status).toBe(202);
+    expect((await replayStore.projection(statusDelivery))?.events[0]).toMatchObject({
+      event_type: "github.commit_status",
+      payload: {
+        check_name: "CodeRabbit",
+        status: "success",
+        head_sha: "a".repeat(40),
+        producer_login: "coderabbitai[bot]",
+        sender: "coderabbitai[bot]",
+      },
+    });
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("a status delivery without a sender still refuses — but loudly, never unlogged", async () => {
+  const { replayStore, server } = fixture();
+  const statusDelivery = crypto.randomUUID();
+  const statusPayload = JSON.stringify({
+    sha: "a".repeat(40),
+    state: "pending",
+    context: "CodeRabbit",
+    repository: { id: 42, full_name: "TokenAmby-Code/Terminus-OS" },
+  });
+  const lines: string[] = [];
+  const original = console.error;
+  console.error = (line: unknown) => { lines.push(String(line)); };
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.port}/ingress/github`, {
+      method: "POST",
+      headers: {
+        ...appHeaders,
+        "x-github-delivery": statusDelivery,
+        "x-github-event": "status",
+        "x-hub-signature-256": await signature(statusPayload),
+      },
+      body: statusPayload,
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ ok: false, error: "invalid_github_delivery_identity" });
+    expect(await replayStore.projection(statusDelivery)).toBeNull();
+    const refusals = lines
+      .map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return {}; } })
+      .filter((entry) => entry.event === "github_delivery_refused");
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]).toMatchObject({
+      level: "warn",
+      route: "POST /ingress/github",
+      delivery_id: statusDelivery,
+      github_event: "status",
+      reason: "normalized_payload_invalid",
+    });
+  } finally {
+    console.error = original;
+    server.stop(true);
+  }
+});
