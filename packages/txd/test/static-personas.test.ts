@@ -14,7 +14,7 @@ const BUILD = { version: '0', git_sha: 'x', bun: 'y' };
 function setup() {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
-  const daemon = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  const daemon = new Daemon(store, tmux, undefined, undefined, RUNTIME);
   return { store, tmux, daemon };
 }
 
@@ -100,7 +100,7 @@ test('static binding cleanup attempts abort and preserves the commit error when 
   }
   const store = new FailingBoundStore();
   const tmux = new FakeTmux();
-  const daemon = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  const daemon = new Daemon(store, tmux, undefined, undefined, RUNTIME);
   await daemon.constructEstate();
   tmux.failTintClearSeat('council:custodes');
 
@@ -170,7 +170,7 @@ test('daemon restart closes pending reservations and relaunches fresh identities
   const { store, tmux, daemon } = setup();
   await daemon.constructEstate();
   const before = (await store.readAll()).filter((event) => event.event_type === 'reg.static_launch_requested');
-  const restarted = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  const restarted = new Daemon(store, tmux, undefined, undefined, RUNTIME);
   await restarted.constructEstate();
   const after = (await store.readAll()).filter((event) => event.event_type === 'reg.static_launch_requested');
   expect(after).toHaveLength(before.length * 2);
@@ -206,7 +206,7 @@ test('a crash after request persistence but before wrapper start cannot orphan r
     occurred_at: new Date().toISOString(),
   });
 
-  const restarted = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  const restarted = new Daemon(store, tmux, undefined, undefined, RUNTIME);
   await restarted.constructEstate();
 
   expect((await store.readAll()).some((event) =>
@@ -247,7 +247,7 @@ test('Council reconstruction retires both instances and launches two fresh ident
   expect(retired).toHaveLength(2);
 
   const requestsBeforeBoot = (await store.readAll()).filter((event) => event.event_type === 'reg.static_launch_requested').length;
-  const rebooted = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  const rebooted = new Daemon(store, tmux, undefined, undefined, RUNTIME);
   await rebooted.constructEstate();
   expect((await store.readAll()).filter((event) => event.event_type === 'reg.static_launch_requested')).toHaveLength(requestsBeforeBoot);
 });
@@ -283,7 +283,7 @@ test('boot resumes an interrupted Council reconstruction and retires both identi
   });
   await tmux.rebuildPage('council');
 
-  const restarted = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  const restarted = new Daemon(store, tmux, undefined, undefined, RUNTIME);
   await restarted.constructEstate();
 
   const events = await store.readAll();
@@ -310,7 +310,7 @@ test('schema-7 untinted static bindings rotate through the typed Council reset o
     event.provenance.emitter_version = 7;
   }
 
-  const restarted = new Daemon(store, tmux, undefined, undefined, undefined, undefined, RUNTIME);
+  const restarted = new Daemon(store, tmux, undefined, undefined, RUNTIME);
   await restarted.constructEstate();
 
   expect(tmux.rebuiltPages()).toContain('council');
