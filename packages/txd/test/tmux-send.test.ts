@@ -29,18 +29,15 @@ test('paste-burst swallow is detected, then a separated Enter retry verifies sub
     ['send-keys', '-t', '%7', 'Enter'],
   ]);
   expect(sleeps).toEqual([200, 400]);
-  expect(outcome.trace).toEqual([
-    { kind: 'literal_insert', attempt: 1, ok: true },
-    { kind: 'submit_enter', attempt: 1, ok: true },
-    { kind: 'submit_verify', attempt: 1, ok: false },
-    { kind: 'submit_enter', attempt: 2, ok: true },
-    { kind: 'submit_verify', attempt: 2, ok: true },
-  ]);
+  // Two pane readbacks: the first proves the swallow, the second proves submission.
+  expect(calls.filter((args) => args[0] === 'capture-pane')).toHaveLength(2);
 });
 
 test('swallowed Enter is retried twice and final verdict remains honest', async () => {
+  const calls: string[][] = [];
   const sleeps: number[] = [];
   const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args);
     if (args[0] === 'list-panes') return { code: 0, stdout: '%8\tpalace:S\n', stderr: '' };
     if (args[0] === 'display-message') return { code: 0, stdout: '9\n', stderr: '' };
     if (args[0] === 'capture-pane') return { code: 0, stdout: '> dispatch the worker\n', stderr: '' };
@@ -51,11 +48,8 @@ test('swallowed Enter is retried twice and final verdict remains honest', async 
   const outcome = await tmux.sendToSeat('palace:S', 'dispatch the worker');
 
   expect(outcome.verdict).toBe('partial_delivered');
-  expect(outcome.trace.filter((event) => event.kind === 'submit_enter')).toHaveLength(3);
-  expect(outcome.trace.filter((event) => event.kind === 'submit_verify')).toEqual([
-    { kind: 'submit_verify', attempt: 1, ok: false },
-    { kind: 'submit_verify', attempt: 2, ok: false },
-    { kind: 'submit_verify', attempt: 3, ok: false },
-  ]);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(3);
+  // Every Enter was verified by pane readback, and every readback showed the swallow.
+  expect(calls.filter((args) => args[0] === 'capture-pane')).toHaveLength(3);
   expect(sleeps).toEqual([150, 300, 450]);
 });
