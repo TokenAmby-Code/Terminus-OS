@@ -56,6 +56,18 @@ describe('systemd/txd.service pins', () => {
     pin('RestartSec=2');
   });
 
+  // A deterministic startup failure must fail loud once. The default limit
+  // (5 starts / 10s) never trips against a ~2.3s crash cycle, which is how the
+  // 2026-07-26/27 estate-recovery defect crashlooped 8832 times unbounded.
+  test('a deterministic startup failure lands in failed instead of crashlooping', () => {
+    pin('StartLimitIntervalSec=60');
+    pin('StartLimitBurst=5');
+    const startLimit = lines.findIndex((l) => l.startsWith('StartLimitIntervalSec='));
+    const service = lines.findIndex((l) => l === '[Service]');
+    expect(startLimit).toBeGreaterThan(lines.indexOf('[Unit]'));
+    expect(startLimit).toBeLessThan(service);
+  });
+
   test('sandboxed txd is lifecycle-bound to the unsandboxed tmux server owner', () => {
     pin('BindsTo=tx-estate.service');
     pin('After=network-online.target tx-estate.service');
