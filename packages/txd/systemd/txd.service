@@ -17,6 +17,18 @@ Wants=network-online.target
 # with a visible condition-failed status until ~/secrets/txd/txd.json is
 # seeded (see README "Config bootstrap"). Path matches TXD_CONFIG below.
 ConditionPathExists=%h/secrets/txd/txd.json
+# A deterministic startup failure must fail loud ONCE, not every RestartSec
+# forever. systemd's default limit (5 starts / 10s) never trips here: RestartSec=2
+# plus a ~0.3s crash is a ~2.3s cycle, i.e. ~4.3 starts per 10s — which is how a
+# single non-canonical Council held the whole control plane down for 15 minutes
+# across 8832 silent restarts (2026-07-26/27). Ordering already covers the only
+# legitimate transient: After=/BindsTo= gate txd on tx-estate.service, and that
+# unit's Upholds= restarts txd once the server is back, so a repeated identical
+# failure is deterministic and retrying it is pure noise. The window is sized to
+# contain the burst it must catch — 5 starts x ~2.3s ~= 12s, well inside 60s —
+# so the loop provably trips and the unit lands in failed, where it is visible.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
