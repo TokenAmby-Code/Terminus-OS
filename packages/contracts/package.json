@@ -19,8 +19,7 @@
     "./hooks": "./src/hooks.ts",
     "./desktop-telemetry": "./src/desktop-telemetry.ts",
     "./bus": "./src/bus.ts",
-    "./replay": "./src/replay.ts",
-    "./github-replay": "./src/github-replay.ts"
+    "./replay": "./src/replay.ts"
   },
   "dependencies": {
     "zod": "^4.4.3"

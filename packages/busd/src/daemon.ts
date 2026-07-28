@@ -33,14 +33,6 @@ const replayDispatcher = new ReplayDispatcher(replayStore, {
   deliveryTimeoutMs: cfg.deliveryTimeoutMs,
   batchSize: cfg.batchSize,
 });
-let githubWebhookSecret: Uint8Array | undefined;
-if (cfg.githubWebhookSecretFile) {
-  const file = Bun.file(cfg.githubWebhookSecretFile);
-  if (!await file.exists()) throw new Error('configured GitHub webhook credential is unavailable');
-  const value = (await file.text()).trim();
-  if (!value) throw new Error('configured GitHub webhook credential is empty');
-  githubWebhookSecret = new TextEncoder().encode(value);
-}
 const server = makeServer({
   bind: cfg.bind,
   port: cfg.port,
@@ -52,11 +44,6 @@ const server = makeServer({
   },
   build,
   machine: cfg.machine,
-  // Config validation guarantees the secret and the App id arrive as a pair;
-  // the github door stays fail-closed unless both are present.
-  ...(githubWebhookSecret && cfg.githubWebhookAppId !== null
-    ? { githubWebhookSecret, githubWebhookAppId: cfg.githubWebhookAppId }
-    : {}),
 });
 dispatcher.start();
 replayDispatcher.start();
