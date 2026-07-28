@@ -59,6 +59,13 @@ export const ClipboardPushRequestSchema = z.object({
 });
 export type ClipboardPushRequest = z.infer<typeof ClipboardPushRequestSchema>;
 
+export const ClipboardSelectionRequestSchema = z.object({
+  schema_version: z.number().int(),
+  client_tty: z.string().regex(/^\/dev\/(?:pts\/[0-9]+|tty[A-Za-z0-9._-]*)$/),
+  content: z.string().refine(validClipboardText, 'clipboard must be valid UTF-8 at most 1 MiB'),
+});
+export type ClipboardSelectionRequest = z.infer<typeof ClipboardSelectionRequestSchema>;
+
 export const ClipboardPullResponseSchema = z.object({
   ok: z.literal(true),
   target: z.string().min(1),
@@ -66,6 +73,9 @@ export const ClipboardPullResponseSchema = z.object({
   bytes: z.number().int().nonnegative().max(MAX_CLIPBOARD_BYTES),
 });
 export type ClipboardPullResponse = z.infer<typeof ClipboardPullResponseSchema>;
+
+export const ClipboardSelectionResponseSchema = ClipboardPullResponseSchema;
+export type ClipboardSelectionResponse = z.infer<typeof ClipboardSelectionResponseSchema>;
 
 export const ClipboardPushResponseSchema = ClipboardPullResponseSchema.extend({
   content_base64: z.string()

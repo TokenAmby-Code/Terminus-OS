@@ -38,6 +38,7 @@ import {
   CloseRequestSchema,
   ClipboardPullRequestSchema,
   ClipboardPushRequestSchema,
+  ClipboardSelectionRequestSchema,
   CommHookSchema,
   CommRequestSchema,
   CommWaitRequestSchema,
@@ -178,7 +179,7 @@ async function parseSensitive<T>(req: Request, schema: MutationSchema<T>, error:
   return parsed.data;
 }
 
-function clipboardFailure(error: unknown, direction: 'pull' | 'push'): Response {
+function clipboardFailure(error: unknown, direction: 'pull' | 'push' | 'selection'): Response {
   const message = error instanceof Error ? error.message : '';
   if (message.includes('exceeds')) return json({ ok: false, error: 'clipboard_too_large', direction }, 422);
   if (message.includes('valid UTF-8')) return json({ ok: false, error: 'clipboard_invalid_utf8', direction }, 422);
@@ -269,6 +270,20 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           return json({ ok: true, target: machine, ...await daemon.clipboardPush(parsed) });
         } catch (error) {
           return clipboardFailure(error, 'push');
+        }
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ctl/clipboard/selection'),
+      label: 'POST /ctl/clipboard/selection',
+      handler: async (req) => {
+        const parsed = await parseSensitive(req, ClipboardSelectionRequestSchema, 'invalid_clipboard_selection_request');
+        if (parsed instanceof Response) return parsed;
+        try {
+          return json({ ok: true, target: machine, ...await daemon.clipboardSelection(parsed) });
+        } catch (error) {
+          return clipboardFailure(error, 'selection');
         }
       },
     },

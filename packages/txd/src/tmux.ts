@@ -11,8 +11,9 @@
 // tmux dependency; on-box acceptance exercises the real plane.
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
-import { readFile, readlink } from 'node:fs/promises';
-import { MAX_CLIPBOARD_BYTES } from '@terminus-os/contracts';
+import { open, readFile, readlink } from 'node:fs/promises';
+import { CLIPBOARD_BUFFER_NAME, MAX_CLIPBOARD_BYTES } from '@terminus-os/contracts';
+import { osc52Sequence, validateAttachedClientTty, validateClipboardBytes } from './osc52.ts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
@@ -102,6 +103,8 @@ export interface TmuxControlPlane {
   loadClipboard(text: string): Promise<number>;
   /** Read the one transient clipboard buffer as raw bytes. */
   readClipboard(): Promise<Uint8Array>;
+  /** Commit one selection to the transient buffer and its invoking attached client. */
+  commitClipboardSelection(text: string, clientTty: string): Promise<number>;
 }
 
 const CANON_OPT = '@canonical_id';
@@ -130,6 +133,7 @@ type TmuxRunner = (socket: string, args: string[], stdin?: Uint8Array) => Promis
 type TmuxBinaryResult = { code: number; stdout: Uint8Array; stderr: string; overflow?: boolean };
 type TmuxBinaryRunner = (socket: string, args: string[]) => Promise<TmuxBinaryResult>;
 type Sleep = (ms: number) => Promise<void>;
+type WriteClient = (path: string, data: Uint8Array) => Promise<void>;
 
 export type TmuxAuditRecord = {
   operation: string;
@@ -213,15 +217,31 @@ export class RealTmux implements TmuxControlPlane {
   private sleep: Sleep;
   private enterDelayMs: number;
   private binaryRunner: TmuxBinaryRunner;
+  private writeClient: WriteClient;
 
   constructor(
     private socket: string,
-    options: { run?: TmuxRunner; runBytes?: TmuxBinaryRunner; audit?: AuditSink; sleep?: Sleep; enterDelayMs?: number } = {},
+    options: {
+      run?: TmuxRunner;
+      runBytes?: TmuxBinaryRunner;
+      writeClient?: WriteClient;
+      audit?: AuditSink;
+      sleep?: Sleep;
+      enterDelayMs?: number;
+    } = {},
   ) {
     this.runner = options.run ?? run;
     this.binaryRunner = options.runBytes ?? runBytes;
     this.audit = options.audit ?? ((record) => console.info(JSON.stringify({ level: 'info', event: 'tmux_operation', ...record })));
     this.sleep = options.sleep ?? ((ms) => Bun.sleep(ms));
+    this.writeClient = options.writeClient ?? (async (path, data) => {
+      const handle = await open(path, 'w');
+      try {
+        await handle.write(data);
+      } finally {
+        await handle.close();
+      }
+    });
     const configured = Number(process.env.TXD_SEND_ENTER_DELAY_MS);
     this.enterDelayMs = options.enterDelayMs
       ?? (Number.isFinite(configured) && configured >= 0 ? configured : 200);
@@ -275,15 +295,52 @@ export class RealTmux implements TmuxControlPlane {
 
   async loadClipboard(text: string): Promise<number> {
     const bytes = new TextEncoder().encode(text);
-    if (bytes.byteLength === 0) {
-      await this.command('clipboard_pull', 'tx-clipboard', ['delete-buffer', '-b', 'tx-clipboard']);
-    } else {
-      const result = await this.command('clipboard_pull', 'tx-clipboard', ['load-buffer', '-b', 'tx-clipboard', '-'], bytes);
-      if (result.code !== 0) throw new Error(`txd clipboard pull failed: ${this.stderrCategory(result)}`);
-    }
-    const marker = await this.command('clipboard_pull', 'tx-clipboard', ['set-option', '-g', '@tx_clipboard_empty', bytes.byteLength === 0 ? '1' : '0']);
-    if (marker.code !== 0) throw new Error(`txd clipboard pull failed: ${this.stderrCategory(marker)}`);
+    await this.replaceClipboard(bytes, 'clipboard_pull');
     return bytes.byteLength;
+  }
+
+  private async replaceClipboard(bytes: Uint8Array, operation: string): Promise<void> {
+    const direction = operation === 'clipboard_pull' ? 'pull' : 'selection';
+    if (bytes.byteLength === 0) {
+      await this.command(operation, CLIPBOARD_BUFFER_NAME, ['delete-buffer', '-b', CLIPBOARD_BUFFER_NAME]);
+    } else {
+      const result = await this.command(operation, CLIPBOARD_BUFFER_NAME, ['load-buffer', '-b', CLIPBOARD_BUFFER_NAME, '-'], bytes);
+      if (result.code !== 0) throw new Error(`txd clipboard ${direction} failed: ${this.stderrCategory(result)}`);
+    }
+    const marker = await this.command(operation, CLIPBOARD_BUFFER_NAME, ['set-option', '-g', '@tx_clipboard_empty', bytes.byteLength === 0 ? '1' : '0']);
+    if (marker.code !== 0) throw new Error(`txd clipboard ${direction} failed: ${this.stderrCategory(marker)}`);
+  }
+
+  async commitClipboardSelection(text: string, clientTty: string): Promise<number> {
+    const bytes = new TextEncoder().encode(text);
+    validateClipboardBytes(bytes);
+    const clients = await this.command(
+      'observe_clipboard_clients',
+      'invoking-client',
+      ['list-clients', '-F', '#{client_tty}'],
+    );
+    if (clients.code !== 0) throw new Error('attached clients are unavailable');
+    const target = validateAttachedClientTty(
+      clientTty,
+      clients.stdout.split('\n').map((line) => line.trim()).filter(Boolean),
+    );
+    try {
+      await this.replaceClipboard(bytes, 'clipboard_selection');
+      await this.writeClient(target, osc52Sequence(bytes));
+      await this.command(
+        'report_clipboard_selection',
+        'invoking-client',
+        ['display-message', '-c', target, `clipboard push succeeded (${bytes.byteLength} bytes)`],
+      );
+      return bytes.byteLength;
+    } catch (error) {
+      await this.command(
+        'report_clipboard_selection',
+        'invoking-client',
+        ['display-message', '-c', target, `clipboard push failed (${bytes.byteLength} bytes)`],
+      );
+      throw error;
+    }
   }
 
   async readClipboard(): Promise<Uint8Array> {
@@ -1055,6 +1112,8 @@ export class FakeTmux implements TmuxControlPlane {
   private tintMisapplications = new Set<string>();
   private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
   private clipboard = new Uint8Array();
+  private attachedClients = new Set<string>();
+  private deliveredSelections: string[] = [];
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
@@ -1074,6 +1133,14 @@ export class FakeTmux implements TmuxControlPlane {
     return this.clipboard.byteLength;
   }
   async readClipboard(): Promise<Uint8Array> { return this.clipboard.slice(); }
+  attachClient(tty: string): void { this.attachedClients.add(tty); }
+  selectionDeliveries(): string[] { return [...this.deliveredSelections]; }
+  async commitClipboardSelection(text: string, clientTty: string): Promise<number> {
+    validateAttachedClientTty(clientTty, [...this.attachedClients]);
+    const bytes = await this.loadClipboard(text);
+    this.deliveredSelections.push(clientTty);
+    return bytes;
+  }
   setCommand(seatId: string, command: string): void { this.commands.set(seatId, command); }
   async listSeats(): Promise<SeatObservation[]> {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));

@@ -31,12 +31,13 @@ test('the active table is exact, current-viewport, and release-persistent', () =
   for (const [key, command] of bindings) {
     const active = new TextDecoder().decode(tmux('list-keys', '-T', 'copy-mode', key).stdout);
     expect(active).toContain(command);
-    expect(active).not.toMatch(/run-shell|txd|typing.guard|tx-osc52/);
+    expect(active).not.toMatch(/run-shell|txd|typing.guard|tx-(?:osc52|selection)/);
   }
   expect(tmux('list-keys', '-T', 'copy-mode', 'MouseDragEnd1Pane').exitCode).not.toBe(0);
   const enter = new TextDecoder().decode(tmux('list-keys', '-T', 'copy-mode', 'Enter').stdout);
   expect(enter).toContain('copy-pipe-and-cancel -P');
-  expect(enter.match(/tx-osc52/g)).toHaveLength(1);
+  expect(enter).toContain('packages/tx/bin/tx-selection');
+  expect(enter.match(/tx-selection/g)).toHaveLength(1);
 
   expect(tmux('copy-mode', '-t', 'main:0.0').exitCode).toBe(0);
   const scroll = new TextDecoder().decode(tmux('display-message', '-p', '-t', 'main:0.0', '#{scroll_position}').stdout).trim();

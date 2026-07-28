@@ -1,0 +1,130 @@
+// txd-owned selection commit — behavioral-pin lane.
+
+import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { RealTmux, type TmuxAuditRecord } from '../src/tmux.ts';
+import { osc52Sequence } from '../src/osc52.ts';
+
+test('the adapter validates the attached client before mutating and targets one tty', async () => {
+  const calls: Array<{ args: string[]; stdin?: Uint8Array }> = [];
+  const writes: Array<{ path: string; data: Uint8Array }> = [];
+  const audits: TmuxAuditRecord[] = [];
+  const text = 'exact\n雪 😀';
+  const bytes = new TextEncoder().encode(text);
+  const tmux = new RealTmux('test', {
+    run: async (_socket, args, stdin) => {
+      calls.push({ args, ...(stdin ? { stdin: stdin.slice() } : {}) });
+      return {
+        code: 0,
+        stdout: args[0] === 'list-clients' ? '/dev/pts/7\n/dev/pts/8\n' : '',
+        stderr: '',
+      };
+    },
+    writeClient: async (path, data) => { writes.push({ path, data: data.slice() }); },
+    audit: (record) => audits.push(record),
+  });
+
+  expect(await tmux.commitClipboardSelection(text, '/dev/pts/7')).toBe(bytes.byteLength);
+  expect(calls[0]?.args).toEqual(['list-clients', '-F', '#{client_tty}']);
+  expect(calls[1]).toEqual({
+    args: ['load-buffer', '-b', 'tx-clipboard', '-'],
+    stdin: bytes,
+  });
+  expect(calls[2]?.args).toEqual(['set-option', '-g', '@tx_clipboard_empty', '0']);
+  expect(writes).toEqual([{ path: '/dev/pts/7', data: osc52Sequence(bytes) }]);
+  expect(calls.at(-1)?.args).toEqual([
+    'display-message', '-c', '/dev/pts/7',
+    `clipboard push succeeded (${bytes.byteLength} bytes)`,
+  ]);
+  const serializedAudits = JSON.stringify(audits);
+  expect(serializedAudits).not.toContain(text);
+  expect(serializedAudits).not.toContain('/dev/pts/7');
+});
+
+test('the adapter rejects an unrelated tty without changing the buffer or writing', async () => {
+  const calls: string[][] = [];
+  let writes = 0;
+  const tmux = new RealTmux('test', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      return { code: 0, stdout: '/dev/pts/7\n', stderr: '' };
+    },
+    writeClient: async () => { writes += 1; },
+    audit: () => {},
+  });
+  await expect(tmux.commitClipboardSelection('secret', '/dev/pts/8')).rejects.toThrow('not attached');
+  expect(calls).toEqual([['list-clients', '-F', '#{client_tty}']]);
+  expect(writes).toBe(0);
+});
+
+test('selection failure reports byte count without content', async () => {
+  const calls: string[][] = [];
+  const secret = 'never-report-selection-content';
+  const tmux = new RealTmux('test', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'list-clients') return { code: 0, stdout: '/dev/pts/7\n', stderr: '' };
+      if (args[0] === 'load-buffer') return { code: 1, stdout: '', stderr: 'secret backend detail' };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    writeClient: async () => { throw new Error('not reached'); },
+    audit: () => {},
+  });
+  await expect(tmux.commitClipboardSelection(secret, '/dev/pts/7')).rejects.toThrow('clipboard selection');
+  const report = calls.at(-1)?.join(' ') ?? '';
+  expect(report).toContain(`clipboard push failed (${new TextEncoder().encode(secret).byteLength} bytes)`);
+  expect(report).not.toContain(secret);
+});
+
+describe('real adapter selection path', () => {
+  const socket = `tx-selection-${process.pid}`;
+  const channel = `tx-selection-attached-${process.pid}`;
+  let directory = '';
+
+  afterAll(async () => {
+    Bun.spawnSync(['tmux', '-L', socket, 'kill-server']);
+    if (directory) await rm(directory, { recursive: true, force: true });
+  });
+
+  test('loads the named buffer and writes OSC 52 only to the attached pseudo-tty', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'tx-selection-'));
+    const transcript = join(directory, 'tty.log');
+    expect(Bun.spawnSync([
+      'tmux', '-L', socket, '-f', '/dev/null',
+      'new-session', '-d', '-s', 'main',
+    ]).exitCode).toBe(0);
+    expect(Bun.spawnSync([
+      'tmux', '-L', socket, 'set-hook', '-g', 'client-attached',
+      `wait-for -S ${channel}`,
+    ]).exitCode).toBe(0);
+    const attached = Bun.spawn([
+      'script', '-qefc', `tmux -L ${socket} attach-session -t main`, transcript,
+    ], {
+      stdout: 'ignore',
+      stderr: 'pipe',
+      env: { ...process.env, TERM: 'xterm-256color' },
+    });
+    const observed = Bun.spawn(['tmux', '-L', socket, 'wait-for', channel], {
+      stdout: 'ignore',
+      stderr: 'pipe',
+      timeout: 5_000,
+      killSignal: 'SIGKILL',
+    });
+    expect(await observed.exited).toBe(0);
+    const listed = Bun.spawnSync(['tmux', '-L', socket, 'list-clients', '-F', '#{client_tty}']);
+    expect(listed.exitCode).toBe(0);
+    const tty = new TextDecoder().decode(listed.stdout).trim();
+    const text = 'real path\n雪 😀';
+    const bytes = new TextEncoder().encode(text);
+    const tmux = new RealTmux(socket, { audit: () => {} });
+
+    expect(await tmux.commitClipboardSelection(text, tty)).toBe(bytes.byteLength);
+    expect(Bun.spawnSync(['tmux', '-L', socket, 'save-buffer', '-b', 'tx-clipboard', '-']).stdout)
+      .toEqual(Buffer.from(bytes));
+    Bun.spawnSync(['tmux', '-L', socket, 'kill-server']);
+    await attached.exited;
+    expect((await readFile(transcript)).includes(osc52Sequence(bytes))).toBe(true);
+  });
+});

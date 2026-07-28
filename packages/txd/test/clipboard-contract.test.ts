@@ -3,6 +3,8 @@
 import { describe, expect, test } from 'bun:test';
 import {
   ClipboardPullRequestSchema,
+  ClipboardSelectionRequestSchema,
+  ClipboardSelectionResponseSchema,
   ClipboardPushResponseSchema,
   ClipboardPushRequestSchema,
   MAX_CLIPBOARD_BYTES,
@@ -50,5 +52,29 @@ describe('clipboard payload contract', () => {
       bytes: 1,
       content_base64: 'A'.repeat((Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4) + 1),
     }).success).toBe(false);
+  });
+
+  test('selection commit carries bounded UTF-8 and one client tty', () => {
+    expect(ClipboardSelectionRequestSchema.safeParse({
+      schema_version: 8,
+      client_tty: '/dev/pts/7',
+      content: '雪 😀\n',
+    }).success).toBe(true);
+    expect(ClipboardSelectionRequestSchema.safeParse({
+      schema_version: 8,
+      client_tty: '/tmp/not-a-client',
+      content: 'secret',
+    }).success).toBe(false);
+    expect(ClipboardSelectionRequestSchema.safeParse({
+      schema_version: 8,
+      client_tty: '/dev/pts/7',
+      content: 'a'.repeat(MAX_CLIPBOARD_BYTES + 1),
+    }).success).toBe(false);
+    expect(ClipboardSelectionResponseSchema.safeParse({
+      ok: true,
+      target: 'test',
+      buffer_name: 'tx-clipboard',
+      bytes: 9,
+    }).success).toBe(true);
   });
 });
