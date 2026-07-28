@@ -90,6 +90,60 @@ test("replay HTTP admission, append, inspection, and unfinished reconciliation",
   }
 });
 
+test("the append route refuses every event after a stream terminates", async () => {
+  const replayStore = new MemoryReplayStore(() => "2026-07-26T17:01:00.000Z");
+  let wakes = 0;
+  const server = makeServer({
+    bind: "127.0.0.1",
+    port: 0,
+    store: new MemoryBusStore(),
+    replayStore,
+    onAppend: () => { wakes += 1; },
+    build: { version: "test", git_sha: "test", bun: Bun.version },
+    machine: "test",
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const terminal = {
+    ...input().event,
+    event_id: "9e107d9d-372b-4f4f-9b9d-64a3f5f6b8c1",
+    event_type: "githubd.command_completed",
+    causation_event_id: eventId,
+    payload: { terminal: true, outcome: "succeeded" },
+  };
+  const append = (event: unknown) => fetch(`${base}/v1/replays/${replayId}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ event }),
+  });
+  try {
+    await fetch(`${base}/v1/replays/admit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input()),
+    });
+    expect((await append(terminal)).status).toBe(201);
+    const forged = await append({
+      ...input().event,
+      event_id: "3f9d1c22-77aa-4a5b-9c3e-1b8f2d4e6a70",
+      event_type: "githubd.convergence_attested",
+      causation_event_id: eventId,
+      payload: { terminal: true, outcome: "succeeded" },
+    });
+    expect(forged.status).toBe(409);
+    expect(await forged.json()).toEqual({ ok: false, error: "terminal_stream_append" });
+    // The refusal is a guard, not a loss of idempotency: the terminal event
+    // itself still re-folds, and no wake fires for a refused append.
+    const repeated = await append(terminal);
+    expect(repeated.status).toBe(200);
+    expect(await repeated.json()).toMatchObject({ ok: true, created: false });
+    expect(wakes).toBe(2);
+    const projection = await (await fetch(`${base}/v1/replays/${replayId}`)).json() as { events: unknown[] };
+    expect(projection.events).toHaveLength(2);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("event feed refuses invalid filters and unknown cursors", async () => {
   const replayStore = new MemoryReplayStore();
   const server = makeServer({

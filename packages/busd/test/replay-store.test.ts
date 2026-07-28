@@ -7,6 +7,7 @@ import {
   IdempotencyConflict,
   MemoryReplayStore,
   PostgresReplayStore,
+  TerminalStreamViolation,
   UnknownSubscription,
   foldReplay,
 } from "../src/replay-store.ts";
@@ -86,6 +87,31 @@ describe("MemoryReplayStore", () => {
     expect(appended).toMatchObject({ created: true, event: { sequence: 2 } });
     expect(repeated).toMatchObject({ created: false, event: { sequence: 2 } });
     expect((await store.projection(replayId))?.terminal).toBe(true);
+  });
+
+  test("a terminated stream refuses every further append while staying idempotent for its own events", async () => {
+    const store = new MemoryReplayStore();
+    await store.admit(admission());
+    const terminal = event({
+      event_id: "9e107d9d-372b-4f4f-9b9d-64a3f5f6b8c1",
+      event_type: "githubd.command_completed",
+      causation_event_id: firstEventId,
+      payload: { terminal: true, outcome: "succeeded" },
+    });
+    await store.append(terminal);
+    await expect(store.append(event({
+      event_id: "3f9d1c22-77aa-4a5b-9c3e-1b8f2d4e6a70",
+      event_type: "githubd.command_progressed",
+      causation_event_id: firstEventId,
+    }))).rejects.toBeInstanceOf(TerminalStreamViolation);
+    await expect(store.append(event({
+      event_id: "5a1e8b33-88bb-4c6d-9e4f-2c9a3e5f7b81",
+      event_type: "githubd.convergence_attested",
+      causation_event_id: firstEventId,
+      payload: { terminal: true, outcome: "succeeded" },
+    }))).rejects.toBeInstanceOf(TerminalStreamViolation);
+    expect(await store.append(terminal)).toMatchObject({ created: false, event: { sequence: 2 } });
+    expect((await store.projection(replayId))?.events).toHaveLength(2);
   });
 
   test("projection rebuild is a pure fold and delivery attempts are rebuildable", async () => {
@@ -242,6 +268,17 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
       causation_event_id: pgFirstEventId,
       payload: { terminal: true, outcome: "succeeded" },
     }));
+    await expect(store.append(event({
+      replay_id: pgReplayId,
+      event_id: crypto.randomUUID(),
+      event_type: "githubd.convergence_attested",
+      source: `githubd-integration-${pgReplayId}`,
+      causation_event_id: pgFirstEventId,
+      payload: { terminal: true, outcome: "succeeded" },
+    }))).rejects.toBeInstanceOf(TerminalStreamViolation);
+    // The counts below are the proof that the refusal inserted nothing: the
+    // guard runs inside the append transaction, so a refused post-terminal
+    // append leaves neither an event nor a publication intent behind.
     const counts = (await raw`
       SELECT
         (SELECT count(*)::int FROM replay.events WHERE replay_id = ${pgReplayId}) AS events,
@@ -277,17 +314,31 @@ describe.skipIf(!endpoint)("PostgresReplayStore (live PostgreSQL 18)", () => {
     expect(projection?.deliveries.find((delivery) =>
       delivery.event_id === pending[0]!.event.event_id && delivery.subscription === "replay-test-manager"))
       .toMatchObject({ status: "delivered", attempts: 1 });
+    // Concurrent identical appends race on a LIVE stream — the terminated one
+    // above now refuses every append, so this exercises its own replay.
+    const concurrentReplay = crypto.randomUUID();
+    const concurrentFirstEventId = crypto.randomUUID();
+    await store.admit({
+      ...admission(),
+      replay_id: concurrentReplay,
+      request_hash: "d".repeat(64),
+      event: event({
+        replay_id: concurrentReplay,
+        event_id: concurrentFirstEventId,
+        source: `githubd-integration-${concurrentReplay}`,
+      }),
+    });
     const concurrentEvent = event({
-      replay_id: pgReplayId,
+      replay_id: concurrentReplay,
       event_id: crypto.randomUUID(),
       event_type: "githubd.delivery_observed",
-      source: `githubd-integration-${pgReplayId}`,
-      causation_event_id: pgFirstEventId,
+      source: `githubd-integration-${concurrentReplay}`,
+      causation_event_id: concurrentFirstEventId,
       payload: { observation: "duplicate-wakeup" },
     });
     const concurrent = await Promise.all([store.append(concurrentEvent), store.append(concurrentEvent)]);
     expect(concurrent.map((result) => result.created).sort()).toEqual([false, true]);
-    expect(new Set(concurrent.map((result) => result.event.sequence))).toEqual(new Set([3]));
+    expect(new Set(concurrent.map((result) => result.event.sequence))).toEqual(new Set([2]));
     const driven = async (query: PromiseLike<unknown>): Promise<void> => {
       await query;
     };

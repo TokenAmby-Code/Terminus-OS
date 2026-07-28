@@ -35,6 +35,7 @@ import {
   IdempotencyConflict,
   InvalidEventCursor,
   InvalidReplayCursor,
+  TerminalStreamViolation,
   UnknownReplay,
   type ReplayStore,
 } from './replay-store.ts';
@@ -375,6 +376,9 @@ export function buildRoutes(deps: ServerDeps): Route[] {
         } catch (error) {
           if (error instanceof UnknownReplay) return json({ ok: false, error: 'unknown_replay' }, 404);
           if (error instanceof EventIdentityConflict) return json({ ok: false, error: 'event_identity_conflict' }, 409);
+          if (error instanceof TerminalStreamViolation) {
+            return json({ ok: false, error: 'terminal_stream_append' }, 409);
+          }
           throw error;
         }
       },
