@@ -26,6 +26,7 @@ const RATIFIED = [
   'POST /ctl/reconcile',
   'POST /ctl/clipboard/pull',
   'POST /ctl/clipboard/push',
+  'POST /ctl/clipboard/selection',
   'POST /ctl/estate/rotate',
   'POST /ingress/tmux',
   'POST /ingress/static-launch',
@@ -145,6 +146,75 @@ test('clipboard pull/push preserves opaque UTF-8 without persistence or executio
     expect(Buffer.from(body.content_base64, 'base64').toString()).toBe(content);
     expect(body.bytes).toBe(new TextEncoder().encode(content).byteLength);
     expect(await store.readAll()).toEqual([]);
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('selection commit is routed through txd and redacts the sensitive body', async () => {
+  const secret = 'selection-secret\n雪 😀';
+  const tmux = new FakeTmux();
+  tmux.attachClient('/dev/pts/7');
+  const srv = makeServer({
+    bind: '127.0.0.1',
+    port: 0,
+    daemon: new Daemon(new MemoryEventStore(), tmux),
+    build,
+    machine: 'k12-test',
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/clipboard/selection`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        client_tty: '/dev/pts/7',
+        content: secret,
+      }),
+    });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({
+      ok: true,
+      target: 'k12-test',
+      buffer_name: CLIPBOARD_BUFFER_NAME,
+      bytes: new TextEncoder().encode(secret).byteLength,
+    });
+    expect(JSON.stringify(body)).not.toContain(secret);
+    expect(new TextDecoder().decode(await tmux.readClipboard())).toBe(secret);
+    expect(tmux.selectionDeliveries()).toEqual(['/dev/pts/7']);
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('selection commit rejects an unrelated client before changing the buffer', async () => {
+  const secret = 'must-not-reach-the-buffer';
+  const tmux = new FakeTmux();
+  tmux.attachClient('/dev/pts/7');
+  await tmux.loadClipboard('existing');
+  const srv = makeServer({
+    bind: '127.0.0.1',
+    port: 0,
+    daemon: new Daemon(new MemoryEventStore(), tmux),
+    build,
+    machine: 'k12-test',
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/clipboard/selection`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        client_tty: '/dev/pts/8',
+        content: secret,
+      }),
+    });
+    expect(response.status).toBe(409);
+    const serialized = JSON.stringify(await response.json());
+    expect(serialized).not.toContain(secret);
+    expect(new TextDecoder().decode(await tmux.readClipboard())).toBe('existing');
+    expect(tmux.selectionDeliveries()).toEqual([]);
   } finally {
     srv.stop(true);
   }

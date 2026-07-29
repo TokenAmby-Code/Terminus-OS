@@ -62,18 +62,18 @@ describe('tmux/tx.conf', () => {
     const movementLines = selection.split('\n').filter((line) =>
       /copy-mode (?:Space|Left|Right|Up|Down|C-Left|C-Right|Home|End|PPage|NPage|Tab) /.test(line),
     );
-    expect(movementLines.join('\n')).not.toMatch(/run-shell|txd|tx-osc52|typing.guard/);
+    expect(movementLines.join('\n')).not.toMatch(/run-shell|txd|tx-selection|typing.guard/);
   });
 
-  test('keeps mouse selections visible and invokes one targeted helper only on commit', () => {
+  test('keeps mouse selections visible and invokes one thin tx client only on commit', () => {
     const selection = conf.slice(conf.indexOf('# Pane-local selection.'), conf.indexOf('%if '));
     expect(selection).toContain('unbind -T copy-mode MouseDragEnd1Pane');
     expect(selection).toContain('unbind -T copy-mode-vi MouseDragEnd1Pane');
     const enter = selection.split('\n').find((line) => line.startsWith('bind -T copy-mode Enter '));
     expect(enter).toContain('copy-pipe-and-cancel -P');
-    expect(enter).toContain('tx-osc52');
+    expect(enter).toContain('$HOME/.bun/bin/bun $HOME/runtimes/Terminus-OS/live/packages/tx/bin/tx-selection');
     expect(enter).toContain('#{client_tty}');
-    expect(selection.match(/tx-osc52/g)).toHaveLength(1);
+    expect(selection.match(/tx-selection/g)).toHaveLength(1);
   });
 
   test('wheel scrolling targets only the active pane with native tmux commands', () => {

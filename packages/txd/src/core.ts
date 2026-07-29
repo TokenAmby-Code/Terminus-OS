@@ -12,6 +12,7 @@ import {
   type CloseResponse,
   type ClipboardPullRequest,
   type ClipboardPushRequest,
+  type ClipboardSelectionRequest,
   type CommAccepted,
   type CommCallback,
   type CommHook,
@@ -338,6 +339,14 @@ export class Daemon {
         bytes: bytes.byteLength,
         content_base64: Buffer.from(bytes).toString('base64'),
       };
+    });
+  }
+
+  async clipboardSelection(req: ClipboardSelectionRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number }> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const bytes = await this.tmux.commitClipboardSelection(req.content, req.client_tty);
+      return { buffer_name: CLIPBOARD_BUFFER_NAME, bytes };
     });
   }
 
