@@ -32,8 +32,8 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const root = join(import.meta.dir, "../..");
-const self = "test/adversarial/machine-registry-loader-containment.test.ts";
+const root = join(import.meta.dir, "..");
+const self = "test/machine-registry-loader-containment.adversarial.test.ts";
 const contracts = join(root, "packages/contracts");
 
 const corpses = [

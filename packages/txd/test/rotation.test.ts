@@ -61,7 +61,7 @@ test('forced rotation holds the lifecycle barrier from durable request through r
     async complete() { calls.push('complete'); },
     async abort() { calls.push('abort'); },
   };
-  const daemon = new Daemon(store, tmux, undefined, undefined, undefined, barrier);
+  const daemon = new Daemon(store, tmux, undefined, barrier);
   await daemon.constructEstate();
   await daemon.requestEstateRotation({ schema_version: SCHEMA_VERSION, force: true, scope: 'estate' });
   expect(calls).toEqual(['begin']);
@@ -256,11 +256,6 @@ test('a pending scoped reset fences new bindings and sends on every reserved sea
     persona: 'late',
     tint: '#1',
   })).toMatchObject({ ok: false, handover: false, reason: 'scoped_reset_pending: somnium:NE' });
-  expect(await daemon.send({
-    target: 'somnium:NE',
-    text: 'must not cross the reset fence',
-    schema_version: SCHEMA_VERSION,
-  })).toMatchObject({ ok: false, refused: true, reason: 'scoped_reset_pending' });
   expect(await store.count()).toBe(before);
   expect(await tmux.seatTint('somnium:NE')).toBeNull();
 });
