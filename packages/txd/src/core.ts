@@ -30,6 +30,8 @@ import {
   type ModeTransitionRequest,
   type ModeTransitionResponse,
   type OpenContradiction,
+  PaneAttestedSchema,
+  PaneRefusedSchema,
   type Provenance,
   type ProvenanceSource,
   type ReconcileResponse,
@@ -45,6 +47,7 @@ import {
   type TmuxLifecycleEventRequest,
   type TmuxLifecycleEventResponse,
   type TintReadiness,
+  type WrapperStartHook,
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
 } from '@terminus-os/contracts';
@@ -72,6 +75,11 @@ export type StaticLaunchRuntime = {
   personaWorkspaceRoot: string;
   acknowledgeUrl: string;
 };
+export type PhysicalRegistrationRuntime = {
+  machine: string;
+  configuration: { generation: string; digest: string };
+  publish: (eventType: 'agent.pane_attested' | 'agent.pane_refused', payload: Record<string, unknown>) => Promise<unknown>;
+};
 
 const COUNCIL_MIGRATION_ID = 'council-static-personas';
 
@@ -85,7 +93,44 @@ export class Daemon {
     private now: Now = () => new Date().toISOString(),
     private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
     private staticRuntime: StaticLaunchRuntime | null = null,
+    private physicalRegistration: PhysicalRegistrationRuntime | null = null,
   ) {}
+
+  async attestWrapperStart(
+    hook: WrapperStartHook,
+  ): Promise<{ attested: boolean; reason: string | null }> {
+    if (!this.physicalRegistration) {
+      return { attested: false, reason: 'physical_registration_unconfigured' };
+    }
+    const observed = await this.tmux.attestWrapperPlacement(hook.wrapper_pid);
+    if (!observed.ok) {
+      const refusal = PaneRefusedSchema.parse({
+        hook_request_id: hook.hook_request_id,
+        claimed_pane_id: hook.claimed_pane_id,
+        machine: this.physicalRegistration.machine,
+        wrapper_pid: hook.wrapper_pid,
+        reason: observed.reason,
+      });
+      await this.physicalRegistration.publish('agent.pane_refused', refusal);
+      return { attested: false, reason: observed.reason };
+    }
+    const attestation = PaneAttestedSchema.parse({
+      hook_request_id: hook.hook_request_id,
+      claimed_pane_id: hook.claimed_pane_id,
+      pane_id: observed.pane_id,
+      pane_generation: observed.pane_generation,
+      machine: this.physicalRegistration.machine,
+      wrapper_pid: hook.wrapper_pid,
+      configuration: this.physicalRegistration.configuration,
+      process_witnesses: {
+        pane_root_pid: observed.pane_root_pid,
+        ancestry: observed.ancestry,
+        process_start_ticks: observed.process_start_ticks,
+      },
+    });
+    await this.physicalRegistration.publish('agent.pane_attested', attestation);
+    return { attested: true, reason: null };
+  }
 
   /** Serialize a mutating op — the single-writer discipline. */
   private locked<T>(fn: () => Promise<T>): Promise<T> {

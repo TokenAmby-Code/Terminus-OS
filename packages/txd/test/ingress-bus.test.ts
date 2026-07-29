@@ -17,13 +17,14 @@ import { findTmuxIdDeep } from '../src/ids.ts';
 
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
-function setup() {
+function setup(physicalRegistration: ConstructorParameters<typeof Daemon>[5] = null) {
   const store = new MemoryEventStore();
-  const d = new Daemon(store, new FakeTmux());
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux, undefined, undefined, null, physicalRegistration);
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   const post = (body: unknown) =>
     fetch(`http://127.0.0.1:${srv.port}/ingress/bus`, { method: 'POST', body: JSON.stringify(body) });
-  return { store, d, srv, post };
+  return { store, tmux, d, srv, post };
 }
 
 let seqCounter = 0;
@@ -42,6 +43,92 @@ function delivery(event_type: string, payload: Record<string, unknown>, seq = ++
     },
   };
 }
+
+test('wrapper start publishes txd-observed pane truth even when the environmental claim is forged', async () => {
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const runtime = {
+    machine: 'k12-personal',
+    configuration: { generation: 'estate-1', digest: 'a'.repeat(64) },
+    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused', payload: Record<string, unknown>) => {
+      published.push({ type, payload });
+    },
+  };
+  const { tmux, srv, post } = setup(runtime);
+  try {
+    await tmux.createSeat('palace:W');
+    tmux.bindWrapper(4101, 'palace:W');
+    const res = await post(delivery('hook.wrapper_start', {
+      hook_request_id: '2ea2d049-0106-4957-8649-31f93bdc8c9a',
+      engine: 'codex',
+      cwd: '/work',
+      machine: 'k12-personal',
+      wrapper_pid: 4101,
+      claimed_pane_id: 'council:custodes',
+      argv: [],
+      placement_hints: {},
+    }, 301));
+    expect(await res.json()).toEqual({
+      ok: true,
+      seq: 301,
+      consumed: true,
+      reason: null,
+    });
+    expect(published).toHaveLength(1);
+    expect(published[0]).toMatchObject({
+      type: 'agent.pane_attested',
+      payload: {
+        claimed_pane_id: 'council:custodes',
+        pane_id: 'palace:W',
+        wrapper_pid: 4101,
+        configuration: runtime.configuration,
+      },
+    });
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('wrapper outside a managed pane emits a factual refusal and never attests placement', async () => {
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const runtime = {
+    machine: 'k12-personal',
+    configuration: { generation: 'estate-1', digest: 'b'.repeat(64) },
+    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused', payload: Record<string, unknown>) => {
+      published.push({ type, payload });
+    },
+  };
+  const { srv, post } = setup(runtime);
+  try {
+    const res = await post(delivery('hook.wrapper_start', {
+      hook_request_id: '1cc2112c-9c38-45a1-839f-831c33a1096a',
+      engine: 'claude',
+      cwd: '/work',
+      machine: 'k12-personal',
+      wrapper_pid: 5101,
+      claimed_pane_id: 'palace:W',
+      argv: [],
+      placement_hints: {},
+    }, 302));
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      seq: 302,
+      consumed: false,
+      reason: 'wrapper_not_in_managed_pane',
+    });
+    expect(published).toEqual([{
+      type: 'agent.pane_refused',
+      payload: {
+        hook_request_id: '1cc2112c-9c38-45a1-839f-831c33a1096a',
+        claimed_pane_id: 'palace:W',
+        machine: 'k12-personal',
+        wrapper_pid: 5101,
+        reason: 'wrapper_not_in_managed_pane',
+      },
+    }]);
+  } finally {
+    srv.stop(true);
+  }
+});
 
 test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance from the bus row', async () => {
   const { store, d, srv, post } = setup();

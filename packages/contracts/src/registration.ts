@@ -8,6 +8,7 @@ export const AGENT_SCHEMA_VERSION = 1;
 
 export const AgentIdSchema = z.string().uuid();
 export const BirthGenerationSchema = z.string().uuid();
+export const PaneGenerationSchema = z.string().uuid();
 export const EngineSchema = z.enum(["claude", "codex"]);
 export const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 
@@ -34,7 +35,7 @@ export type PersonaPackage = z.infer<typeof PersonaPackageSchema>;
 
 export const PlacementSchema = z.object({
   pane_id: z.string().min(1),
-  pane_generation: z.number().int().positive(),
+  pane_generation: PaneGenerationSchema,
   machine: z.string().min(1),
   kind: z.enum(["local", "ssh"]),
   wrapper_pid: z.number().int().positive(),
@@ -81,6 +82,7 @@ export const WrapperStartHookSchema = z.object({
   argv: z.array(z.string()),
   placement_hints: z.record(z.string(), z.unknown()),
 }).strict();
+export type WrapperStartHook = z.infer<typeof WrapperStartHookSchema>;
 
 export const RegistrationPreparedSchema = z.object({
   schema_version: z.literal(AGENT_SCHEMA_VERSION),
@@ -90,7 +92,7 @@ export const RegistrationPreparedSchema = z.object({
   engine: EngineSchema,
   wrapper_pid: z.number().int().positive(),
   pane_id: z.string().min(1),
-  pane_generation: z.number().int().positive(),
+  pane_generation: PaneGenerationSchema,
   configuration: z.object({
     generation: z.string().min(1),
     digest: Sha256Schema,
@@ -104,7 +106,7 @@ export const PaneAttestedSchema = z.object({
   hook_request_id: z.string().uuid(),
   claimed_pane_id: z.string().min(1),
   pane_id: z.string().min(1),
-  pane_generation: z.number().int().positive(),
+  pane_generation: PaneGenerationSchema,
   machine: z.string().min(1),
   wrapper_pid: z.number().int().positive(),
   configuration: z.object({
@@ -115,12 +117,29 @@ export const PaneAttestedSchema = z.object({
 }).strict();
 export type PaneAttested = z.infer<typeof PaneAttestedSchema>;
 
+export const PaneRefusedSchema = z.object({
+  hook_request_id: z.string().uuid(),
+  claimed_pane_id: z.string().min(1),
+  machine: z.string().min(1),
+  wrapper_pid: z.number().int().positive(),
+  reason: z.enum([
+    "wrapper_process_missing",
+    "wrapper_not_in_managed_pane",
+    "pane_dead",
+    "pane_generation_missing",
+    "ambiguous_placement",
+    "process_changed",
+    "physical_registration_unconfigured",
+  ]),
+}).strict();
+export type PaneRefused = z.infer<typeof PaneRefusedSchema>;
+
 export const WrapperLaunchReplySchema = z.object({
   schema_version: z.literal(AGENT_SCHEMA_VERSION),
   agent_id: AgentIdSchema,
   birth_generation: BirthGenerationSchema,
   pane_id: z.string().min(1),
-  pane_generation: z.number().int().positive(),
+  pane_generation: PaneGenerationSchema,
   working_directory: z.string().startsWith("/"),
   instruction_package: z.object({
     digest: Sha256Schema,

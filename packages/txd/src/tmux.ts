@@ -35,6 +35,26 @@ export type StaticAgentLaunch = {
   workspace: string;
   environment: Record<string, string>;
 };
+export type WrapperPlacementAttestation =
+  | {
+      ok: true;
+      pane_id: string;
+      pane_generation: string;
+      wrapper_pid: number;
+      pane_root_pid: number;
+      ancestry: number[];
+      process_start_ticks: Record<string, string>;
+    }
+  | {
+      ok: false;
+      reason:
+        | 'wrapper_process_missing'
+        | 'wrapper_not_in_managed_pane'
+        | 'pane_dead'
+        | 'pane_generation_missing'
+        | 'ambiguous_placement'
+        | 'process_changed';
+    };
 
 // Below-membrane delivery outcome (discriminated by verdict). `partial_delivered`
 // = the literal text reached the pane but the submit (Enter) did not — first-class,
@@ -99,6 +119,8 @@ export interface TmuxControlPlane {
   seatTint(seatId: string): Promise<string | null | undefined>;
   /** Observe txd's opaque physical pane generation (never a raw tmux handle). */
   seatGeneration(seatId: string): Promise<string | undefined>;
+  /** Resolve a wrapper PID to canonical pane truth through /proc ancestry and tmux witnesses. */
+  attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   /** Apply one semantic plan-mode intent with engine-specific input and screen read-back. */
@@ -118,9 +140,42 @@ export interface TmuxControlPlane {
 const CANON_OPT = '@canonical_id';
 const GENERATION_OPT = '@txd_generation';
 const PANE_ID_ENV = 'PANE_ID';
+const MAX_PROCESS_ANCESTRY = 256;
 
 function paneEnvironment(seatId: string): string[] {
   return ['-e', `${PANE_ID_ENV}=${seatId}`];
+}
+type ProcessWitness = { pid: number; parent_pid: number; start_ticks: string };
+
+async function processWitness(pid: number): Promise<ProcessWitness | null> {
+  if (!Number.isInteger(pid) || pid < 1) return null;
+  try {
+    const raw = await readFile(`/proc/${pid}/stat`, 'utf8');
+    const close = raw.lastIndexOf(')');
+    if (close < 0) return null;
+    const fields = raw.slice(close + 2).trim().split(/\s+/);
+    const parent_pid = Number(fields[1]);
+    const start_ticks = fields[19];
+    if (!Number.isInteger(parent_pid) || parent_pid < 0 || !start_ticks) return null;
+    return { pid, parent_pid, start_ticks };
+  } catch {
+    return null;
+  }
+}
+
+async function processAncestry(pid: number): Promise<ProcessWitness[] | null> {
+  const out: ProcessWitness[] = [];
+  const seen = new Set<number>();
+  let current = pid;
+  while (current > 0 && out.length < MAX_PROCESS_ANCESTRY && !seen.has(current)) {
+    seen.add(current);
+    const witness = await processWitness(current);
+    if (!witness) return null;
+    out.push(witness);
+    if (witness.parent_pid === 0 || witness.parent_pid === current) break;
+    current = witness.parent_pid;
+  }
+  return out;
 }
 type EstateRow = {
   session: string;
@@ -1057,6 +1112,50 @@ export class RealTmux implements TmuxControlPlane {
     return observed.code === 0 && generation.length > 0 ? generation : undefined;
   }
 
+  async attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation> {
+    const ancestry = await processAncestry(wrapperPid);
+    if (!ancestry) return { ok: false, reason: 'wrapper_process_missing' };
+    const byPid = new Map(ancestry.map((witness) => [witness.pid, witness]));
+    const listed = await this.command('attest_wrapper_placement', 'wrapper-process', [
+      'list-panes', '-a', '-F',
+      `#{${CANON_OPT}}\t#{pane_pid}\t#{pane_dead}\t#{${GENERATION_OPT}}`,
+    ]);
+    if (listed.code !== 0) return { ok: false, reason: 'wrapper_not_in_managed_pane' };
+    const candidates = listed.stdout.split('\n').filter(Boolean).flatMap((line) => {
+      const [pane_id, rawPid, dead, pane_generation] = line.split('\t');
+      const pane_root_pid = Number(rawPid);
+      return pane_id && Number.isInteger(pane_root_pid) && byPid.has(pane_root_pid)
+        ? [{ pane_id, pane_root_pid, dead, pane_generation: pane_generation ?? '' }]
+        : [];
+    });
+    if (candidates.length === 0) return { ok: false, reason: 'wrapper_not_in_managed_pane' };
+    if (candidates.length !== 1) return { ok: false, reason: 'ambiguous_placement' };
+    const candidate = candidates[0]!;
+    if (candidate.dead === '1') return { ok: false, reason: 'pane_dead' };
+    if (!candidate.pane_generation) return { ok: false, reason: 'pane_generation_missing' };
+
+    const [wrapperAfter, rootAfter] = await Promise.all([
+      processWitness(wrapperPid),
+      processWitness(candidate.pane_root_pid),
+    ]);
+    if (!wrapperAfter || !rootAfter
+        || wrapperAfter.start_ticks !== byPid.get(wrapperPid)?.start_ticks
+        || rootAfter.start_ticks !== byPid.get(candidate.pane_root_pid)?.start_ticks) {
+      return { ok: false, reason: 'process_changed' };
+    }
+    return {
+      ok: true,
+      pane_id: candidate.pane_id,
+      pane_generation: candidate.pane_generation,
+      wrapper_pid: wrapperPid,
+      pane_root_pid: candidate.pane_root_pid,
+      ancestry: ancestry.map((witness) => witness.pid),
+      process_start_ticks: Object.fromEntries(
+        ancestry.map((witness) => [String(witness.pid), witness.start_ticks]),
+      ),
+    };
+  }
+
   async setSeatTint(seatId: string, tint: string | null): Promise<boolean> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return false;
@@ -1215,6 +1314,7 @@ export class FakeTmux implements TmuxControlPlane {
   private agentModeFailures = new Set<string>();
   private attachedClients = new Set<string>();
   private deliveredSelections: string[] = [];
+  private wrapperPlacements = new Map<number, string>();
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
@@ -1472,6 +1572,28 @@ export class FakeTmux implements TmuxControlPlane {
   }
   async seatGeneration(seatId: string): Promise<string | undefined> {
     return this.seats.get(seatId)?.generation;
+  }
+  bindWrapper(wrapperPid: number, seatId: string): void {
+    this.wrapperPlacements.set(wrapperPid, seatId);
+  }
+  async attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation> {
+    const pane_id = this.wrapperPlacements.get(wrapperPid);
+    if (!pane_id) return { ok: false, reason: 'wrapper_not_in_managed_pane' };
+    const seat = this.seats.get(pane_id);
+    if (!seat) return { ok: false, reason: 'wrapper_not_in_managed_pane' };
+    if (seat.pane === 'dead') return { ok: false, reason: 'pane_dead' };
+    return {
+      ok: true,
+      pane_id,
+      pane_generation: seat.generation,
+      wrapper_pid: wrapperPid,
+      pane_root_pid: wrapperPid - 1,
+      ancestry: [wrapperPid, wrapperPid - 1],
+      process_start_ticks: {
+        [String(wrapperPid)]: '200',
+        [String(wrapperPid - 1)]: '100',
+      },
+    };
   }
   failTintSeat(seatId: string): void { this.tintFailures.add(seatId); }
   failTintClearSeat(seatId: string): void { this.tintClearFailures.add(seatId); }

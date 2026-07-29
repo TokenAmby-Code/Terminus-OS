@@ -24,6 +24,12 @@ export type DaemonConfig = {
   agentWrapper: string;
   /** Machine-local root containing rendered persona workspaces. */
   personaWorkspaceRoot: string;
+  /** Generated physical-only view of Token-Fleet's canonical pane allocation. */
+  physicalRegistration?: {
+    busUrl: string;
+    generation: string;
+    digest: string;
+  };
 };
 
 // Partial with explicit undefined: the root tsconfig pins
@@ -68,6 +74,7 @@ function envDefaults(): PartialConfig {
     rotationSignalFifo: process.env.TXD_ROTATION_SIGNAL_FIFO,
     agentWrapper: process.env.TXD_AGENT_WRAPPER,
     personaWorkspaceRoot: process.env.TXD_PERSONA_WORKSPACE_ROOT,
+    physicalRegistration: undefined,
   };
 }
 
@@ -83,6 +90,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     rotationSignalFifo: raw.rotationSignalFifo ?? env.rotationSignalFifo ?? HARD_DEFAULTS.rotationSignalFifo,
     agentWrapper: raw.agentWrapper ?? env.agentWrapper,
     personaWorkspaceRoot: raw.personaWorkspaceRoot ?? env.personaWorkspaceRoot,
+    physicalRegistration: raw.physicalRegistration,
   };
 
   if (!cfg.bind) throw new Error('txd config error: bind is required');
@@ -100,6 +108,24 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
   if (!cfg.rotationSignalFifo) throw new Error('txd config error: rotationSignalFifo is required');
   if (!cfg.agentWrapper) throw new Error('txd config error: agentWrapper is required');
   if (!cfg.personaWorkspaceRoot) throw new Error('txd config error: personaWorkspaceRoot is required');
+  if (cfg.physicalRegistration !== undefined) {
+    const physical = cfg.physicalRegistration as DaemonConfig['physicalRegistration'];
+    let busUrl: URL;
+    try {
+      busUrl = new URL(physical?.busUrl ?? '');
+    } catch {
+      throw new Error('txd config error: physicalRegistration.busUrl must be an absolute URL');
+    }
+    if (!['http:', 'https:'].includes(busUrl.protocol)) {
+      throw new Error('txd config error: physicalRegistration.busUrl must use http or https');
+    }
+    if (!physical?.generation) {
+      throw new Error('txd config error: physicalRegistration.generation is required');
+    }
+    if (!/^[0-9a-f]{64}$/.test(physical.digest)) {
+      throw new Error('txd config error: physicalRegistration.digest must be a sha256 hex digest');
+    }
+  }
 
   return cfg as DaemonConfig;
 }

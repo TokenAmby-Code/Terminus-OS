@@ -8,6 +8,7 @@ import {
 
 const AGENT_ID = "2ea2d049-0106-4957-8649-31f93bdc8c9a";
 const BIRTH_GENERATION = "1cc2112c-9c38-45a1-839f-831c33a1096a";
+const PANE_GENERATION = "786b72b2-58d5-4294-8f95-928289984d6f";
 const DIGEST = "a".repeat(64);
 
 describe("registrationd Agent contract mirror", () => {
@@ -21,7 +22,7 @@ describe("registrationd Agent contract mirror", () => {
       launch: { argv: [], requested_cwd: "/work", engine_binary: "/bin/codex" },
       placement: {
         pane_id: "palace:worker-1",
-        pane_generation: 4,
+        pane_generation: PANE_GENERATION,
         machine: "k12-personal",
         kind: "local",
         wrapper_pid: 101,

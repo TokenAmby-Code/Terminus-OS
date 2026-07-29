@@ -9,6 +9,7 @@ import { Daemon } from './core.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
 import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
+import { makeBusPublisher } from './events.ts';
 
 const build: BuildInfo = {
   version: '0.1.0',
@@ -23,11 +24,21 @@ const cfg = await loadConfig();
 const store = await PostgresEventStore.connect(cfg.db);
 const tmux = new RealTmux(cfg.tmuxSocket);
 const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
+const physicalRegistration = cfg.physicalRegistration
+  ? {
+      machine: cfg.machine,
+      configuration: {
+        generation: cfg.physicalRegistration.generation,
+        digest: cfg.physicalRegistration.digest,
+      },
+      publish: makeBusPublisher(cfg.physicalRegistration.busUrl),
+    }
+  : null;
 const daemon = new Daemon(store, tmux, undefined, rotationBarrier, {
   agentWrapper: cfg.agentWrapper,
   personaWorkspaceRoot: cfg.personaWorkspaceRoot,
   acknowledgeUrl: `http://${cfg.bind}:${cfg.port}/ingress/static-launch`,
-});
+}, physicalRegistration);
 const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
 
 console.log(
