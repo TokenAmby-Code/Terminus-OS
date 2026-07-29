@@ -49,6 +49,7 @@ import {
   StaticLaunchHandshakeSchema,
   SubscribeRequestSchema,
   TmuxLifecycleEventRequestSchema,
+  WrapperStartHookSchema,
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
@@ -66,7 +67,11 @@ export type Route = {
 
 // The bus event types txd consumes off its `hook.%` subscription. Everything
 // else delivered on the lane is acked untouched (ack ≠ consume).
-export const CONSUMED_BUS_EVENT_TYPES = ['hook.stop', 'hook.user_prompt_submit'] as const;
+export const CONSUMED_BUS_EVENT_TYPES = [
+  'hook.wrapper_start',
+  'hook.stop',
+  'hook.user_prompt_submit',
+] as const;
 
 const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?\n/;
 
@@ -419,6 +424,13 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const busReceipt = `bus:${event.seq}`;
         const ack = (consumed: boolean, reason: string | null, extra: Record<string, unknown> = {}) =>
           json({ ok: true, seq: event.seq, consumed, reason, ...extra });
+        if (event.event_type === 'hook.wrapper_start') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const hook = WrapperStartHookSchema.safeParse(event.payload);
+          if (!hook.success) return ack(false, 'invalid_wrapper_start_payload');
+          const result = await daemon.attestWrapperStart(hook.data);
+          return ack(result.attested, result.reason);
+        }
         if (event.event_type === 'hook.stop') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const stop = StopRequestSchema.safeParse(stopHookInput(event.payload, event.seq));
