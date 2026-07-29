@@ -18,6 +18,7 @@ test('failed canonical tag write removes the newly created seat', async () => {
 
   await expect(tmux.createSeat('somnium:NE')).rejects.toThrow('tag');
 
+  expect(calls.find((args) => args[0] === 'new-session')).toContain('PANE_ID=somnium:NE');
   expect(calls.at(-1)).toEqual(['kill-session', '-t', 'seat_somnium_NE']);
   expect(calls.filter((args) => args[0] === 'kill-session')).toHaveLength(1);
 });

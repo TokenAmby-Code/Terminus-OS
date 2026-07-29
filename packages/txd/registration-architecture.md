@@ -31,9 +31,10 @@ authorize persona-sensitive operations.
 `PANE_ID` is placement context. txd installs the canonical seat label in each
 pane's process environment with tmux's per-pane `-e PANE_ID=<seat>` option.
 Every creation path does this: the initial session, new windows, split panes,
-page reconstruction, dynamic seats, and perpetual remote launch panes.
-Ordinary respawn preserves the pane environment. A canonical-seat change
-replaces the pane process with the new `PANE_ID`.
+page reconstruction, dynamic seats, and perpetual remote launch panes. Every
+respawn explicitly restamps the current canonical value; disposable tmux 3.5a
+proof showed that plain `respawn-pane -k` drops the pane-local environment. A
+canonical-seat change replaces the pane process with the new `PANE_ID`.
 
 The wrapper reports `claimed_pane_id`, wrapper PID, engine choice, cwd, and
 machine in `hook.wrapper_start`. txd walks the wrapper PID's ancestry to a live

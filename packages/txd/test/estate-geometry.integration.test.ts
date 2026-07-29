@@ -1,8 +1,9 @@
 // Canonical estate geometry on disposable tmux servers — behavioral-pin lane.
 
 import { afterEach, describe, expect, test } from 'bun:test';
+import { readFile } from 'node:fs/promises';
 import { RealTmux } from '../src/tmux.ts';
-import { TXD_WINDOWS } from '../src/estate.ts';
+import { TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
 
 const conf = new URL('../tmux/tx.conf', import.meta.url).pathname;
 const sockets: string[] = [];
@@ -32,6 +33,30 @@ function expectRatio(actual: number, total: number, min: number, max: number): v
   expect(actual / total).toBeLessThanOrEqual(max);
 }
 
+async function paneEnvironment(socket: string, seat: string): Promise<string[]> {
+  const pid = await tmux(socket, 'list-panes', '-a', '-f', `#{==:#{@canonical_id},${seat}}`, '-F', '#{pane_pid}');
+  expect(pid).toMatch(/^[1-9][0-9]*$/);
+  return (await readFile(`/proc/${pid}/environ`))
+    .toString()
+    .split('\0')
+    .filter(Boolean);
+}
+
+async function awaitPaneShell(socket: string, seat: string): Promise<void> {
+  const pane = await tmux(socket, 'list-panes', '-a', '-f', `#{==:#{@canonical_id},${seat}}`, '-F', '#{pane_id}');
+  const channel = `${socket}-${seat.replaceAll(':', '-')}-${crypto.randomUUID()}`;
+  await tmux(
+    socket,
+    'send-keys',
+    '-t',
+    pane,
+    '-l',
+    `TMUX= tmux -L ${socket} wait-for -S ${channel}`,
+  );
+  await tmux(socket, 'send-keys', '-t', pane, 'Enter');
+  await tmux(socket, 'wait-for', channel);
+}
+
 async function constructAt(width: number, height: number): Promise<Record<'palace' | 'somnium' | 'council', Pane[]>> {
   const socket = `txd-geometry-${process.pid}-${width}x${height}`;
   sockets.push(socket);
@@ -53,6 +78,28 @@ async function constructAt(width: number, height: number): Promise<Record<'palac
 }
 
 describe('disposable canonical estate geometry', () => {
+  test('every canonical pane owns its unique PANE_ID and txd restamps it on respawn', async () => {
+    const socket = `txd-pane-environment-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+
+    for (const seat of TXD_ESTATE) {
+      expect(await paneEnvironment(socket, seat)).toContain(`PANE_ID=${seat}`);
+    }
+
+    expect(await control.reapSeat('palace:W')).toBe(true);
+    await awaitPaneShell(socket, 'palace:W');
+    expect(await paneEnvironment(socket, 'palace:W')).toContain('PANE_ID=palace:W');
+
+    expect(await control.rebuildPage('council')).toBe(true);
+    for (const seat of TXD_WINDOWS.council) {
+      await awaitPaneShell(socket, seat);
+      expect(await paneEnvironment(socket, seat)).toContain(`PANE_ID=${seat}`);
+    }
+  });
+
   for (const [label, width, height] of [
     ['narrow', 80, 24],
     ['normal', 160, 48],
@@ -271,7 +318,9 @@ describe('disposable canonical estate geometry', () => {
     const rebuilt = rows.split('\n').map((row) => row.split('\t'));
     expect(rebuilt.map(([seat]) => seat).sort()).toEqual([...TXD_WINDOWS.palace].sort());
     expect(rebuilt.every(([, pid, scratch, dead]) => !before.includes(pid!) && scratch === '' && dead === '0')).toBe(true);
-    expect(rebuilt.find(([seat]) => seat === 'palace:W')?.[4]).toBe(defaultShell);
+    expect(rebuilt.find(([seat]) => seat === 'palace:W')?.[4]).toBe(
+      `/usr/bin/env PANE_ID=palace:W ${defaultShell}`,
+    );
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{window_zoomed_flag}\t#{@page_scratch}')).toBe('0');
     for (const seat of TXD_WINDOWS.palace) expect(await control.seatTint(seat)).toBeNull();
   });
