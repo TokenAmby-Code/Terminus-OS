@@ -20,8 +20,7 @@ test('adapter emits sanitized structured audit records without arguments or raw 
   expect(audits.map(({ operation, target, outcome, stderr_category }) => ({ operation, target, outcome, stderr_category }))).toEqual([
     { operation: 'observe_seats', target: 'estate', outcome: 'succeeded', stderr_category: 'none' },
     { operation: 'resolve_seat', target: 'palace:N', outcome: 'succeeded', stderr_category: 'none' },
-    { operation: 'resolve_seat', target: 'palace:N', outcome: 'succeeded', stderr_category: 'none' },
-    { operation: 'set_seat_tint', target: 'palace:N', outcome: 'failed', stderr_category: 'not_found' },
+    { operation: 'observe_default_shell', target: 'palace:N', outcome: 'failed', stderr_category: 'not_found' },
   ]);
   for (const record of audits) {
     expect(Object.keys(record).sort()).toEqual(['duration_ms', 'operation', 'outcome', 'stderr_category', 'target']);
@@ -48,14 +47,16 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
       operations.push(args[0]!);
       if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
       if (args[0] === 'display-message') return { code: 0, stdout: 'palace:N\n', stderr: '' };
-      if (args[0] === 'show-options') return { code: 0, stdout: 'default\n', stderr: '' };
+      if (args[0] === 'show-options') {
+        return { code: 0, stdout: args.at(-1) === 'default-shell' ? '/bin/bash\n' : '', stderr: '' };
+      }
       return { code: 0, stdout: '', stderr: '' };
     },
     audit: () => {},
   });
   expect(await tmux.resetSeat('palace:N')).toBe(true);
   expect(operations).toEqual([
-    'list-panes', 'clear-history', 'respawn-pane', 'display-message',
+    'list-panes', 'show-options', 'clear-history', 'respawn-pane', 'display-message',
     'list-panes', 'select-pane', 'list-panes', 'show-options', 'show-options',
   ]);
 });
@@ -151,7 +152,10 @@ test('static launch execs the wrapper as the pane process for physical attestati
     environment: { TXD_STATIC_LAUNCH_ID: 'launch-1' },
   })).toBe(true);
 
-  expect(calls.at(-1)?.at(-1)).toBe("exec '/fleet/agent-wrapper' claude");
+  expect(calls.at(-1)?.at(-1)).toBe(
+    "exec /usr/bin/env PANE_ID='council:custodes' '/fleet/agent-wrapper' claude",
+  );
+  expect(calls.at(-1)).toContain('PANE_ID=council:custodes');
 });
 
 test('physical attestation reads live procfs parent and engine identity', async () => {
