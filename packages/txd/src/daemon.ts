@@ -23,7 +23,7 @@ const cfg = await loadConfig();
 const store = await PostgresEventStore.connect(cfg.db);
 const tmux = new RealTmux(cfg.tmuxSocket);
 const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
-const daemon = new Daemon(store, tmux, undefined, undefined, undefined, rotationBarrier, {
+const daemon = new Daemon(store, tmux, undefined, rotationBarrier, {
   agentWrapper: cfg.agentWrapper,
   personaWorkspaceRoot: cfg.personaWorkspaceRoot,
   acknowledgeUrl: `http://${cfg.bind}:${cfg.port}/ingress/static-launch`,

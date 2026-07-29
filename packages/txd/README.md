@@ -15,11 +15,6 @@ contracts source, and the public route shape.
   rebuilt by replay — nobody writes them.
 - **Canonical-id membrane.** Raw tmux `%id`s never cross upward. Every response,
   log line, and event is scrubbed (`assertNoTmuxId`); a breach fails loud.
-- **Send chokepoint.** Enqueue-by-default; typed gate/refusal reasons; a
-  ledger-bound agent seat bypasses the operator typing guard, while an unbound
-  pane reads tmux client activity at admission and drain. Held sends recheck on
-  guard expiry and release with an observable reason. Each receipt carries the
-  send's own resolution.
 - **Reconcile = replay.** Out-of-band pane death surfaces as a
   `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
   silently synthesized lifecycle.
@@ -65,7 +60,6 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` event ingress; reconstructs a damaged canonical page |
 | POST   | `/ingress/static-launch`| Private wrapper attestation for a pending static launch |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
-| POST   | `/agents/send`          | Send chokepoint (enqueue-by-default)             |
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
 | POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
 | POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost; fires auto-close) and `hook.user_prompt_submit`; acks everything else |
@@ -99,7 +93,7 @@ each route is the ruled daemon behavior, unchanged.
 ## Contracts
 
 The lifecycle vocabulary (`schema_version`, the seed event types, axes,
-send/stop/close/subscribe shapes) lives in `@terminus-os/contracts` (`./txd`
+comm/stop/close/subscribe shapes) lives in `@terminus-os/contracts` (`./txd`
 module) — the daemon pins `SCHEMA_VERSION` exactly. No `file:` links, no
 external registry dependency and no compatibility layer.
 
@@ -134,7 +128,7 @@ The event stream lives in the `terminus` database, schema `txd`, table
 | Column        | Type     | Notes                                             |
 |---------------|----------|---------------------------------------------------|
 | `seq`         | `bigint` | identity, monotonic — assigned by the store       |
-| `entity_type` | `text`   | `seat` \| `instance` \| `send`                    |
+| `entity_type` | `text`   | `seat` \| `instance` \| `message`                 |
 | `entity_id`   | `text`   | canonical id (never a raw tmux `%id`)             |
 | `event_type`  | `text`   | pinned vocabulary (`@terminus-os/contracts`)      |
 | `payload`     | `jsonb`  | dumb facts only, never derived state              |

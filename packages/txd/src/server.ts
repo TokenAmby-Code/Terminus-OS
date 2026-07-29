@@ -44,7 +44,6 @@ import {
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
   LaunchRequestSchema,
-  SendRequestSchema,
   StopRequestSchema,
   StaticLaunchHandshakeSchema,
   SubscribeRequestSchema,
@@ -345,19 +344,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         if (parsed instanceof Response) return parsed;
         const res = await daemon.launch(parsed, receipt(req));
         return json(res, res.handover ? 200 : 409);
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/agents/send'),
-      label: 'POST /agents/send',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, SendRequestSchema, 'invalid_send_request');
-        if (parsed instanceof Response) return parsed;
-        const res = await daemon.send(parsed, receipt(req));
-        // Admission refusal fails loud (not admitted); gated/delivered are 200.
-        if ('refused' in res) return json(res, 422);
-        return json(res, 200);
       },
     },
     {

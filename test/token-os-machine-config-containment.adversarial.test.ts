@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const root = join(import.meta.dir, "../..");
-const self = "test/adversarial/token-os-machine-config-containment.test.ts";
+const root = join(import.meta.dir, "..");
+const self = "test/token-os-machine-config-containment.adversarial.test.ts";
 const forbidden = [
   /nas-path\.sh/,
   /imperium_config/,

@@ -30,19 +30,13 @@ export type StaticAgentLaunch = {
   environment: Record<string, string>;
 };
 
-export type SendTraceEvent = {
-  kind: 'literal_insert' | 'submit_enter' | 'submit_verify';
-  attempt: number;
-  ok: boolean;
-};
-
 // Below-membrane delivery outcome (discriminated by verdict). `partial_delivered`
 // = the literal text reached the pane but the submit (Enter) did not — first-class,
 // never collapsed to failure. A total failure carries zero bytes by construction.
 export type SendOutcome =
-  | { verdict: 'delivered'; bytes: number; trace: SendTraceEvent[] }
-  | { verdict: 'partial_delivered'; bytes: number; trace: SendTraceEvent[] }
-  | { verdict: 'failed_none_delivered'; bytes: 0; trace: SendTraceEvent[] };
+  | { verdict: 'delivered'; bytes: number }
+  | { verdict: 'partial_delivered'; bytes: number }
+  | { verdict: 'failed_none_delivered'; bytes: 0 };
 
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
@@ -91,12 +85,6 @@ export interface TmuxControlPlane {
   seatTint(seatId: string): Promise<string | null | undefined>;
   /** Observe txd's opaque physical pane generation (never a raw tmux handle). */
   seatGeneration(seatId: string): Promise<string | undefined>;
-  /**
-   * Canonical ids of seats an attached client is actively on within windowMs —
-   * a point-in-time READ of the server-maintained client_activity + active
-   * pane. No shadow state, no keystroke hook.
-   */
-  presentSeats(windowMs: number, nowMs?: number): Promise<Set<string>>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   /** Replace the one transient, non-executing clipboard buffer. */
@@ -1027,40 +1015,11 @@ export class RealTmux implements TmuxControlPlane {
     return applied.code === 0 && await this.seatTint(seatId) === tint;
   }
 
-  async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
-    // Active pane (canonical) per session.
-    const panes = await this.command('observe_active_seats', 'estate', [
-      'list-panes',
-      '-a',
-      '-F',
-      `#{session_name}\t#{window_active}\t#{pane_active}\t#{${CANON_OPT}}`,
-    ]);
-    const activeCanonBySession = new Map<string, string>();
-    for (const line of panes.stdout.split('\n')) {
-      const [session, winActive, paneActive, canon] = line.split('\t');
-      if (winActive === '1' && paneActive === '1' && session && canon) activeCanonBySession.set(session, canon);
-    }
-    // Attached clients + last activity (epoch seconds).
-    const clients = await this.command('observe_clients', 'estate', ['list-clients', '-F', '#{client_session}\t#{client_activity}']);
-    const present = new Set<string>();
-    const nowSec = Math.floor(nowMs / 1000);
-    for (const line of clients.stdout.split('\n')) {
-      const [session, activity] = line.split('\t');
-      if (!session) continue;
-      const canon = activeCanonBySession.get(session);
-      const activitySec = Number(activity);
-      if (canon && Number.isFinite(activitySec) && (nowSec - activitySec) * 1000 <= windowMs) present.add(canon);
-    }
-    return present;
-  }
-
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const paneId = await this.resolvePane(seatId);
-    if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered', trace: [] };
-    const trace: SendTraceEvent[] = [];
+    if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered' };
     const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
-    trace.push({ kind: 'literal_insert', attempt: 1, ok: literal.code === 0 });
-    if (literal.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered', trace };
+    if (literal.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered' };
     const bytes = Buffer.byteLength(text, 'utf8');
 
     // The cursor's logical line is the cross-composer editable surface: shell,
@@ -1068,16 +1027,12 @@ export class RealTmux implements TmuxControlPlane {
     // cursor moves to output or a fresh composer and this line no longer holds
     // the final non-empty line of the sent text.
     const verificationNeedle = text.split(/\r?\n/).filter(Boolean).at(-1)?.trim() ?? '';
-    const verify = async (attempt: number): Promise<boolean> => {
+    const verify = async (): Promise<boolean> => {
       const cursor = await this.command('observe_cursor', seatId, ['display-message', '-p', '-t', paneId, '#{cursor_y}']);
-      let ok = false;
-      if (cursor.code === 0 && /^\d+$/.test(cursor.stdout.trim())) {
-        const row = cursor.stdout.trim();
-        const captured = await this.command('verify_submit', seatId, ['capture-pane', '-p', '-J', '-t', paneId, '-S', row, '-E', row]);
-        ok = captured.code === 0 && verificationNeedle.length > 0 && !captured.stdout.includes(verificationNeedle);
-      }
-      trace.push({ kind: 'submit_verify', attempt, ok });
-      return ok;
+      if (cursor.code !== 0 || !/^\d+$/.test(cursor.stdout.trim())) return false;
+      const row = cursor.stdout.trim();
+      const captured = await this.command('verify_submit', seatId, ['capture-pane', '-p', '-J', '-t', paneId, '-S', row, '-E', row]);
+      return captured.code === 0 && verificationNeedle.length > 0 && !captured.stdout.includes(verificationNeedle);
     };
 
     // One initial submit plus two bounded retries. Every Enter is separated
@@ -1085,18 +1040,15 @@ export class RealTmux implements TmuxControlPlane {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       await this.sleep(this.enterDelayMs * attempt);
       const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-      trace.push({ kind: 'submit_enter', attempt, ok: enter.code === 0 });
-      if (enter.code === 0 && await verify(attempt)) return { bytes, verdict: 'delivered', trace };
-      if (enter.code !== 0) trace.push({ kind: 'submit_verify', attempt, ok: false });
+      if (enter.code === 0 && await verify()) return { bytes, verdict: 'delivered' };
     }
-    return { bytes, verdict: 'partial_delivered', trace };
+    return { bytes, verdict: 'partial_delivered' };
   }
 }
 
 // In-memory fake for tests — same membrane contract, no tmux dependency.
 export class FakeTmux implements TmuxControlPlane {
   private seats = new Map<string, { pane: 'live' | 'dead'; generation: string }>();
-  private present = new Map<string, number>(); // seat -> last activity epoch ms
   private failCreate = new Set<string>(); // seats whose createSeat is forced to throw
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
   private resets: string[] = [];
@@ -1378,26 +1330,9 @@ export class FakeTmux implements TmuxControlPlane {
     const seats = this.shape.windows[page];
     if (seats) this.shape.windows[page] = seats.filter((seat) => seat !== seatId);
   }
-  /** Test control: mark an operator active on a seat as of nowMs. */
-  setPresence(seatId: string, atMs: number): void {
-    this.present.set(seatId, atMs);
-  }
-  async presentSeats(windowMs: number, nowMs = Date.now()): Promise<Set<string>> {
-    const out = new Set<string>();
-    for (const [seat, at] of this.present) if (nowMs - at <= windowMs) out.add(seat);
-    return out;
-  }
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const s = this.seats.get(seatId);
-    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered', trace: [] };
-    return {
-      bytes: Buffer.byteLength(text, 'utf8'),
-      verdict: 'delivered',
-      trace: [
-        { kind: 'literal_insert', attempt: 1, ok: true },
-        { kind: 'submit_enter', attempt: 1, ok: true },
-        { kind: 'submit_verify', attempt: 1, ok: true },
-      ],
-    };
+    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
+    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'delivered' };
   }
 }

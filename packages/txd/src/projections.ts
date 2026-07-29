@@ -11,8 +11,6 @@
 //   act.prompt_submitted(instance) activity → 'working'
 //   act.stop_reported  (instance) activity → 'stopped'
 //   reg.retired        (instance) activity → 'retired'
-//   act.send_enqueued  (send)     payload.target = seat canonical id → queue_depth +1
-//   act.send_delivered/cancelled (send) payload.target → queue_depth -1
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
 import { PANE_STATES } from '@terminus-os/contracts';
@@ -75,7 +73,6 @@ export function buildProjections(events: EventRecord[]): Projections {
   const everBoundInstances = new Set<string>();
   const subscribeSeqByInstance = new Map<string, number>(); // last reg.stop_subscribed seq
   const lastStopSeqByInstance = new Map<string, number>(); // last act.stop_reported seq
-  const queueByTarget = new Map<string, number>();
   // (entity_type, entity_id) -> highest seq seen, to supersede stale contradiction
   // flags. Composite so a later event on a different entity type sharing an id can
   // never suppress the wrong entity's open contradiction.
@@ -178,17 +175,6 @@ export function buildProjections(events: EventRecord[]): Projections {
       case 'reg.retired':
         activityByInstance.set(e.entity_id, 'retired');
         break;
-      case 'act.send_enqueued': {
-        const t = str(e.payload.target);
-        if (t) queueByTarget.set(t, (queueByTarget.get(t) ?? 0) + 1);
-        break;
-      }
-      case 'act.send_delivered':
-      case 'act.send_cancelled': {
-        const t = str(e.payload.target);
-        if (t) queueByTarget.set(t, Math.max(0, (queueByTarget.get(t) ?? 0) - 1));
-        break;
-      }
       case 'reg.contradiction_flagged':
         contradictions.push({
           seq: e.seq,
@@ -201,7 +187,7 @@ export function buildProjections(events: EventRecord[]): Projections {
         });
         break;
       default:
-        break; // launch-chain rungs, sends' gated, dedupe — no projection effect here
+        break; // launch-chain rungs, dedupe — no projection effect here
     }
   }
 
@@ -226,8 +212,6 @@ export function buildProjections(events: EventRecord[]): Projections {
       pane,
       binding: binding ? 'bound' : 'unbound',
       activity: instanceId ? activityByInstance.get(instanceId) ?? 'idle' : 'idle',
-      // Sends target the seat's canonical id.
-      queue_depth: queueByTarget.get(seat) ?? 0,
       persona: binding?.persona ?? null,
       rank: binding?.rank ?? null,
       commander: binding?.commander ?? null,
