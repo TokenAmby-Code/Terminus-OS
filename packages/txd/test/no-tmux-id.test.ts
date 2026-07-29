@@ -36,10 +36,9 @@ test('mutation ingress recursively rejects raw tmux ids before tmux or persisten
   // mutations, and its membrane semantics (ack-not-consume on a leaking
   // consumed payload, tolerate %N text in unconsumed payloads) are pinned in
   // ingress-bus.test.ts.
-  const paths = ['/agents/launch', '/agents/send', '/agents/close', '/agents/subscribe'];
+  const paths = ['/agents/launch', '/agents/close', '/agents/subscribe'];
   const valid = [
     { seat_id: 'palace:W', schema_version: 8, identity: 'i1', persona: 'p', tint: '#1' },
-    { target: 'palace:W', text: 'hello', schema_version: 8 },
     { target: 'palace:W', schema_version: 8 },
     { instance_id: 'i1', schema_version: 8, action: 'close' },
   ];
@@ -138,7 +137,7 @@ test('no tmux id lands in any persisted event payload', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
   await d.launch({ seat_id: 'palace:W', schema_version: 8, identity: 'i1', persona: 'p', tint: '#1' });
-  await d.send({ target: 'palace:W', text: 'hi', schema_version: 8 });
+  await d.comm({ schema_version: 8, source_instance_id: 'i1', target: 'i1', message: 'hi', ask: false, reply: false });
   await d.reconcile();
   for (const e of await store.readAll()) {
     expect(findTmuxIdDeep(e.payload)).toBeNull();

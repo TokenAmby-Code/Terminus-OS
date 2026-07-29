@@ -7,7 +7,6 @@
 
 import {
   SCHEMA_VERSION,
-  SEND_PRESENCE_ACTIVITY_WINDOW_MS,
   type ActivityBoardRow,
   type CloseRequest,
   type CloseResponse,
@@ -21,7 +20,6 @@ import {
   type CommWaitRequest,
   type CommWaitResponse,
   type CurrentBinding,
-  type DeliveryVerdict,
   type EventInput,
   type Health,
   type EstateRotateRequest,
@@ -32,12 +30,6 @@ import {
   type Provenance,
   type ProvenanceSource,
   type ReconcileResponse,
-  type SendReceipt,
-  type SendCancellationReason,
-  type SendRefusal,
-  type SendRefusalReason,
-  type SendRequest,
-  type SendResolution,
   type StopAutoCloseOutcome,
   type StopReceipt,
   type StopRefusal,
@@ -72,8 +64,6 @@ import type { TmuxControlPlane } from './tmux.ts';
 export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as const;
 
 type Now = () => string;
-type ScheduledCallback = () => void | Promise<void>;
-type Schedule = (callback: ScheduledCallback, delayMs: number) => void;
 export type StaticLaunchRuntime = {
   agentWrapper: string;
   personaWorkspaceRoot: string;
@@ -81,11 +71,6 @@ export type StaticLaunchRuntime = {
 };
 
 const COUNCIL_MIGRATION_ID = 'council-static-personas';
-
-const scheduleGuardRelease: Schedule = (callback, delayMs) => {
-  const timer = setTimeout(() => void callback(), delayMs);
-  timer.unref?.();
-};
 
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
@@ -95,8 +80,6 @@ export class Daemon {
     private store: EventStore,
     private tmux: TmuxControlPlane,
     private now: Now = () => new Date().toISOString(),
-    private schedule: Schedule = scheduleGuardRelease,
-    private nowMs: () => number = Date.now,
     private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
     private staticRuntime: StaticLaunchRuntime | null = null,
   ) {}
@@ -686,7 +669,7 @@ export class Daemon {
   // Stands the canonical persistent estate (src/estate.ts) declaratively. NOT an
   // endpoint or CLI — the seed vocab/endpoint set is closed; this is a boot
   // ensure. Runs under the single-writer mutex so it can't interleave with a
-  // concurrent launch/send. Idempotent: a re-run over a fully-present-and-attested
+  // concurrent launch or comm. Idempotent: a re-run over a fully-present-and-attested
   // estate creates nothing and appends zero events. Each fresh seat records ONE
   // bare `reg.pane_created` (unbound) — it lands in freelist + activity_board and
   // triggers NO contradiction (reconcile only flags bound-dead / retired-live).
@@ -911,229 +894,6 @@ export class Daemon {
     });
     await this.provisionStaticPersonas(true);
     return result;
-  }
-
-  // ── /agents/send — the ONE chokepoint (spec §5) ───────────────────────────────────
-  // enqueue-by-default; unresolved targets REFUSED at admission (never gated —
-  // the #699 class is unrepresentable); typed gate true-cause; the receipt
-  // carries the SAME resolution the send used (never re-derived).
-  send(req: SendRequest, transportReceipt: string | null = null): Promise<SendReceipt | SendRefusal> {
-    return this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) {
-        return this.refuse('schema_version_mismatch', req.target);
-      }
-
-      // Resolve target -> canonical seat + the seq it resolved against. Prefer a
-      // current binding; fall back to a bare live seat.
-      const proj = await this.projections();
-      const events = await this.store.readAll();
-      const resolution = this.resolveTarget(req.target, proj);
-      if (!resolution) return this.refuse('pane_unresolved', req.target);
-      if (this.pendingScopedResetSeats(events).has(resolution.seat_id)) {
-        return this.refuse('scoped_reset_pending', req.target);
-      }
-      // Pane must be live at admission (unresolved/dead never admitted).
-      const board = proj.activityBoard.find((r) => r.seat_id === resolution.seat_id);
-      if (board && board.pane === 'dead') return this.refuse('pane_dead', req.target);
-
-      const occurred_at = this.now();
-      const sendId = crypto.randomUUID();
-
-      // Admit: enqueue with the resolution frozen into the queue item.
-      await this.store.append({
-        entity_type: 'send',
-        entity_id: sendId,
-        event_type: 'act.send_enqueued',
-        payload: { target: resolution.seat_id, resolved_seq: resolution.bound_seq, text_len: req.text.length },
-        provenance: this.prov('wrapper', transportReceipt),
-        occurred_at,
-      });
-
-      // Typed-cause gate. Presence is a point-in-time READ of server-maintained
-      // client_activity — no shadow state, no keystroke hook. Emitting the gate
-      // records the DECISION (carrying its window evidence); raw presence never
-      // enters the stream. A gated send STAYS enqueued for a later drain.
-      const gate = async (): Promise<SendReceipt> => {
-        await this.store.append({
-          entity_type: 'send',
-          entity_id: sendId,
-          event_type: 'act.send_gated',
-          payload: {
-            target: resolution.seat_id,
-            reason: 'typing_guard',
-            activity_window_ms: SEND_PRESENCE_ACTIVITY_WINDOW_MS,
-            resolved_seq: resolution.bound_seq,
-          },
-          provenance: this.prov('observer', transportReceipt),
-          occurred_at: this.now(),
-        });
-        this.schedule(
-          () => this.releaseGuardedSend(sendId, resolution, req.text, transportReceipt),
-          SEND_PRESENCE_ACTIVITY_WINDOW_MS,
-        );
-        return this.receipt('enqueued_gated', resolution, sendId, 'typing_guard', SEND_PRESENCE_ACTIVITY_WINDOW_MS, null);
-      };
-
-      // A current binding is the ledger's positive proof that this pane is an
-      // agent seat. Agent output is never operator composition territory, so
-      // daemon-to-agent delivery bypasses the client-activity guard entirely.
-      if (resolution.bound_seq > 0) {
-        return this.deliverSend(sendId, resolution, req.text, transportReceipt, 'agent_seat_exempt');
-      }
-
-      // Presence read at ADMISSION (the enqueue-time snapshot, spec §5 rung 4):
-      // operator active ⇒ defer this pass (gate now, deliver on a later drain).
-      const presentAtAdmission = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
-      if (presentAtAdmission.has(resolution.seat_id)) return gate();
-
-      // Presence read at DRAIN (the delivery instant): re-read fresh — the
-      // operator may have become active between admission and drain.
-      const presentAtDrain = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
-      if (presentAtDrain.has(resolution.seat_id)) return gate();
-
-      // Operator idle at BOTH decision points → deliver (canonical in, %id internal).
-      return this.deliverSend(sendId, resolution, req.text, transportReceipt, 'operator_idle');
-    });
-  }
-
-  private releaseGuardedSend(
-    sendId: string,
-    resolution: SendResolution,
-    text: string,
-    transportReceipt: string | null,
-  ): Promise<void> {
-    return this.locked(async () => {
-      const present = await this.tmux.presentSeats(SEND_PRESENCE_ACTIVITY_WINDOW_MS, this.nowMs());
-      if (present.has(resolution.seat_id)) {
-        this.schedule(
-          () => this.releaseGuardedSend(sendId, resolution, text, transportReceipt),
-          SEND_PRESENCE_ACTIVITY_WINDOW_MS,
-        );
-        return;
-      }
-      await this.deliverSend(sendId, resolution, text, transportReceipt, 'typing_guard_expired');
-    });
-  }
-
-  private async deliverSend(
-    sendId: string,
-    resolution: SendResolution,
-    text: string,
-    transportReceipt: string | null,
-    releaseReason: 'agent_seat_exempt' | 'operator_idle' | 'typing_guard_expired',
-  ): Promise<SendReceipt> {
-    // The admission resolution is a frozen generation, not permission to send
-    // forever. Revalidate it at the last domain boundary before every tmux
-    // delivery. The daemon lock makes this projection check and the following
-    // adapter call one mutation-critical section for all sanctioned callers.
-    if (!(await this.frozenResolutionIsCurrent(resolution))) {
-      return this.cancelSend(sendId, resolution, transportReceipt);
-    }
-    if (this.pendingScopedResetSeats(await this.store.readAll()).has(resolution.seat_id)) {
-      return this.cancelSend(sendId, resolution, transportReceipt, 'scoped_reset_pending');
-    }
-
-    const result = await this.tmux.sendToSeat(resolution.seat_id, text);
-    for (const observation of result.trace ?? []) {
-      await this.store.append({
-        entity_type: 'send',
-        entity_id: sendId,
-        event_type: 'act.send_submit_observed',
-        payload: { target: resolution.seat_id, ...observation, resolved_seq: resolution.bound_seq },
-        provenance: this.prov('observer', transportReceipt),
-        occurred_at: this.now(),
-      });
-    }
-    const verdict: DeliveryVerdict = result.verdict;
-    if (verdict === 'delivered') {
-      await this.store.append({
-        entity_type: 'send',
-        entity_id: sendId,
-        event_type: 'act.send_delivered',
-        payload: {
-          target: resolution.seat_id,
-          bytes: result.bytes,
-          resolved_seq: resolution.bound_seq,
-          release_reason: releaseReason,
-        },
-        provenance: this.prov('observer', transportReceipt),
-        occurred_at: this.now(),
-      });
-    }
-    // partial_delivered = text inserted but not submitted → stays enqueued (like a
-    // gate); the receipt still carries the partial verdict + its byte evidence
-    // (contract requires non-null bytes for partial). Only a full delivery dequeues.
-    return this.receipt(verdict, resolution, sendId, null, null, verdict === 'failed_none_delivered' ? 0 : result.bytes);
-  }
-
-  private async frozenResolutionIsCurrent(resolution: SendResolution): Promise<boolean> {
-    const proj = await this.projections();
-    const board = proj.activityBoard.find((row) => row.seat_id === resolution.seat_id);
-    if (!board || board.pane === 'dead' || board.activity === 'retired') return false;
-
-    const binding = proj.currentBindings.find((candidate) => candidate.seat_id === resolution.seat_id);
-    if (resolution.bound_seq === 0) return binding === undefined && board.binding === 'unbound';
-    return binding?.bound_seq === resolution.bound_seq && board.binding === 'bound';
-  }
-
-  private async cancelSend(
-    sendId: string,
-    resolution: SendResolution,
-    transportReceipt: string | null,
-    reason: SendCancellationReason = 'binding_changed',
-  ): Promise<SendReceipt> {
-    await this.store.append({
-      entity_type: 'send',
-      entity_id: sendId,
-      event_type: 'act.send_cancelled',
-      payload: {
-        target: resolution.seat_id,
-        resolved_seq: resolution.bound_seq,
-        reason,
-      },
-      provenance: this.prov('observer', transportReceipt),
-      occurred_at: this.now(),
-    });
-    return this.receipt('cancelled', resolution, sendId, null, null, 0, reason);
-  }
-
-  private resolveTarget(target: string, proj: Projections): SendResolution | null {
-    // A bound seat, matched by seat id or by the instance it carries.
-    const binding = proj.currentBindings.find((b) => b.seat_id === target || b.instance_id === target);
-    if (binding) return { target, seat_id: binding.seat_id, bound_seq: binding.bound_seq };
-    // A bare live seat (no binding) — resolves against the seat's board row.
-    // The predicate matched seat_id === target, so the seat id IS target here.
-    const bare = proj.activityBoard.find((r) => r.seat_id === target && r.binding === 'unbound' && r.pane !== 'dead');
-    if (bare) return { target, seat_id: target, bound_seq: 0 };
-    return null;
-  }
-
-  private refuse(reason: SendRefusalReason, target: string): SendRefusal {
-    // The membrane also covers logs: a client may hand us a raw `%5`; redact it
-    // in the log line while returning the caller's original target unchanged.
-    const loggedTarget = findTmuxId(target) ? '<redacted-tmux-id>' : target;
-    console.error(JSON.stringify({ level: 'error', event: 'send_refused', reason, target: loggedTarget }));
-    return { ok: false, refused: true, reason, target };
-  }
-
-  private async receipt(
-    verdict: DeliveryVerdict,
-    resolution: SendResolution,
-    sendId: string,
-    gate: 'typing_guard' | null,
-    window: number | null,
-    bytes: number | null,
-    cancellationReason: SendCancellationReason | null = null,
-  ): Promise<SendReceipt> {
-    return {
-      verdict,
-      resolution,
-      gate_reason: gate,
-      cancellation_reason: verdict === 'cancelled' ? cancellationReason : null,
-      activity_window_ms: window,
-      bytes_delivered: bytes,
-      send_seq: (await this.store.readByEntity(sendId)).at(-1)?.seq ?? -1,
-    };
   }
 
   // ── /agents/close — the generic "close this instance" system (rung 3) ──────────────
