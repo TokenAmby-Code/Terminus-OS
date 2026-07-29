@@ -27,21 +27,12 @@ restart.
 | `GET /v1/replays/<replay_id>` | fold event and delivery state |
 | `GET /v1/replays?source=<service>&unfinished=true&limit=<n>&after=<replay_id>` | bounded, cursor-paginated startup reconciliation index |
 | `GET /v1/events?limit=<n>&after=<event_id>` | bounded immutable journal feed for projection rebuild |
-| `POST /ingress/github` | signature-verified, delivery-deduplicated GitHub event normalization |
 | `POST /ingress/hooks/<type>` | hook shim: one door per pinned vendor hook type (30), ALL consumed — journals `hook.<type>`. No 410 tail exists. |
 | `POST /ingress/events` | generic publish door (loopback emitters). `hook.*` is reserved and rejected here. |
 
 Harness hooks arrive via the local edge proxy (`hookConsumers` fan-in — busd is
 the only consumer); the `x-edge-proxy` header is the transport receipt woven
 into journal provenance.
-
-Each GitHub delivery is an immutable source replay keyed by GitHub's delivery
-UUID. The normalized payload carries repository, PR, exact head SHA where the
-webhook supplies one, and producer App identity for checks. githubd consumes
-that fact and appends a causally linked policy event to the relevant command
-replay; ingress never guesses a transaction replay from repository metadata.
-Issue comments explicitly require a PR-snapshot binding before they can affect
-SHA-bound policy.
 
 ## Delivery contract
 
@@ -106,11 +97,8 @@ Observability: `SELECT * FROM bus.lag;` or `curl localhost:7782/ctl/health`.
 txd's B1 pattern: `BUSD_CONFIG` JSON file → env → defaults. `machine` must come
 from `IMPERIUM_MACHINE` or config (fail loud). Defaults: bind `127.0.0.1`, port
 `7782`, db peer-auth socket `/var/run/postgresql` database `terminus`,
-`deliveryTimeoutMs` 10000 and `batchSize` 100. Signed GitHub ingress reads its
-secret from the absolute systemd credential path in
-`githubWebhookSecretFile`/`BUSD_GITHUB_WEBHOOK_SECRET_FILE`; secret material is
-never config content, an event payload, a projection, or a response. The
-optional `subscriptions` array is the machine-owned delivery topology.
+`deliveryTimeoutMs` 10000 and `batchSize` 100. The optional `subscriptions`
+array is the machine-owned delivery topology.
 
 ## No-fallback posture (ruled)
 
