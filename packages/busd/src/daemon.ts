@@ -10,6 +10,7 @@ import { PostgresReplayStore } from './replay-store.ts';
 import { Dispatcher, ReplayDispatcher } from './dispatcher.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
+import { notifyReady } from './systemd-notify.ts';
 
 const build: BuildInfo = {
   version: '0.1.0',
@@ -58,6 +59,12 @@ console.info(
     build,
   }),
 );
+
+// The bus is bound and both dispatchers are scheduling: the same edge the log
+// above records, told to systemd. Under Type=notify this is what completes the
+// start job, so `systemctl restart busd.service` returns here rather than at
+// fork.
+notifyReady();
 
 async function shutdown() {
   // Stop scheduling and await the bounded transport requests already in flight.
