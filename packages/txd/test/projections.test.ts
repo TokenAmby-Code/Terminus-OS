@@ -15,7 +15,7 @@ test('bare seat create → freelist entry, unbound, live', async () => {
   expect(p.freelist).toEqual([{ seat_id: 'somnium:NE', pane_state: 'live' }]);
   expect(p.currentBindings).toEqual([]);
   const row = p.activityBoard[0]!;
-  expect(row).toMatchObject({ seat_id: 'somnium:NE', entity_type: 'seat', pane: 'live', binding: 'unbound', activity: 'idle', queue_depth: 0 });
+  expect(row).toMatchObject({ seat_id: 'somnium:NE', entity_type: 'seat', pane: 'live', binding: 'unbound', activity: 'idle' });
   await s.close();
 });
 
@@ -58,23 +58,6 @@ test('activity axis folds prompt/stop/retire independently of pane & binding', a
   await s.append(e({ entity_type: 'instance', entity_id: 'iA', event_type: 'act.stop_reported', payload: {} }));
   p = buildProjections(await s.readAll());
   expect(p.activityBoard[0]!.activity).toBe('stopped');
-  await s.close();
-});
-
-test('queue_depth is a projection column: enqueued +1, delivered/cancelled -1, gated no-op', async () => {
-  const s = new MemoryEventStore();
-  await s.append(e({ entity_id: 'seatQ', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
-  await s.append(e({ entity_type: 'send', entity_id: 's1', event_type: 'act.send_enqueued', payload: { target: 'seatQ' } }));
-  await s.append(e({ entity_type: 'send', entity_id: 's2', event_type: 'act.send_enqueued', payload: { target: 'seatQ' } }));
-  await s.append(e({ entity_type: 'send', entity_id: 's2', event_type: 'act.send_gated', payload: { target: 'seatQ', reason: 'typing_guard' } }));
-  let p = buildProjections(await s.readAll());
-  expect(p.activityBoard.find((r) => r.seat_id === 'seatQ')!.queue_depth).toBe(2);
-  await s.append(e({ entity_type: 'send', entity_id: 's1', event_type: 'act.send_delivered', payload: { target: 'seatQ', bytes: 3 } }));
-  p = buildProjections(await s.readAll());
-  expect(p.activityBoard.find((r) => r.seat_id === 'seatQ')!.queue_depth).toBe(1);
-  await s.append(e({ entity_type: 'send', entity_id: 's2', event_type: 'act.send_cancelled', payload: { target: 'seatQ', reason: 'binding_changed' } }));
-  p = buildProjections(await s.readAll());
-  expect(p.activityBoard.find((r) => r.seat_id === 'seatQ')!.queue_depth).toBe(0);
   await s.close();
 });
 

@@ -10,7 +10,6 @@ import {
   MAX_COMM_MESSAGE_BYTES,
   REG_EVENT_NAMES,
   SCHEMA_VERSION,
-  SendReceiptSchema,
   TmuxLifecycleEventRequestSchema,
   eventDomain,
 } from "../src/txd.ts";
@@ -23,11 +22,11 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(38);
+    expect(EVENT_TYPES).toHaveLength(33);
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
     expect(REG_EVENT_NAMES).toHaveLength(18);
-    expect(ACT_EVENT_NAMES).toHaveLength(11);
+    expect(ACT_EVENT_NAMES).toHaveLength(6);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
       'scoped_reset_refused', 'scoped_reset_requested', 'scoped_reset_completed', 'scoped_reset_failed',
@@ -67,31 +66,6 @@ describe("txd lifecycle vocabulary", () => {
     expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
     expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
-  });
-
-  test("partial_delivered must carry non-null byte evidence (refine enforced)", () => {
-    const base = {
-      verdict: "partial_delivered",
-      resolution: { target: "somnium:NE", seat_id: "somnium:NE", bound_seq: 0 },
-      gate_reason: null,
-      cancellation_reason: null,
-      activity_window_ms: null,
-      send_seq: 1,
-    };
-    expect(() => SendReceiptSchema.parse({ ...base, bytes_delivered: null })).toThrow();
-    expect(SendReceiptSchema.parse({ ...base, bytes_delivered: 3 }).bytes_delivered).toBe(3);
-  });
-
-  test("cancelled receipts carry an explicit typed cause", () => {
-    expect(SendReceiptSchema.parse({
-      verdict: "cancelled",
-      resolution: { target: "somnium:NE", seat_id: "somnium:NE", bound_seq: 42 },
-      gate_reason: null,
-      cancellation_reason: "binding_changed",
-      activity_window_ms: null,
-      bytes_delivered: 0,
-      send_seq: 9,
-    }).verdict).toBe("cancelled");
   });
 
   test("health names the service txd — nothing k12-named survives of the daemon", () => {

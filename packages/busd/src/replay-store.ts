@@ -22,6 +22,12 @@ const systemClock: Clock = () => new Date().toISOString();
 
 export class IdempotencyConflict extends Error {}
 export class UnknownReplay extends Error {}
+// A replay stream is closed by its terminal event. Anything appended after it
+// would forge facts onto a settled outcome — an attestation that no consumer
+// can distinguish from the real one. The store refuses; the duplicate check
+// runs first, so re-appending an event the stream already holds stays
+// idempotent.
+export class TerminalStreamViolation extends Error {}
 export class EventIdentityConflict extends Error {}
 export class InvalidEventCursor extends Error {}
 export class InvalidReplayCursor extends Error {}
@@ -124,6 +130,9 @@ export class MemoryReplayStore implements ReplayStore {
     if (existing) {
       assertSameEvent(existing, input);
       return { created: false, event: existing };
+    }
+    if (stream.events.some((event) => event.payload.terminal === true)) {
+      throw new TerminalStreamViolation(`replay ${input.replay_id} is terminated; no further events may be appended`);
     }
     if (input.causation_event_id && !this.eventIndex.has(input.causation_event_id)) {
       throw new UnknownReplay("causation_event_id does not exist");
@@ -401,6 +410,14 @@ export class PostgresReplayStore implements ReplayStore {
           const event = rowToEvent(duplicate[0]!);
           assertSameEvent(event, input);
           return { created: false, event };
+        }
+        const terminated = (await transaction`
+        SELECT 1 FROM replay.events
+        WHERE replay_id = ${input.replay_id} AND payload @> '{"terminal":true}'::jsonb
+        LIMIT 1`) as { "?column?": number }[];
+        if (terminated.length) {
+          throw new TerminalStreamViolation(
+            `replay ${input.replay_id} is terminated; no further events may be appended`);
         }
         if (input.causation_event_id !== null) {
           const causes = (await transaction`
