@@ -27,16 +27,12 @@ import { z } from 'zod';
 // subscription that composes `final message → auto-close`). Old v1 events replay
 // unchanged; the seed set grew by one WITH this bump, per spec §3 ("no additions
 // without a schema_version bump").
-// v3: additive — adds `act.send_submit_observed`; each literal insert, Enter,
-// retry, and pane-readback result is durable evidence for the send verdict.
-// v4: additive — adds `act.send_cancelled` and the `cancelled` delivery verdict.
-// A frozen seat generation that changes before delivery terminates without a
-// tmux call, with `binding_changed` recorded as the cancellation reason.
 // v6: additive — explicit estate rotation request/refusal/completion lifecycle.
 // v7: additive — Council topology migration, canonical seat decommissioning,
 // and authenticated static-persona launch facts/readiness.
 // v8: physical persona-tint apply/read-back, fail-dark reset, and readiness.
-export const SCHEMA_VERSION = 8;
+// v9: typed, engine-aware plan-mode transition request/attestation lifecycle.
+export const SCHEMA_VERSION = 9;
 
 export const CLIPBOARD_BUFFER_NAME = 'tx-clipboard';
 export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
@@ -59,6 +55,13 @@ export const ClipboardPushRequestSchema = z.object({
 });
 export type ClipboardPushRequest = z.infer<typeof ClipboardPushRequestSchema>;
 
+export const ClipboardSelectionRequestSchema = z.object({
+  schema_version: z.number().int(),
+  client_tty: z.string().regex(/^\/dev\/(?:pts\/[0-9]+|tty[A-Za-z0-9._-]*)$/),
+  content: z.string().refine(validClipboardText, 'clipboard must be valid UTF-8 at most 1 MiB'),
+});
+export type ClipboardSelectionRequest = z.infer<typeof ClipboardSelectionRequestSchema>;
+
 export const ClipboardPullResponseSchema = z.object({
   ok: z.literal(true),
   target: z.string().min(1),
@@ -66,6 +69,9 @@ export const ClipboardPullResponseSchema = z.object({
   bytes: z.number().int().nonnegative().max(MAX_CLIPBOARD_BYTES),
 });
 export type ClipboardPullResponse = z.infer<typeof ClipboardPullResponseSchema>;
+
+export const ClipboardSelectionResponseSchema = ClipboardPullResponseSchema;
+export type ClipboardSelectionResponse = z.infer<typeof ClipboardSelectionResponseSchema>;
 
 export const ClipboardPushResponseSchema = ClipboardPullResponseSchema.extend({
   content_base64: z.string()
@@ -75,9 +81,8 @@ export const ClipboardPushResponseSchema = ClipboardPullResponseSchema.extend({
 export type ClipboardPushResponse = z.infer<typeof ClipboardPushResponseSchema>;
 
 // ── Entities ────────────────────────────────────────────────────────────────
-// The four entity kinds the daemon tracks. `send` is a first-class entity: a
-// send has its own lifecycle (enqueued → gated? → delivered) and trust surface.
-export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'send', 'message', 'ask', 'assertion', 'estate'] as const;
+// The entity kinds the daemon tracks.
+export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'message', 'ask', 'assertion', 'estate'] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
 export const EntityTypeSchema = z.enum(ENTITY_TYPES);
 
@@ -110,25 +115,17 @@ export const REG_EVENT_NAMES = [
   'seat_decommissioned',
 ] as const;
 
-// act.* — agent behavior (feeds the `activity` axis) + send activity.
-// NOTE (flagged for Custodes review): the spec names only `prompt_submitted`
-// and `stop_reported` as act.* explicitly. The send-lifecycle events and
-// `receipt_deduped` are placed in act.* here as a defensible reading (send =
-// operational activity directed at a pane; receipt_deduped rides stop_reported).
-// This is a contracts-only prefix decision, trivially re-partitioned if ruled
-// otherwise — it never changes the storage (one stream) or the seed-16 set.
+// act.* — agent behavior (feeds the `activity` axis) + comm activity.
 export const ACT_EVENT_NAMES = [
   'prompt_submitted',
   'stop_reported',
-  'send_enqueued',
-  'send_gated',
-  'send_submit_observed',
-  'send_delivered',
-  'send_cancelled',
   'receipt_deduped',
   'comm_bytes_sent',
   'comm_delivery_asserted',
   'comm_callback_asserted',
+  'mode_transition_requested',
+  'mode_transition_attested',
+  'mode_transition_failed',
 ] as const;
 export const ESTATE_EVENT_NAMES = [
   'rotation_refused',
@@ -165,15 +162,13 @@ export const EVENT_TYPES = [
   'reg.seat_decommissioned',
   'act.prompt_submitted',
   'act.stop_reported',
-  'act.send_enqueued',
-  'act.send_gated',
-  'act.send_submit_observed',
-  'act.send_delivered',
-  'act.send_cancelled',
   'act.receipt_deduped',
   'act.comm_bytes_sent',
   'act.comm_delivery_asserted',
   'act.comm_callback_asserted',
+  'act.mode_transition_requested',
+  'act.mode_transition_attested',
+  'act.mode_transition_failed',
   'estate.rotation_refused',
   'estate.rotation_requested',
   'estate.rotation_completed',
@@ -203,50 +198,6 @@ export const BindingStateSchema = z.enum(BINDING_STATES);
 export const ACTIVITY_STATES = ['working', 'idle', 'stopped', 'retired'] as const;
 export type ActivityState = (typeof ACTIVITY_STATES)[number];
 export const ActivityStateSchema = z.enum(ACTIVITY_STATES);
-
-// ── Send chokepoint (spec §5) ────────────────────────────────────────────────
-// Gate reasons enqueue-and-HOLD; each carries its TRUE typed cause. The #699
-// class (typing_guard masking pane_unresolved) is unrepresentable because
-// unresolved targets are REFUSED at admission (below), never gated.
-export const SEND_GATE_REASONS = ['typing_guard'] as const;
-export type SendGateReason = (typeof SEND_GATE_REASONS)[number];
-export const SendGateReasonSchema = z.enum(SEND_GATE_REASONS);
-
-// Admission refusals fail LOUD and never admit to the queue (spec §5 drain
-// discipline). Distinct from gate reasons by construction.
-export const SEND_REFUSAL_REASONS = [
-  'pane_unresolved',
-  'pane_dead',
-  'scoped_reset_pending',
-  'schema_version_mismatch',
-] as const;
-export type SendRefusalReason = (typeof SEND_REFUSAL_REASONS)[number];
-export const SendRefusalReasonSchema = z.enum(SEND_REFUSAL_REASONS);
-
-// Partial-delivery verdicts (spec §5). `partial_delivered` MUST carry
-// what-got-through evidence; started-then-died is first-class, never collapsed
-// to pure failure and never silently truncated.
-export const DELIVERY_VERDICTS = [
-  'delivered',
-  'enqueued_gated',
-  'cancelled',
-  'failed_none_delivered',
-  'partial_delivered',
-] as const;
-export type DeliveryVerdict = (typeof DELIVERY_VERDICTS)[number];
-export const DeliveryVerdictSchema = z.enum(DELIVERY_VERDICTS);
-
-export const SEND_CANCELLATION_REASONS = ['binding_changed', 'scoped_reset_pending'] as const;
-export type SendCancellationReason = (typeof SEND_CANCELLATION_REASONS)[number];
-export const SendCancellationReasonSchema = z.enum(SEND_CANCELLATION_REASONS);
-
-// Operator-presence activity window (spec §5). NAMED constant, echoed in every
-// send_gated payload — no buried magic numbers. This guard applies only to
-// unbound panes where operator composition is possible; a ledger-bound agent
-// seat bypasses it so agent output can never masquerade as operator typing.
-// For an unbound target, `client_activity` is read at each decision point and a
-// hold is released after the named window expires without further activity.
-export const SEND_PRESENCE_ACTIVITY_WINDOW_MS = 10_000;
 
 // ── Provenance (spec §2) — three real emitters, hooks REAL but UNTRUSTED ──────
 export const PROVENANCE_SOURCES = ['hook', 'wrapper', 'observer'] as const;
@@ -316,7 +267,6 @@ export const ActivityBoardRowSchema = z.object({
   pane: PaneStateSchema,
   binding: BindingStateSchema,
   activity: ActivityStateSchema,
-  queue_depth: z.number().int(), // projection column, NOT an axis
   persona: z.string().nullable(),
   rank: z.string().nullable(),
   commander: z.string().nullable(),
@@ -393,56 +343,6 @@ export const LaunchResponseSchema = z.object({
   reason: z.string().nullable(),
 });
 export type LaunchResponse = z.infer<typeof LaunchResponseSchema>;
-
-// The resolution a send is bound to — carried verbatim from admission through
-// drain into the receipt. NEVER re-derived (kills the target=unresolved
-// split-brain, spec §5 fresh datum 07-12).
-export const SendResolutionSchema = z.object({
-  target: z.string(),
-  seat_id: z.string(),
-  bound_seq: z.number().int(),
-});
-export type SendResolution = z.infer<typeof SendResolutionSchema>;
-
-export const SendRequestSchema = z.object({
-  target: z.string().min(1), // canonical id ONLY — never a tmux %id
-  text: z.string(),
-  schema_version: z.number().int(),
-});
-export type SendRequest = z.infer<typeof SendRequestSchema>;
-
-// Base shape kept separate so consumers can still .extend()/.pick()/.omit();
-// the refined schema below enforces the partial-delivery evidence invariant.
-export const SendReceiptBaseSchema = z.object({
-  verdict: DeliveryVerdictSchema,
-  resolution: SendResolutionSchema, // the SAME resolution the send used
-  gate_reason: SendGateReasonSchema.nullable(),
-  cancellation_reason: SendCancellationReasonSchema.nullable(),
-  activity_window_ms: z.number().int().nonnegative().nullable(), // echoed when gated
-  bytes_delivered: z.number().int().nonnegative().nullable(), // required non-null for partial_delivered
-  send_seq: z.number().int().nonnegative(), // seq is 1-based and monotonic
-});
-export const SendReceiptSchema = SendReceiptBaseSchema.superRefine((receipt, ctx) => {
-  if (receipt.verdict === 'partial_delivered' && receipt.bytes_delivered === null) {
-    ctx.addIssue({ code: 'custom', message: 'partial_delivered must carry non-null bytes_delivered', path: ['bytes_delivered'] });
-  }
-  if (receipt.verdict === 'cancelled' && receipt.cancellation_reason === null) {
-    ctx.addIssue({ code: 'custom', message: 'cancelled must carry a cancellation reason', path: ['cancellation_reason'] });
-  }
-  if (receipt.verdict !== 'cancelled' && receipt.cancellation_reason !== null) {
-    ctx.addIssue({ code: 'custom', message: 'only cancelled may carry a cancellation reason', path: ['cancellation_reason'] });
-  }
-});
-export type SendReceipt = z.infer<typeof SendReceiptSchema>;
-
-// Admission refusal (fail-loud; nothing admitted to the queue).
-export const SendRefusalSchema = z.object({
-  ok: z.literal(false),
-  refused: z.literal(true),
-  reason: SendRefusalReasonSchema,
-  target: z.string(),
-});
-export type SendRefusal = z.infer<typeof SendRefusalSchema>;
 
 // ── Close operation (rung 3) — the generic "close this instance" system ──────
 // Executes the terminal-retirement chain for a bound estate seat: reg.retired +
@@ -691,3 +591,48 @@ export const CommCallbackSchema = z.object({ target: CommTargetSchema, content: 
 export type CommCallback = z.infer<typeof CommCallbackSchema>;
 export const CommWaitResponseSchema = z.object({ ask_id: z.string(), complete: z.boolean(), callbacks: z.array(CommCallbackSchema), outstanding: z.array(CommTargetSchema) });
 export type CommWaitResponse = z.infer<typeof CommWaitResponseSchema>;
+
+// Plan mode is a semantic deliberate action, not a generic text/key send.
+// Callers name a logical identity and intent; txd resolves the bound engine and
+// owns the harness-specific input and read-back evidence below the tmux membrane.
+export const MODE_TRANSITION_INTENTS = ['enter_plan', 'toggle_plan'] as const;
+export type ModeTransitionIntent = (typeof MODE_TRANSITION_INTENTS)[number];
+export const ModeTransitionIntentSchema = z.enum(MODE_TRANSITION_INTENTS);
+
+export const MODE_TRANSITION_TRIGGERS = ['operator', 'preplan', 'context_cycle'] as const;
+export type ModeTransitionTrigger = (typeof MODE_TRANSITION_TRIGGERS)[number];
+export const ModeTransitionTriggerSchema = z.enum(MODE_TRANSITION_TRIGGERS);
+
+export const AGENT_MODE_STATES = ['work', 'plan', 'unknown'] as const;
+export type AgentModeState = (typeof AGENT_MODE_STATES)[number];
+export const AgentModeStateSchema = z.enum(AGENT_MODE_STATES);
+
+export const MODE_TRANSITION_MECHANISMS = ['none', 'slash_command', 'mode_cycle'] as const;
+export type ModeTransitionMechanism = (typeof MODE_TRANSITION_MECHANISMS)[number];
+export const ModeTransitionMechanismSchema = z.enum(MODE_TRANSITION_MECHANISMS);
+
+export const ModeTransitionRequestSchema = z.strictObject({
+  schema_version: z.number().int(),
+  target: z.string().min(1),
+  intent: ModeTransitionIntentSchema,
+  trigger: ModeTransitionTriggerSchema,
+});
+export type ModeTransitionRequest = z.infer<typeof ModeTransitionRequestSchema>;
+
+export const ModeTransitionResponseSchema = z.object({
+  ok: z.boolean(),
+  target: z.string(),
+  seat_id: z.string(),
+  instance_id: z.string(),
+  engine: z.enum(['claude', 'codex']),
+  intent: ModeTransitionIntentSchema,
+  trigger: ModeTransitionTriggerSchema,
+  before: AgentModeStateSchema,
+  after: AgentModeStateSchema,
+  changed: z.boolean(),
+  verified: z.boolean(),
+  mechanism: ModeTransitionMechanismSchema,
+  event_ids: z.array(z.number().int()),
+  reason: z.string().nullable(),
+});
+export type ModeTransitionResponse = z.infer<typeof ModeTransitionResponseSchema>;

@@ -8,9 +8,9 @@ import {
   EventTypeSchema,
   HealthSchema,
   MAX_COMM_MESSAGE_BYTES,
+  ModeTransitionRequestSchema,
   REG_EVENT_NAMES,
   SCHEMA_VERSION,
-  SendReceiptSchema,
   TmuxLifecycleEventRequestSchema,
   eventDomain,
 } from "../src/txd.ts";
@@ -18,16 +18,19 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 8 (v8 = physically attested persona tint)", () => {
-    expect(SCHEMA_VERSION).toBe(8);
+  test("schema_version pins at 9 (v9 = typed plan-mode transitions)", () => {
+    expect(SCHEMA_VERSION).toBe(9);
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(38);
+    expect(EVENT_TYPES).toHaveLength(36);
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
+    expect(EVENT_TYPES).toContain('act.mode_transition_requested');
+    expect(EVENT_TYPES).toContain('act.mode_transition_attested');
+    expect(EVENT_TYPES).toContain('act.mode_transition_failed');
     expect(REG_EVENT_NAMES).toHaveLength(18);
-    expect(ACT_EVENT_NAMES).toHaveLength(11);
+    expect(ACT_EVENT_NAMES).toHaveLength(9);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
       'scoped_reset_refused', 'scoped_reset_requested', 'scoped_reset_completed', 'scoped_reset_failed',
@@ -43,6 +46,38 @@ describe("txd lifecycle vocabulary", () => {
     expect(() => EventTypeSchema.parse("reg.invented_event")).toThrow();
   });
 
+  test("mode transition input is semantic and logical, never raw tmux input", () => {
+    expect(ModeTransitionRequestSchema.parse({
+      schema_version: 9,
+      target: "council:custodes",
+      intent: "enter_plan",
+      trigger: "preplan",
+    })).toEqual({
+      schema_version: 9,
+      target: "council:custodes",
+      intent: "enter_plan",
+      trigger: "preplan",
+    });
+    expect(() => ModeTransitionRequestSchema.parse({
+      schema_version: 9,
+      target: "council:custodes",
+      intent: "send_keys",
+      trigger: "operator",
+    })).toThrow();
+    for (const raw of [
+      { pane_id: "%13" },
+      { keys: ["BTab"] },
+    ]) {
+      expect(() => ModeTransitionRequestSchema.parse({
+        schema_version: 9,
+        target: "council:custodes",
+        intent: "enter_plan",
+        trigger: "preplan",
+        ...raw,
+      })).toThrow();
+    }
+  });
+
   test("event input holds dumb facts only — the 6 pre-store columns", () => {
     const parsed = EventInputSchema.parse({
       entity_type: "seat",
@@ -56,42 +91,17 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test('tmux lifecycle ingress accepts only typed pane events with canonical page input', () => {
-    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 8, event: 'pane-exited', page: 'palace' })).toEqual({
-      schema_version: 8, event: 'pane-exited', page: 'palace',
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 9, event: 'pane-exited', page: 'palace' })).toEqual({
+      schema_version: 9, event: 'pane-exited', page: 'palace',
     });
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 8, event: 'pane-vanished', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 9, event: 'pane-vanished', page: 'palace' })).toThrow();
   });
 
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
-    const base = { schema_version: 8, source_instance_id: "source", target: "target", ask: false, reply: false };
+    const base = { schema_version: 9, source_instance_id: "source", target: "target", ask: false, reply: false };
     expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
     expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
-  });
-
-  test("partial_delivered must carry non-null byte evidence (refine enforced)", () => {
-    const base = {
-      verdict: "partial_delivered",
-      resolution: { target: "somnium:NE", seat_id: "somnium:NE", bound_seq: 0 },
-      gate_reason: null,
-      cancellation_reason: null,
-      activity_window_ms: null,
-      send_seq: 1,
-    };
-    expect(() => SendReceiptSchema.parse({ ...base, bytes_delivered: null })).toThrow();
-    expect(SendReceiptSchema.parse({ ...base, bytes_delivered: 3 }).bytes_delivered).toBe(3);
-  });
-
-  test("cancelled receipts carry an explicit typed cause", () => {
-    expect(SendReceiptSchema.parse({
-      verdict: "cancelled",
-      resolution: { target: "somnium:NE", seat_id: "somnium:NE", bound_seq: 42 },
-      gate_reason: null,
-      cancellation_reason: "binding_changed",
-      activity_window_ms: null,
-      bytes_delivered: 0,
-      send_seq: 9,
-    }).verdict).toBe("cancelled");
   });
 
   test("health names the service txd — nothing k12-named survives of the daemon", () => {

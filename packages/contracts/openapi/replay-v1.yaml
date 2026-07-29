@@ -91,25 +91,6 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "422": { $ref: "#/components/responses/Invalid" }
-  /ingress/github:
-    post:
-      operationId: ingestGithubWebhook
-      parameters:
-        - { name: x-github-delivery, in: header, required: true, schema: { $ref: "#/components/schemas/LowercaseUuid" } }
-        - { name: x-github-event, in: header, required: true, schema: { $ref: "#/components/schemas/GithubEventName" } }
-        - { name: x-hub-signature-256, in: header, required: true, schema: { type: string, pattern: "^sha256=[0-9a-f]{64}$" } }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { type: object }
-      responses:
-        "200": { $ref: "#/components/responses/WebhookResult" }
-        "202": { $ref: "#/components/responses/WebhookResult" }
-        "401":
-          description: Signature refused before publication
-        "409": { $ref: "#/components/responses/Conflict" }
-        "422": { $ref: "#/components/responses/Invalid" }
 components:
   parameters:
     ReplayId:
@@ -201,8 +182,6 @@ components:
           anyOf:
             - { type: "null" }
             - { $ref: "#/components/schemas/LowercaseUuid" }
-    GithubEventName:
-      enum: [pull_request, pull_request_review, pull_request_review_comment, issue_comment, check_suite, check_run, status, push, create, delete]
     EventResult:
       type: object
       required: [ok, created, event]
@@ -210,25 +189,12 @@ components:
         ok: { const: true }
         created: { type: boolean }
         event: { $ref: "#/components/schemas/ReplayEventRecord" }
-    WebhookResult:
-      type: object
-      required: [ok, created, replay_id, event_id]
-      properties:
-        ok: { const: true }
-        created: { type: boolean }
-        replay_id: { $ref: "#/components/schemas/LowercaseUuid" }
-        event_id: { $ref: "#/components/schemas/LowercaseUuid" }
   responses:
     EventResult:
       description: Idempotent append result
       content:
         application/json:
           schema: { $ref: "#/components/schemas/EventResult" }
-    WebhookResult:
-      description: Deduplicated signed delivery
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/WebhookResult" }
     Conflict: { description: Immutable identity conflict }
     Invalid: { description: Strict contract validation failed }
     NotFound: { description: Replay does not exist }

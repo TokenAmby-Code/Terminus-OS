@@ -10,6 +10,10 @@
 //   postgresql.service, so a path unit consumes the peer-socket appearance
 //   event. No poll loop or magic startup timeout is permitted.
 // - Loopback bind: busd sits behind the edge proxy; it must never bind wide.
+// - Readiness: Type=notify makes the daemon's own listen edge complete the
+//   start job. Callers of `systemctl restart busd.service` depend on that
+//   return meaning "listening" — Token-Fleet's apply-busd leg pins this line
+//   because the legs standing after it stopped re-deriving the fact themselves.
 
 import { describe, expect, test } from 'bun:test';
 
@@ -30,17 +34,21 @@ describe('systemd/busd.service pins', () => {
     pin('ExecStart=%h/.bun/bin/bun src/daemon.ts');
   });
 
+  test('readiness is the daemon-signalled listen edge, not fork', () => {
+    // Exactly one Type= — systemd takes the last assignment, so a second line
+    // would silently decide readiness. Pinning the whole set keeps the unit's
+    // answer to "when is busd started?" a single unambiguous line.
+    expect(lines.filter((line) => line.startsWith('Type='))).toEqual(['Type=notify']);
+    // The daemon signals from its own process; no helper fork may vouch for it.
+    pin('NotifyAccess=main');
+  });
+
   test('loopback-only behind the edge proxy', () => {
     pin('Environment=BUSD_BIND=127.0.0.1');
   });
 
   test('loads machine-owned durable subscriptions', () => {
     pin('Environment=BUSD_CONFIG=%h/.config/token-fleet/busd.json');
-  });
-
-  test('loads the signed GitHub ingress secret from systemd encrypted credentials', () => {
-    pin('Environment=BUSD_GITHUB_WEBHOOK_SECRET_FILE=%d/busd.github-webhook');
-    pin('LoadCredentialEncrypted=busd.github-webhook:%E/credstore.encrypted/busd.github-webhook');
   });
 
   test('contains no PostgreSQL polling or magic startup timeout', () => {
