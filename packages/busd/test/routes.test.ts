@@ -18,14 +18,13 @@ test('the route table includes replay authority, health, generic ingress, and pi
   expect(labels).toContain('GET /ctl/health');
   expect(labels).toContain('POST /ctl/reconcile');
   expect(labels).toContain('POST /ingress/events');
-  expect(labels).toContain('POST /ingress/github');
   expect(labels).toContain('GET /v1/replays');
   expect(labels).toContain('GET /v1/events');
   expect(labels).toContain('POST /v1/replays/admit');
   expect(labels).toContain('GET /v1/replays/:replay_id');
   expect(labels).toContain('POST /v1/replays/:replay_id/events');
   for (const hook of HOOK_TYPES) expect(labels).toContain(`POST /ingress/hooks/${hook}`);
-  expect(labels).toHaveLength(9 + HOOK_TYPES.length);
+  expect(labels).toHaveLength(8 + HOOK_TYPES.length);
 });
 
 test('ALL 30 hook doors consume and journal — the 410 tail does not exist on the bus', async () => {

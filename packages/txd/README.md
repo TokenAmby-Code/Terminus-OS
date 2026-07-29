@@ -56,6 +56,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/estate/rotate`    | Explicit estate, border-total page, or pane reset |
 | POST   | `/ctl/clipboard/push`   | Read the transient `tx-clipboard` buffer for an explicit client-side push |
 | POST   | `/ctl/clipboard/pull`   | Load UTF-8 into the transient, non-executing `tx-clipboard` buffer |
+| POST   | `/ctl/clipboard/selection` | Commit bounded UTF-8 through txd to `tx-clipboard` and one validated attached client |
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` event ingress; reconstructs a damaged canonical page |
 | POST   | `/ingress/static-launch`| Private wrapper attestation for a pending static launch |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |

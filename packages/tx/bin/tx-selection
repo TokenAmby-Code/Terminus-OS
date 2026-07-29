@@ -1,0 +1,4 @@
+#!/usr/bin/env bun
+import { runSelectionCommit } from '../src/selection.ts';
+
+process.exitCode = await runSelectionCommit(process.argv.slice(2));

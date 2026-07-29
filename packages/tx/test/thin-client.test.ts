@@ -6,11 +6,12 @@ test('tx is an endpoint client and has no truth-owning dependency', async () => 
     Bun.file(new URL('../src/commands.ts', import.meta.url)).text(),
     Bun.file(new URL('../src/client.ts', import.meta.url)).text(),
     Bun.file(new URL('../src/cli.ts', import.meta.url)).text(),
+    Bun.file(new URL('../src/selection.ts', import.meta.url)).text(),
   ]).then((parts) => parts.join('\n'));
 
   for (const forbidden of [
     'EventStore', 'PostgresEventStore', 'MemoryEventStore', 'buildProjections',
-    'TmuxControlPlane', 'RealTmux', 'FakeTmux', 'sendToSeat',
+    'TmuxControlPlane', 'RealTmux', 'FakeTmux', 'sendToSeat', "Bun.spawn(['tmux'",
   ]) expect(source).not.toContain(forbidden);
   expect(source).not.toMatch(/from ['"]\.\.\/\.\.\/txd\//);
 });

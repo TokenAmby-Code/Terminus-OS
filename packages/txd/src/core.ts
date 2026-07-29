@@ -12,6 +12,7 @@ import {
   type CloseResponse,
   type ClipboardPullRequest,
   type ClipboardPushRequest,
+  type ClipboardSelectionRequest,
   type CommAccepted,
   type CommCallback,
   type CommHook,
@@ -340,6 +341,14 @@ export class Daemon {
         bytes: bytes.byteLength,
         content_base64: Buffer.from(bytes).toString('base64'),
       };
+    });
+  }
+
+  async clipboardSelection(req: ClipboardSelectionRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number }> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const bytes = await this.tmux.commitClipboardSelection(req.content, req.client_tty);
+      return { buffer_name: CLIPBOARD_BUFFER_NAME, bytes };
     });
   }
 
@@ -1257,6 +1266,29 @@ export class Daemon {
           );
         }
       }
+      // Phantom seat: the ledger still projects a pane tmux does not report at
+      // all. `paneBySeat` is only ever removed from by reg.seat_decommissioned —
+      // reg.seat_cleared clears the binding and leaves the pane axis untouched
+      // by design, and reg.process_reaped has no pane effect — so a seat that
+      // was reaped and cleared, or quietly dropped from the estate declaration,
+      // survives in every estate read with nothing behind it. The BOUND half of
+      // this is already bound_pane_dead above (it folds pane === undefined);
+      // the unbound half was iterated by nothing, because this loop reads the
+      // fold and the loop above reads tmux, and a phantom is in neither.
+      //
+      // The fold itself stays a pure replay projection: reconciling it against
+      // observed reality is this pass's job, not buildProjections'.
+      for (const row of proj.activityBoard) {
+        if (row.seat_id === null || row.binding === 'bound') continue;
+        if (observedPane.has(row.seat_id)) continue;
+        await flag(
+          row.seat_id,
+          'pane_absent',
+          'seat_decommissioned',
+          `seat is projected (pane=${row.pane}, unbound) but tmux reports no pane for it — every estate read counts a seat that does not exist`,
+        );
+      }
+
       // Retired instance whose pane is still live (retire-with-live-process).
       for (const row of proj.activityBoard) {
         if (row.seat_id === null) continue; // board row without a seat can't be a seat-liveness contradiction
