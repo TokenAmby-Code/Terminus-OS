@@ -1,63 +1,52 @@
 import { describe, expect, test } from "bun:test";
 import {
-  InstanceRegistrationRow,
-  INSTANCE_STATUSES,
-  ORIGIN_TYPES,
-  RankId,
+  AGENT_SCHEMA_VERSION,
+  AgentSchema,
+  RegistrationPreparedSchema,
+  WrapperStartHookSchema,
 } from "../src/registration.ts";
 
-// Mirror of the identity/lifecycle core of the `instances` table
-// The contract pins the canonical instance registration row.
-const ROW = {
-  id: "inst-abc",
-  name: "terminus-os-scaffold",
-  engine: "claude",
-  working_dir: "/Users/tokenclaw/worktrees/Terminus-OS/main",
-  device_id: "k12-personal",
-  origin_type: "dispatch",
-  commander_type: "persona",
-  commander_id: "council:custodes",
-  status: "working",
-  created_at: "2026-07-16 21:00:00",
-  last_activity: "2026-07-16 21:05:00",
-  stopped_at: null,
-  archived_at: null,
-  persona_id: "council:custodes",
-  rank: "astartes",
-  session_doc_id: 42,
-  continuity_binding_source: null,
-  wrapper_launch_id: "wl-001",
-  automated: false,
-  notification_mode: "verbose",
-  interaction_mode: "text",
-  is_subagent: false,
-  hook_driven: false,
-  stop_allowed: true,
-} as const;
+const AGENT_ID = "2ea2d049-0106-4957-8649-31f93bdc8c9a";
+const BIRTH_GENERATION = "1cc2112c-9c38-45a1-839f-831c33a1096a";
+const DIGEST = "a".repeat(64);
 
-describe("instance registration row (foundation)", () => {
-  test("a representative registration row parses", () => {
-    const row = InstanceRegistrationRow.parse(ROW);
-    expect(row.id).toBe("inst-abc");
-    expect(row.wrapper_launch_id).toBe("wl-001");
+describe("registrationd Agent contract mirror", () => {
+  test("parses the complete authoritative snapshot", () => {
+    const agent = AgentSchema.parse({
+      schema_version: AGENT_SCHEMA_VERSION,
+      agent_id: AGENT_ID,
+      birth_generation: BIRTH_GENERATION,
+      registered_at: "2026-07-29T12:00:00.000Z",
+      engine: "codex",
+      launch: { argv: [], requested_cwd: "/work", engine_binary: "/bin/codex" },
+      placement: {
+        pane_id: "palace:worker-1",
+        pane_generation: 4,
+        machine: "k12-personal",
+        kind: "local",
+        wrapper_pid: 101,
+        engine_pid: 102,
+        cwd: "/work",
+        transport_witnesses: {},
+      },
+      configuration: { generation: "estate-4", digest: DIGEST },
+      persona: null,
+      resources: [],
+    });
+    expect(agent.agent_id).toBe(AGENT_ID);
   });
 
-  test("enums are enforced faithfully to the DB CHECK constraints", () => {
-    expect(ORIGIN_TYPES).toContain("perpetual");
-    expect(INSTANCE_STATUSES).toContain("victorious");
-    expect(() => InstanceRegistrationRow.parse({ ...ROW, origin_type: "telepathy" })).toThrow();
-    expect(() => InstanceRegistrationRow.parse({ ...ROW, status: "vibing" })).toThrow();
-  });
-
-  test("rank accepts the fixed ranks OR an aspirant:* label", () => {
-    expect(RankId.parse("primarch")).toBe("primarch");
-    expect(RankId.parse("aspirant:ultramarines")).toBe("aspirant:ultramarines");
-    expect(() => RankId.parse("aspirant")).toThrow();
-    expect(() => RankId.parse("chaplain")).toThrow();
-  });
-
-  test("lifecycle flags are strict booleans (integers and strings rejected)", () => {
-    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: 1 })).toThrow();
-    expect(() => InstanceRegistrationRow.parse({ ...ROW, automated: "true" })).toThrow();
+  test("claims exist only in wrapper evidence, never the final Agent", () => {
+    expect(WrapperStartHookSchema.parse({
+      hook_request_id: AGENT_ID,
+      engine: "claude",
+      cwd: "/work",
+      machine: "k12-personal",
+      wrapper_pid: 101,
+      claimed_pane_id: "palace:worker-1",
+      argv: [],
+      placement_hints: {},
+    }).claimed_pane_id).toBe("palace:worker-1");
+    expect(RegistrationPreparedSchema.safeParse({ claimed_pane_id: "forged" }).success).toBe(false);
   });
 });

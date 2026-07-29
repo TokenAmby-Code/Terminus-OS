@@ -1,155 +1,219 @@
-# Agent birth, persona tint, and lifecycle ownership
+# Agent registration, placement, and lifecycle
 
-Status: ruled for implementation after the static tint trial.
+Status: ruled for implementation. Council rotation is outside this change.
 
-## Persona tint contract
+## Authorities
 
-Visible pane tint has exactly one meaning: txd has a current, physically
-attested persona binding for that pane generation. An untinted pane is unbound
-or its binding failed. Tint is not decoration and has no independent identity
-source.
+`registrationd` is the only logical identity authority. It mints `agent_id`,
+owns the durable birth transaction, assembles the complete instruction and
+persona package, and writes the final agent record.
 
-The binding tuple is indivisible:
+`txd` is the physical tmux authority. It constructs panes, observes process
+ancestry, attests canonical placement and pane generation, applies and reads
+back tint, and maintains the physical routing projection. It never mints an
+agent ID or selects a persona.
 
-`instance + persona + rank + commander + tint + pane generation`
+`lifecycled` (`lcd`, CLI `lc`) correlates registration preparation, current txd
+placement signoff, and literal engine lifecycle hooks. It persists each input
+before acknowledging bus delivery and emits generation-bound readiness,
+stopping, inactivity, and retirement facts. It owns no identity allocation.
 
-One `reg.bound` fact carries the logical tuple. Projections take every field
-from that event generation; they never join current persona, rank, commander,
-or tint from separately updated rows.
+edge-proxy and busd provide content-agnostic hook ingress and immutable event
+delivery. A bus event is always a one-way fact and never a return value.
 
-txd owns the physical projection. It applies the declared tint with tmux's
-pane-local `select-pane -P bg=<color>` mechanism, reads back both
-`window-style` and `window-active-style`, and only then commits `reg.bound`.
-Before styling it records `reg.binding_prepared` with the complete tuple and
-pane generation. `reg.bound` or `reg.binding_aborted` closes that intent; boot
-clears an unclosed preparation only when the same pane generation still exists.
-Failure to apply or read back the exact value is compensated to `default`;
-the instance remains unbound. A failed event append is also compensated
-fail-dark. Clear, retirement, and page reconstruction replace the pane process
-and restore both styles to `default` before the logical binding is cleared.
+## Identity and placement
 
-Reconcile treats a missing, changed, unreadable, or manually applied tint as a
-binding contradiction. Health is false until the contradiction is resolved
-through the same typed lifecycle path as a dead or replaced bound pane.
-`tx health` and `tx estate show` expose expected and observed tint readiness.
-There is no public tint mutation command.
+The sole logical identity is `agent_id`. The sole fleet identity variable in
+an engine environment is `AGENT_ID`. It is an identifier, not a credential.
+Transport authentication and registration truth, not an environment string,
+authorize persona-sensitive operations.
 
-A durable scoped-reset request fences every named seat from launch, static
-acknowledgement, and comm until completion. The request captures each current
-binding's event sequence and pane
-generation; restart recovery may retire only those exact generations and fails
-loud if newer binding truth appears.
+`PANE_ID` is placement context. txd installs the canonical seat label in each
+pane's process environment with tmux's per-pane `-e PANE_ID=<seat>` option.
+Every creation path does this: the initial session, new windows, split panes,
+page reconstruction, dynamic seats, and perpetual remote launch panes.
+Ordinary respawn preserves the pane environment. A canonical-seat change
+replaces the pane process with the new `PANE_ID`.
 
-The Council trial values are:
+The wrapper reports `claimed_pane_id`, wrapper PID, engine choice, cwd, and
+machine in `hook.wrapper_start`. txd walks the wrapper PID's ancestry to a live
+tmux pane and reads txd's pane option and generation. The final agent package
+contains only the attested `pane_id`; claims and witnesses remain transaction
+evidence. A wrapper outside a managed pane is refused before engine spawn.
 
-| Persona | Seat | Tint |
-|---|---|---|
-| Custodes | `council:custodes` | `#302800` |
-| Fabricator-General | `council:fabricator-general` | `#300808` |
+Engine session or conversation IDs are transcript metadata. Wrapper and
+engine PIDs are physical witnesses. A `hook_request_id` is an ephemeral
+one-request callback capability. None is an agent or lifecycle namespace.
 
-Pax and Orchestrator stay untinted while unbound. Worker birth later supplies
-its tint through the same binding declaration; txd gains no worker-specific
-color map or persona branch.
+## Agent contract
 
-Static wrapper acknowledgement also carries the wrapper-resolved raw engine
-executable. txd verifies its exact `/proc/<pid>/exe`, process name, parent PID,
-seat, and authenticated launch generation; a name-compatible rogue child is
-not an engine attestation.
+registrationd owns the strict Zod contract. Unknown fields are refused. The
+final immutable registration snapshot contains:
 
-## Birth authority ruling
+- schema version, `agent_id`, birth generation, and terminal registration time;
+- engine and normalized launch metadata;
+- attested pane ID, pane generation, machine, placement kind, wrapper PID,
+  engine PID, cwd, and transport witnesses;
+- the configuration generation and digest used by both registrationd and txd;
+- optional persona, rank, commander, tint, workspace, continuity references,
+  and the instruction-package digest and sources;
+- generation-bound resource receipts created for dispatched births.
 
-Adopt **`registrationd` + `rg`**.
+Persona, rank, commander, tint, instruction sources, workspace, and continuity
+references are one configuration-generation package. The claimed pane may
+start provisional file reads, but txd's attested pane selects the complete
+package. A digest mismatch between registrationd's allocation view and txd's
+physical view refuses birth. Tint and pane options never confer persona
+authority.
 
-`registrationd` is the durable, event-sourced owner of the agent-birth
-transaction. It admits a dispatch request, allocates the instance ID, records
-the complete persona/rank/commander/tint declaration, coordinates initial
-worktree and session-document creation, reserves and attests the txd seat, and
-records birth completion. `rg` is a thin endpoint client. Deleting or
-restarting `rg` loses no truth.
+The contract is published from registrationd into Token-Fleet. Terminus-OS
+keeps a strict semantic mirror for txd, lifecycled integration, and `tx`; both
+repositories run a drift checker in coordinated CI. Deployed repositories do
+not import each other's runtime code.
 
-This is not a forwarding daemon. Its durable value is the birth state machine,
-idempotency, replay, and compensation ledger. A restart resumes the same birth
-generation from authoritative events.
+## Generic hook reply
 
-The options are ruled as follows:
+The generic reply mechanism is proxy-held HTTP with a private control reply:
 
-| Option | Ruling | Reason |
-|---|---|---|
-| `registrationd` + `rg` | selected | Birth has a distinct durable transaction, idempotency, and compensation boundary. |
-| Transaction-only `rg` | rejected | Crash recovery would require the CLI to own a hidden database/replay engine or leave a half-born identity across services. |
-| `lifedeathd` (`ldd`/`ld`) | rejected | Birth admission/resource creation and post-birth retirement/teardown do not share one invariant or recovery state machine; naming symmetry is not ownership. |
-| Registration inside lcd | rejected | Birth coordination would dominate lcd and blur its post-birth health and lifecycle responsibility. |
+1. A hook caller that requires a reply marks the request with the generic
+   one-shot reply mode and a configured deadline class. It does not mint the
+   callback ID.
+2. edge-proxy mints a collision-resistant `hook_request_id`, adds it as hook
+   ingress metadata, forwards the hook to busd, and holds the original HTTP
+   response.
+3. Exactly one authorized service posts a strict reply envelope to the
+   proxy-owned `/hooks/reply` control surface. The envelope carries the
+   request ID, HTTP status, content type, and response body.
+4. edge-proxy atomically consumes the pending entry and completes the exact
+   waiting request. A second, late, unknown, malformed, or conflicting reply
+   is refused.
 
-## Ownership table
+The reply surface is available only on a private Unix control socket and also
+requires a service credential delivered through machine configuration.
+Ingress callers never receive that credential. The callback ID is random,
+one-use, absent from logs except as a redacted correlation suffix, and never
+persisted as identity or exposed as an addressing target.
 
-“Transaction owner” means the sole writer of the authoritative transition.
-Resource authorities remain the only services permitted to mutate their own
-physical resources.
+Pending proxy requests are deliberately memory-only. A proxy stop closes every
+waiting request with a transport failure; pending replies do not survive
+restart. registrationd's birth stream remains durable and compensates or
+resumes the incomplete generation, while the wrapper exits without spawning
+an engine. A late reply after restart is refused as unknown.
 
-| Fact or resource | Sole truth/transaction owner | Physical/resource authority |
-|---|---|---|
-| Instance identity and birth generation | registrationd | registrationd |
-| Dispatch request and admission | registrationd | dispatcher submits; registrationd records/adjudicates |
-| Persona, rank, and commander binding | registrationd after the trial cutover | txd attests the pane projection |
-| Tint value | registrationd binding declaration | txd applies, clears, and verifies tmux style |
-| Initial worktree reference and birth step | registrationd | githubd creates/cleans the worktree |
-| Initial session-document reference and birth step | registrationd | session-document authority creates/abandons the document |
-| Tmux seat, geometry, process construction, transport | txd | txd |
-| Post-birth health/readiness policy | lcd | lcd consumes registrationd and txd attestations |
-| Routing readiness, activation, and closure | lcd | delivery resolves only through lcd's current projection |
-| Retirement | lcd | registrationd identity becomes terminal from lcd's typed transition |
-| Teardown transaction | lcd | txd reaps/reconstructs the physical pane |
+Deadline classes are generated from the owning service's declared maximum
+transaction ceiling plus the proxy transport margin. Callers select a named
+class, never a numeric timeout. A missing reply ends the invocation with a
+typed timeout response and causes the waiting wrapper or vendor hook to follow
+its declared denial policy. There is no callback poll, database poll, sleep
+loop, or secondary timeout.
 
-No other service writes a mirror of these facts. In particular, txd's current
-Door-1 `reg.bound` stream is the static-trial authority only. The registrationd
-cutover must move binding truth in one release; it must not add a dual write or
-background synchronizer.
+Wrapper birth requires a successful JSON reply with `agent_id` and the
+generation-bound launch package. Any non-2xx, malformed body, timeout,
+disconnect, or denial exits before the engine process exists. Vendor adapters
+translate the generic HTTP result into each engine's documented stdout, JSON,
+and exit-status contract. Pre-tool denial is an ordinary typed hook reply; the
+bus remains one-way.
 
-## Birth transaction and compensation
+## Birth transaction
 
-The registrationd birth stream records each intent before invoking a resource
-authority and records the returned typed receipt before moving to the next
-step. Replaying a duplicate request returns the established generation or
-continues its incomplete transaction.
+The wrapper is the sole caller of raw Claude and Codex binaries:
 
-1. Admit dispatch and reserve one instance ID and complete binding declaration.
-2. Ask githubd for the initial branch-bound worktree; record its receipt.
-3. Ask the session-document authority for the initial document; record its receipt.
-4. Ask txd to construct/reserve the seat and start the sanctioned wrapper.
-5. Receive wrapper/engine, placement, pane-generation, and tint attestations.
-6. Commit birth and hand the attested generation to lcd.
-7. lcd records routing activation and thereafter owns routing closure with the
-   same post-birth lifecycle generation.
+1. It posts `hook.wrapper_start` through edge-proxy and waits for the generic
+   reply.
+2. busd journals the immutable hook. registrationd and txd consume it
+   independently.
+3. registrationd admits an idempotent durable birth stream and mints
+   `agent_id`.
+4. txd emits `agent.pane_attested` with observed pane, generation, placement,
+   process ancestry, and configuration digest, or `agent.pane_refused`.
+5. registrationd recomputes the full package from the attested pane, renders
+   instruction resources, records `agent.registration_prepared`, and replies
+   through the proxy control surface.
+6. The wrapper exports `AGENT_ID`, removes all registration-only inputs, and
+   starts the raw engine.
+7. registrationd emits `agent.placement_declared`. txd verifies the current
+   generation, applies and reads back tint, updates physical occupancy, and
+   emits `agent.placement_attested` or `agent.placement_refused`.
+8. The engine's literal `hook.session_start` carries `AGENT_ID`.
+9. lifecycled durably joins registration preparation, txd placement, and
+   SessionStart, then emits `agent.lifecycle_ready`.
+10. registrationd verifies the same generation, commits the final row, and
+    emits the sole authoritative `agent.registered` snapshot.
 
-If worktree creation fails, no document or instance is activated. If document
-creation fails after worktree creation, registrationd asks githubd to clean
-the exact uncommitted worktree receipt and records the compensation. If txd
-construction, wrapper start, or attestation fails, registrationd asks txd to
-reap/reset the reserved generation, asks the document authority to abandon the
-unactivated document, cleans the exact worktree receipt, and records terminal
-birth failure. Compensation is idempotent and receipt-addressed. It never
-guesses paths, deletes a shared document, or manufactures a binding.
+Prepared registration, a pane claim, a tint, physical signoff, or SessionStart
+alone never makes an agent routable. Consumers activate only from
+`agent.registered`.
 
-There is no cross-service database transaction. The registrationd event stream
-is the durable saga authority; resource services remain single writers for
-their resources and expose idempotent typed operations. A prepared physical
-tint is never routing authority. On restart, registrationd either completes
-the matching binding generation or asks txd to clear it.
+`hook.wrapper_stop`, literal engine stop hooks, pane death, transport loss,
+replacement generations, and retirement use the same event discipline.
+registrationd emits `agent.registration_compensated` or
+`agent.registration_failed` for terminal birth failures. txd emits factual
+placement contradictions. lifecycled emits generation-bound lifecycle stop
+and retirement facts.
 
-Registrationd never writes routing state. Before birth completion there is no
-route to compensate; after handoff, lcd is its sole writer. Delivery clients
-consume lcd's projection and cannot infer activation from a prepared tint,
-txd seat, or registrationd birth step.
+## Persistence
 
-## Delivery sequence
+registrationd owns one PostgreSQL schema containing the birth event stream,
+idempotency keys, pending hook correlations, agent rows, resource receipts,
+compensation progress, and terminal outcomes. It records intent before every
+resource effect and records the typed receipt afterward. Startup reconciliation
+resumes unfinished generations from this stream.
 
-Fleet wrappers, persona workspaces, CLI availability, trust configuration, and
-hooks land and converge before a new registrationd/Terminus birth transition
-is activated. Tests use disposable tmux/process fixtures and red-first
-behavioral pins. They never mutate the live estate.
+txd and lifecycled write only their own PostgreSQL schemas and projections.
+They never update registrationd tables. Every bus handler persists enough
+idempotent domain state keyed by event sequence or stable generation before it
+acknowledges delivery.
 
-The registrationd implementation must pin restart during every birth step,
-duplicate replay, stale generation, forged handshake, worktree/document
-compensation, and route closure until all attestations are current. Recovery is
-event-driven. Polling loops, retry-forever behavior, compatibility aliases,
-manual tmux injection, and alternate communication paths are forbidden.
+Dispatched births may add exact githubd worktree and session-document receipts.
+Compensation is receipt-addressed and idempotent. Raw manual births remain the
+minimal path and require no dispatch resources.
+
+## Persona configuration and perpetual panes
+
+Token-Fleet owns one canonical pane allocation source. Generated,
+digest-bearing views provide txd only pane construction and tint projection
+facts, and registrationd the complete optional persona package.
+
+A perpetual persona is an ordinary pane whose configuration automatically
+starts the same wrapper a human invokes. Custodes and Fabricator-General are
+the equivalence proof. Their colors remain `#302800` and `#300808`.
+Restart and reconstruction relaunch the wrapper and create a new generic birth
+generation. txd contains no static-persona launch or identity branch.
+
+For k12-work placement, the canonical pane remains in the k12-personal estate.
+Its configured command opens one persistent SSH connection and starts the
+sanctioned remote wrapper with the local `PANE_ID`. registrationd and txd stay
+authoritative on k12-personal. txd attests the local SSH transport and the
+remote wrapper, engine, cwd, and machine tuple through a placement adapter.
+Tint stays local. SSH loss contradicts and retires only that binding.
+
+Pax and Orchestrator remain unbound until this generic local path and remote
+attestation are deployed and separately accepted. This change does not rotate
+the Council.
+
+## CLI context
+
+Every STC-generated CLI reads `AGENT_ID` into a typed `AgentContext` and adds
+it to service requests when present. `version`, `config:validate`, and health
+remain available without agent context. Agent-only operations call the common
+required-context guard and refuse when `AGENT_ID` is absent. Caller-selected
+`--agent-id` flags do not exist. `tx comm --self` resolves on the server from
+the implicitly supplied caller agent.
+
+## Events
+
+The locked event vocabulary is:
+
+- ingress: `hook.wrapper_start`, `hook.wrapper_stop`, and literal
+  `hook.session_start`, `hook.stop`, and related vendor hooks;
+- registrationd: `agent.registration_prepared`,
+  `agent.placement_declared`, `agent.registration_compensated`,
+  `agent.registration_failed`, and `agent.registered`;
+- txd: `agent.pane_attested`, `agent.pane_refused`,
+  `agent.placement_attested`, `agent.placement_refused`, and
+  `agent.placement_contradicted`;
+- lifecycled: `agent.lifecycle_ready`, `agent.lifecycle_stopped`,
+  `agent.lifecycle_inactive`, and `agent.lifecycle_retired`.
+
+Every event carries an immutable snapshot or generation-bound references
+sufficient to prevent a cross-generation join.
