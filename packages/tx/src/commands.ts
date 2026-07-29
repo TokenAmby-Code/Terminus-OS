@@ -86,6 +86,43 @@ function decodedPush(response: ClipboardPushResponse): string {
 export const COMMANDS: readonly Command[] = [
   { path: ['comm'], summary: 'Send, ask, page, or reply through txd event truth', run: comm },
   {
+    path: ['mode'],
+    summary: 'Enter or toggle plan mode through txd event truth',
+    run: async ({ args, request, write }) => {
+      const action = args[0];
+      let target: string | undefined;
+      let trigger: 'operator' | 'preplan' | 'context_cycle' = 'operator';
+      for (let index = 1; index < args.length; index += 1) {
+        const arg = args[index];
+        if (arg === '--target' && target === undefined) {
+          const value = args[++index];
+          if (!value || value.startsWith('--')) {
+            throw new Error('--target requires a logical identity');
+          }
+          target = value;
+        } else if (arg === '--trigger' && trigger === 'operator') {
+          const value = args[++index];
+          if (value !== 'preplan' && value !== 'context_cycle') {
+            throw new Error('--trigger must be preplan or context_cycle');
+          }
+          trigger = value;
+        } else {
+          throw new Error('usage: tx mode <enter | toggle> --target <identity> [--trigger <preplan | context_cycle>]');
+        }
+      }
+      if ((action !== 'enter' && action !== 'toggle') || !target) {
+        throw new Error('usage: tx mode <enter | toggle> --target <identity> [--trigger <preplan | context_cycle>]');
+      }
+      write(await request('POST', '/agents/mode', {
+        schema_version: SCHEMA_VERSION,
+        target,
+        intent: action === 'enter' ? 'enter_plan' : 'toggle_plan',
+        trigger,
+      }));
+      return 0;
+    },
+  },
+  {
     path: ['clipboard', 'push'],
     summary: 'Set this device clipboard from the K12 tx-clipboard buffer',
     run: async ({ args, request, write, clipboard }) => {

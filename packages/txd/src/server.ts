@@ -44,6 +44,7 @@ import {
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
   LaunchRequestSchema,
+  ModeTransitionRequestSchema,
   StopRequestSchema,
   StaticLaunchHandshakeSchema,
   SubscribeRequestSchema,
@@ -228,6 +229,22 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const parsed = await parseMutation(req, CommWaitRequestSchema, 'invalid_comm_wait_request');
         if (parsed instanceof Response) return parsed;
         return json(await daemon.waitComm(parsed));
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/agents/mode'),
+      label: 'POST /agents/mode',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, ModeTransitionRequestSchema, 'invalid_mode_request');
+        if (parsed instanceof Response) return parsed;
+        try {
+          const result = await daemon.transitionMode(parsed, receipt(req));
+          return json(result, result.ok ? 200 : 409);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return json({ ok: false, error: 'mode_refused', detail }, 422);
+        }
       },
     },
     {

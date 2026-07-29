@@ -38,3 +38,49 @@ test('raw tmux identifiers are rejected before CLI output', async () => {
   expect(h.stdout).toEqual([]);
   expect(h.stderr[0]).toContain('raw tmux identifier');
 });
+
+test('mode enter sends the semantic preplan transition contract', async () => {
+  const h = harness({ schema_version: 9, verified: true });
+  expect(await runCli([
+    'mode', 'enter', '--target', 'council:custodes', '--trigger', 'preplan',
+  ], h.deps)).toBe(0);
+  expect(h.calls).toEqual([{
+    method: 'POST',
+    path: '/agents/mode',
+    body: {
+      schema_version: 9,
+      target: 'council:custodes',
+      intent: 'enter_plan',
+      trigger: 'preplan',
+    },
+  }]);
+});
+
+test('mode toggle defaults to an operator transition', async () => {
+  const h = harness({ schema_version: 9, verified: true });
+  expect(await runCli(['mode', 'toggle', '--target', 'council:custodes'], h.deps)).toBe(0);
+  expect(h.calls[0]).toEqual({
+    method: 'POST',
+    path: '/agents/mode',
+    body: {
+      schema_version: 9,
+      target: 'council:custodes',
+      intent: 'toggle_plan',
+      trigger: 'operator',
+    },
+  });
+});
+
+test('invalid mode arguments never reach txd', async () => {
+  const h = harness();
+  expect(await runCli(['mode', 'enter', '--target', 'council:custodes', '--trigger', 'operator'], h.deps)).toBe(1);
+  expect(h.calls).toEqual([]);
+  expect(h.stderr[0]).toContain('--trigger must be preplan or context_cycle');
+});
+
+test('mode target cannot consume the next option token', async () => {
+  const h = harness();
+  expect(await runCli(['mode', 'enter', '--target', '--trigger', 'preplan'], h.deps)).toBe(1);
+  expect(h.calls).toEqual([]);
+  expect(h.stderr[0]).toContain('--target requires a logical identity');
+});

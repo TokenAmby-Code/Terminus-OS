@@ -31,7 +31,8 @@ import { z } from 'zod';
 // v7: additive — Council topology migration, canonical seat decommissioning,
 // and authenticated static-persona launch facts/readiness.
 // v8: physical persona-tint apply/read-back, fail-dark reset, and readiness.
-export const SCHEMA_VERSION = 8;
+// v9: typed, engine-aware plan-mode transition request/attestation lifecycle.
+export const SCHEMA_VERSION = 9;
 
 export const CLIPBOARD_BUFFER_NAME = 'tx-clipboard';
 export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
@@ -122,6 +123,9 @@ export const ACT_EVENT_NAMES = [
   'comm_bytes_sent',
   'comm_delivery_asserted',
   'comm_callback_asserted',
+  'mode_transition_requested',
+  'mode_transition_attested',
+  'mode_transition_failed',
 ] as const;
 export const ESTATE_EVENT_NAMES = [
   'rotation_refused',
@@ -162,6 +166,9 @@ export const EVENT_TYPES = [
   'act.comm_bytes_sent',
   'act.comm_delivery_asserted',
   'act.comm_callback_asserted',
+  'act.mode_transition_requested',
+  'act.mode_transition_attested',
+  'act.mode_transition_failed',
   'estate.rotation_refused',
   'estate.rotation_requested',
   'estate.rotation_completed',
@@ -584,3 +591,48 @@ export const CommCallbackSchema = z.object({ target: CommTargetSchema, content: 
 export type CommCallback = z.infer<typeof CommCallbackSchema>;
 export const CommWaitResponseSchema = z.object({ ask_id: z.string(), complete: z.boolean(), callbacks: z.array(CommCallbackSchema), outstanding: z.array(CommTargetSchema) });
 export type CommWaitResponse = z.infer<typeof CommWaitResponseSchema>;
+
+// Plan mode is a semantic deliberate action, not a generic text/key send.
+// Callers name a logical identity and intent; txd resolves the bound engine and
+// owns the harness-specific input and read-back evidence below the tmux membrane.
+export const MODE_TRANSITION_INTENTS = ['enter_plan', 'toggle_plan'] as const;
+export type ModeTransitionIntent = (typeof MODE_TRANSITION_INTENTS)[number];
+export const ModeTransitionIntentSchema = z.enum(MODE_TRANSITION_INTENTS);
+
+export const MODE_TRANSITION_TRIGGERS = ['operator', 'preplan', 'context_cycle'] as const;
+export type ModeTransitionTrigger = (typeof MODE_TRANSITION_TRIGGERS)[number];
+export const ModeTransitionTriggerSchema = z.enum(MODE_TRANSITION_TRIGGERS);
+
+export const AGENT_MODE_STATES = ['work', 'plan', 'unknown'] as const;
+export type AgentModeState = (typeof AGENT_MODE_STATES)[number];
+export const AgentModeStateSchema = z.enum(AGENT_MODE_STATES);
+
+export const MODE_TRANSITION_MECHANISMS = ['none', 'slash_command', 'mode_cycle'] as const;
+export type ModeTransitionMechanism = (typeof MODE_TRANSITION_MECHANISMS)[number];
+export const ModeTransitionMechanismSchema = z.enum(MODE_TRANSITION_MECHANISMS);
+
+export const ModeTransitionRequestSchema = z.strictObject({
+  schema_version: z.number().int(),
+  target: z.string().min(1),
+  intent: ModeTransitionIntentSchema,
+  trigger: ModeTransitionTriggerSchema,
+});
+export type ModeTransitionRequest = z.infer<typeof ModeTransitionRequestSchema>;
+
+export const ModeTransitionResponseSchema = z.object({
+  ok: z.boolean(),
+  target: z.string(),
+  seat_id: z.string(),
+  instance_id: z.string(),
+  engine: z.enum(['claude', 'codex']),
+  intent: ModeTransitionIntentSchema,
+  trigger: ModeTransitionTriggerSchema,
+  before: AgentModeStateSchema,
+  after: AgentModeStateSchema,
+  changed: z.boolean(),
+  verified: z.boolean(),
+  mechanism: ModeTransitionMechanismSchema,
+  event_ids: z.array(z.number().int()),
+  reason: z.string().nullable(),
+});
+export type ModeTransitionResponse = z.infer<typeof ModeTransitionResponseSchema>;

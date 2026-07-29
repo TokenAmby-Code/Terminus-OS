@@ -12,7 +12,13 @@
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
 import { open, readFile, readlink } from 'node:fs/promises';
-import { CLIPBOARD_BUFFER_NAME, MAX_CLIPBOARD_BYTES } from '@terminus-os/contracts';
+import {
+  CLIPBOARD_BUFFER_NAME,
+  MAX_CLIPBOARD_BYTES,
+  type AgentModeState,
+  type ModeTransitionIntent,
+  type ModeTransitionMechanism,
+} from '@terminus-os/contracts';
 import { osc52Sequence, validateAttachedClientTty, validateClipboardBytes } from './osc52.ts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
@@ -37,6 +43,14 @@ export type SendOutcome =
   | { verdict: 'delivered'; bytes: number }
   | { verdict: 'partial_delivered'; bytes: number }
   | { verdict: 'failed_none_delivered'; bytes: 0 };
+
+export type AgentModeTransitionOutcome = {
+  before: AgentModeState;
+  after: AgentModeState;
+  changed: boolean;
+  verified: boolean;
+  mechanism: ModeTransitionMechanism;
+};
 
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
@@ -87,6 +101,12 @@ export interface TmuxControlPlane {
   seatGeneration(seatId: string): Promise<string | undefined>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
+  /** Apply one semantic plan-mode intent with engine-specific input and screen read-back. */
+  transitionAgentMode(
+    seatId: string,
+    engine: 'claude' | 'codex',
+    intent: ModeTransitionIntent,
+  ): Promise<AgentModeTransitionOutcome>;
   /** Replace the one transient, non-executing clipboard buffer. */
   loadClipboard(text: string): Promise<number>;
   /** Read the one transient clipboard buffer as raw bytes. */
@@ -1044,6 +1064,102 @@ export class RealTmux implements TmuxControlPlane {
     }
     return { bytes, verdict: 'partial_delivered' };
   }
+
+  static detectAgentMode(capture: string, engine: 'claude' | 'codex'): AgentModeState {
+    if (engine === 'claude') {
+      if (/(?:^|\s)plan mode on(?:\s|·|$)/.test(capture)) return 'plan';
+      if (/(?:accept edits|bypass permissions) on(?:\s|·|$)/.test(capture)) return 'work';
+      return 'unknown';
+    }
+    if (/(?:^|\s)Plan mode(?:\s|\(|·|$)/.test(capture)) return 'plan';
+    if (/(?:^|\s)Main \[default\](?:\s|$)/.test(capture)) return 'work';
+    return 'unknown';
+  }
+
+  private async captureAgentMode(
+    seatId: string,
+    paneId: string,
+    engine: 'claude' | 'codex',
+  ): Promise<AgentModeState> {
+    const captured = await this.command('observe_agent_mode', seatId, [
+      'capture-pane', '-p', '-J', '-t', paneId, '-S', '-12',
+    ]);
+    if (captured.code !== 0) return 'unknown';
+    return RealTmux.detectAgentMode(captured.stdout, engine);
+  }
+
+  async transitionAgentMode(
+    seatId: string,
+    engine: 'claude' | 'codex',
+    intent: ModeTransitionIntent,
+  ): Promise<AgentModeTransitionOutcome> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) {
+      return {
+        before: 'unknown',
+        after: 'unknown',
+        changed: false,
+        verified: false,
+        mechanism: 'none',
+      };
+    }
+    const before = await this.captureAgentMode(seatId, paneId, engine);
+    if (intent === 'enter_plan' && before === 'plan') {
+      return { before, after: before, changed: false, verified: true, mechanism: 'none' };
+    }
+
+    if (intent === 'toggle_plan' && before === 'plan') {
+      const input = await this.command('toggle_agent_mode', seatId, ['send-keys', '-t', paneId, 'BTab']);
+      const after = input.code === 0 ? await this.captureAgentMode(seatId, paneId, engine) : 'unknown';
+      return {
+        before,
+        after,
+        changed: after === 'work',
+        verified: after === 'work',
+        mechanism: 'mode_cycle',
+      };
+    }
+
+    if (engine === 'codex') {
+      const typed = await this.command('enter_plan_mode', seatId, ['send-keys', '-t', paneId, '-l', '/plan']);
+      const submitted = typed.code === 0
+        ? await this.command('enter_plan_mode', seatId, ['send-keys', '-t', paneId, 'Enter'])
+        : typed;
+      const after = submitted.code === 0 ? await this.captureAgentMode(seatId, paneId, engine) : 'unknown';
+      return {
+        before,
+        after,
+        changed: after === 'plan',
+        verified: after === 'plan',
+        mechanism: 'slash_command',
+      };
+    }
+
+    // Claude exposes plan as one member of its finite permission-mode cycle.
+    // Three inputs cover that closed cycle; each read-back is positive evidence
+    // and the loop terminates on the first attested plan footer.
+    for (let step = 0; step < 3; step += 1) {
+      const input = await this.command('enter_plan_mode', seatId, ['send-keys', '-t', paneId, 'BTab']);
+      if (input.code !== 0) break;
+      const after = await this.captureAgentMode(seatId, paneId, engine);
+      if (after === 'plan') {
+        return {
+          before,
+          after,
+          changed: true,
+          verified: true,
+          mechanism: 'mode_cycle',
+        };
+      }
+    }
+    return {
+      before,
+      after: await this.captureAgentMode(seatId, paneId, engine),
+      changed: false,
+      verified: false,
+      mechanism: 'mode_cycle',
+    };
+  }
 }
 
 // In-memory fake for tests — same membrane contract, no tmux dependency.
@@ -1064,6 +1180,9 @@ export class FakeTmux implements TmuxControlPlane {
   private tintMisapplications = new Set<string>();
   private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
   private clipboard = new Uint8Array();
+  private agentModes = new Map<string, AgentModeState>();
+  private agentModeInputs = new Map<string, string[]>();
+  private agentModeFailures = new Set<string>();
   private attachedClients = new Set<string>();
   private deliveredSelections: string[] = [];
 
@@ -1085,6 +1204,29 @@ export class FakeTmux implements TmuxControlPlane {
     return this.clipboard.byteLength;
   }
   async readClipboard(): Promise<Uint8Array> { return this.clipboard.slice(); }
+  setAgentMode(seatId: string, mode: AgentModeState): void { this.agentModes.set(seatId, mode); }
+  modeInputs(seatId: string): string[] { return [...(this.agentModeInputs.get(seatId) ?? [])]; }
+  failModeTransition(seatId: string): void { this.agentModeFailures.add(seatId); }
+  async transitionAgentMode(
+    seatId: string,
+    engine: 'claude' | 'codex',
+    intent: ModeTransitionIntent,
+  ): Promise<AgentModeTransitionOutcome> {
+    const before = this.agentModes.get(seatId) ?? 'unknown';
+    if (intent === 'enter_plan' && before === 'plan') {
+      return { before, after: 'plan', changed: false, verified: true, mechanism: 'none' };
+    }
+    const entering = before !== 'plan';
+    const mechanism = entering && engine === 'codex' ? 'slash_command' : 'mode_cycle';
+    const input = entering && engine === 'codex' ? '/plan' : 'BTab';
+    this.agentModeInputs.set(seatId, [...(this.agentModeInputs.get(seatId) ?? []), input]);
+    if (this.agentModeFailures.has(seatId)) {
+      return { before, after: before, changed: false, verified: false, mechanism };
+    }
+    const after = entering ? 'plan' : 'work';
+    this.agentModes.set(seatId, after);
+    return { before, after, changed: true, verified: true, mechanism };
+  }
   attachClient(tty: string): void { this.attachedClients.add(tty); }
   selectionDeliveries(): string[] { return [...this.deliveredSelections]; }
   async commitClipboardSelection(text: string, clientTty: string): Promise<number> {
