@@ -1,75 +1,130 @@
+// Strict semantic mirror of registrationd's authoritative Agent contract.
+// Token-Fleet CI compares the marked block byte-for-byte.
+
 import { z } from "zod";
-import { EngineId } from "./ledger.ts";
 
-/**
- * Instance registration row — the FOUNDATION identity record.
- *
- * The identity/lifecycle core of the `instances` table. Enums are typed
- * faithfully to the database CHECK constraints. The golden-throne / discord /
- * workflow / planning column families
- * are deliberately NOT modelled here — they converge in as their own seams arrive
- * (design-for-convergence; unknown columns are tolerated/stripped on parse).
- */
+// AGENT_CONTRACT_MIRROR_START
+export const AGENT_SCHEMA_VERSION = 1;
 
-export const ORIGIN_TYPES = ["local", "ssh", "cron", "dispatch", "api", "perpetual"] as const;
-export const COMMANDER_TYPES = ["emperor", "persona", "chapter"] as const;
-export const INSTANCE_STATUSES = [
-  "idle",
-  "working",
-  "questioning",
-  "preplanning",
-  "planning",
-  "compacting",
-  "reviewing",
-  "victorious",
-  "stopped",
-  "archived",
-] as const;
-export const NOTIFICATION_MODES = ["verbose", "muted", "silent"] as const;
-export const INTERACTION_MODES = ["text", "voice_chat"] as const;
-const FIXED_RANKS = ["astartes", "overseer", "primarch", "retired"] as const;
+export const AgentIdSchema = z.string().uuid();
+export const BirthGenerationSchema = z.string().uuid();
+export const EngineSchema = z.enum(["claude", "codex"]);
+export const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 
-export const OriginType = z.enum(ORIGIN_TYPES);
-export const CommanderType = z.enum(COMMANDER_TYPES);
-export const InstanceStatus = z.enum(INSTANCE_STATUSES);
-export const NotificationMode = z.enum(NOTIFICATION_MODES);
-export const InteractionMode = z.enum(INTERACTION_MODES);
+export const InstructionSourceSchema = z.object({
+  kind: z.enum(["file", "inline", "continuity"]),
+  reference: z.string().min(1),
+  digest: Sha256Schema,
+}).strict();
 
-/** rank CHECK: one of the fixed ranks OR the GLOB `aspirant:*`. */
-export const RankId = z.union([z.enum(FIXED_RANKS), z.string().regex(/^aspirant:.+$/)]);
-export type RankIdT = z.infer<typeof RankId>;
+export const PersonaPackageSchema = z.object({
+  persona: z.string().min(1),
+  rank: z.string().min(1).nullable(),
+  commander: z.string().min(1).nullable(),
+  tint: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  workspace: z.string().startsWith("/"),
+  continuity_references: z.array(z.string().min(1)),
+  instruction_package: z.object({
+    digest: Sha256Schema,
+    sources: z.array(InstructionSourceSchema),
+    rendered_path: z.string().startsWith("/"),
+  }).strict(),
+}).strict();
+export type PersonaPackage = z.infer<typeof PersonaPackageSchema>;
 
-export const InstanceRegistrationRow = z
-  .object({
-    id: z.string(),
-    name: z.string(),
-    engine: EngineId,
-    working_dir: z.string(),
-    device_id: z.string(),
-    origin_type: OriginType,
-    commander_type: CommanderType,
-    commander_id: z.string().nullable(),
-    status: InstanceStatus,
-    created_at: z.string(),
-    last_activity: z.string(),
-    stopped_at: z.string().nullable(),
-    archived_at: z.string().nullable(),
-    persona_id: z.string().nullable(),
-    rank: RankId,
-    session_doc_id: z.number().int().nullable(),
-    continuity_binding_source: z.string().nullable(),
-    // ties this registration to its wrapper-ledger occupancy row (ledger.wrapper_id).
-    wrapper_launch_id: z.string().nullable(),
-    automated: z.boolean(),
-    notification_mode: NotificationMode,
-    interaction_mode: InteractionMode,
-    is_subagent: z.boolean(),
-    hook_driven: z.boolean(),
-    stop_allowed: z.boolean(),
-  })
-  // db_schema.py cross-column CHECK: commander_id IS NULL iff commander_type = 'emperor'.
-  .refine(
-    (r) => (r.commander_type === "emperor" ? r.commander_id === null : r.commander_id !== null),
-    { message: "commander_id must be null iff commander_type is 'emperor'", path: ["commander_id"] },
-  );
-export type InstanceRegistrationRowT = z.infer<typeof InstanceRegistrationRow>;
+export const PlacementSchema = z.object({
+  pane_id: z.string().min(1),
+  pane_generation: z.number().int().positive(),
+  machine: z.string().min(1),
+  kind: z.enum(["local", "ssh"]),
+  wrapper_pid: z.number().int().positive(),
+  engine_pid: z.number().int().positive(),
+  cwd: z.string().startsWith("/"),
+  transport_witnesses: z.record(z.string(), z.unknown()),
+}).strict();
+
+export const ResourceReceiptSchema = z.object({
+  kind: z.enum(["worktree", "session_document"]),
+  authority: z.string().min(1),
+  receipt_id: z.string().min(1),
+  generation: z.string().min(1),
+}).strict();
+
+export const AgentSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  registered_at: z.string().datetime({ offset: true }),
+  engine: EngineSchema,
+  launch: z.object({
+    argv: z.array(z.string()),
+    requested_cwd: z.string().startsWith("/"),
+    engine_binary: z.string().startsWith("/"),
+  }).strict(),
+  placement: PlacementSchema,
+  configuration: z.object({
+    generation: z.string().min(1),
+    digest: Sha256Schema,
+  }).strict(),
+  persona: PersonaPackageSchema.nullable(),
+  resources: z.array(ResourceReceiptSchema),
+}).strict();
+export type Agent = z.infer<typeof AgentSchema>;
+
+export const WrapperStartHookSchema = z.object({
+  hook_request_id: z.string().uuid(),
+  engine: EngineSchema,
+  cwd: z.string().startsWith("/"),
+  machine: z.string().min(1),
+  wrapper_pid: z.number().int().positive(),
+  claimed_pane_id: z.string().min(1),
+  argv: z.array(z.string()),
+  placement_hints: z.record(z.string(), z.unknown()),
+}).strict();
+
+export const RegistrationPreparedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  hook_request_id: z.string().uuid(),
+  engine: EngineSchema,
+  wrapper_pid: z.number().int().positive(),
+  pane_id: z.string().min(1),
+  pane_generation: z.number().int().positive(),
+  configuration: z.object({
+    generation: z.string().min(1),
+    digest: Sha256Schema,
+  }).strict(),
+  persona: PersonaPackageSchema.nullable(),
+  prepared_at: z.string().datetime({ offset: true }),
+}).strict();
+export type RegistrationPrepared = z.infer<typeof RegistrationPreparedSchema>;
+
+export const PaneAttestedSchema = z.object({
+  hook_request_id: z.string().uuid(),
+  claimed_pane_id: z.string().min(1),
+  pane_id: z.string().min(1),
+  pane_generation: z.number().int().positive(),
+  machine: z.string().min(1),
+  wrapper_pid: z.number().int().positive(),
+  configuration: z.object({
+    generation: z.string().min(1),
+    digest: Sha256Schema,
+  }).strict(),
+  process_witnesses: z.record(z.string(), z.unknown()),
+}).strict();
+export type PaneAttested = z.infer<typeof PaneAttestedSchema>;
+
+export const WrapperLaunchReplySchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  pane_id: z.string().min(1),
+  pane_generation: z.number().int().positive(),
+  working_directory: z.string().startsWith("/"),
+  instruction_package: z.object({
+    digest: Sha256Schema,
+    rendered_path: z.string().startsWith("/"),
+  }).strict().nullable(),
+}).strict();
+// AGENT_CONTRACT_MIRROR_END

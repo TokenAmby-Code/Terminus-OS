@@ -79,10 +79,9 @@ export const CODEX_HOOK_EVENTS = [
 ] as const;
 export type CodexHookEvent = (typeof CODEX_HOOK_EVENTS)[number];
 
-// The `/ingress/hooks/<type>` route ids — the vendor union, snake_cased,
-// enumerated literally so the type stays a narrow literal union and stays
-// greppable (the EVENT_TYPES pattern).
-export const HOOK_TYPES = [
+// The vendor `/ingress/hooks/<type>` route ids, snake_cased and enumerated
+// literally so the type stays a narrow literal union.
+export const VENDOR_HOOK_TYPES = [
   "pre_tool_use",
   "post_tool_use",
   "post_tool_use_failure",
@@ -113,6 +112,18 @@ export const HOOK_TYPES = [
   "cwd_changed",
   "file_changed",
   "message_display",
+] as const;
+
+// Fleet lifecycle sources enter through the same content-agnostic hook door.
+// They are not vendor hooks and never pretend to be transcript events.
+export const FLEET_HOOK_TYPES = [
+  "wrapper_start",
+  "wrapper_stop",
+] as const;
+
+export const HOOK_TYPES = [
+  ...VENDOR_HOOK_TYPES,
+  ...FLEET_HOOK_TYPES,
 ] as const;
 export type HookType = (typeof HOOK_TYPES)[number];
 export const HookTypeSchema = z.enum(HOOK_TYPES);

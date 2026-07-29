@@ -3,6 +3,8 @@ import {
   CLAUDE_HOOK_EVENTS,
   CODEX_HOOK_EVENTS,
   HOOK_TYPES,
+  FLEET_HOOK_TYPES,
+  VENDOR_HOOK_TYPES,
   HookTypeSchema,
 } from "../src/hooks.ts";
 
@@ -25,8 +27,14 @@ describe("vendor hook-type enumeration", () => {
     expect(CODEX_HOOK_EVENTS.length).toBeLessThan(CLAUDE_HOOK_EVENTS.length);
   });
 
-  test("HOOK_TYPES is the snake_cased vendor union, order-preserving and duplicate-free", () => {
-    expect([...HOOK_TYPES] as string[]).toEqual(CLAUDE_HOOK_EVENTS.map(snake));
+  test("the vendor hook route union remains pinned and fleet wrapper hooks are additive", () => {
+    expect([...VENDOR_HOOK_TYPES] as string[]).toEqual(CLAUDE_HOOK_EVENTS.map(snake));
+    expect(FLEET_HOOK_TYPES).toEqual(["wrapper_start", "wrapper_stop"]);
+    expect([...HOOK_TYPES] as string[]).toEqual([
+      ...CLAUDE_HOOK_EVENTS.map(snake),
+      "wrapper_start",
+      "wrapper_stop",
+    ]);
     expect(new Set(HOOK_TYPES).size).toBe(HOOK_TYPES.length);
     for (const t of HOOK_TYPES) expect(t).toMatch(/^[a-z][a-z0-9_]*$/);
   });
