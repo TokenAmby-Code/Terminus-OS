@@ -6,13 +6,15 @@ import {
 
 type RequestFunction = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
+export type TxdPublishedEventType =
+  | 'agent.pane_attested'
+  | 'agent.pane_refused'
+  | 'agent.placement_attested';
+
 export function makeBusPublisher(
   busUrl: string,
   request: RequestFunction = fetch,
-): (
-  eventType: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested',
-  payload: Record<string, unknown>,
-) => Promise<void> {
+): (eventType: TxdPublishedEventType, payload: Record<string, unknown>) => Promise<void> {
   const endpoint = new URL('/ingress/events', busUrl);
   return async (eventType, payload) => {
     const body: BusPublishRequest = {

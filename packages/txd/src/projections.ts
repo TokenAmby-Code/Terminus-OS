@@ -41,6 +41,7 @@ export type Projections = {
   // door reads this to fire the reflexive auto-close.
   openStopSubscriptions: Set<string>;
   physicalDeclarations: Map<string, PhysicalDeclaration>;
+  placementAttestedAgents: Set<string>;
   decommissionedSeats: Set<string>;
 };
 
@@ -63,6 +64,7 @@ export function buildProjections(events: EventRecord[]): Projections {
   const paneBySeat = new Map<string, PaneState>();
   const bindingBySeat = new Map<string, CurrentBinding>();
   const physicalDeclarations = new Map<string, PhysicalDeclaration>();
+  const placementAttestedAgents = new Set<string>();
   const activityByAgent = new Map<string, ActivityState>();
   const everBoundAgents = new Set<string>();
   const subscribeSeqByAgent = new Map<string, number>(); // last reg.stop_subscribed seq
@@ -113,10 +115,15 @@ export function buildProjections(events: EventRecord[]): Projections {
         });
         break;
       case 'reg.physical_declared': {
-        const declaration = PhysicalDeclarationSchema.parse(e.payload);
-        physicalDeclarations.set(declaration.agent_id, declaration);
+        const declaration = PhysicalDeclarationSchema.safeParse(e.payload);
+        if (declaration.success) {
+          physicalDeclarations.set(declaration.data.agent_id, declaration.data);
+        }
         break;
       }
+      case 'reg.placement_attested':
+        placementAttestedAgents.add(e.entity_id);
+        break;
       case 'reg.agent_registered': {
         const binding = [...bindingBySeat.values()].find(
           (candidate) => candidate.agent_id === e.entity_id,
@@ -219,6 +226,7 @@ export function buildProjections(events: EventRecord[]): Projections {
     everBoundAgents,
     openStopSubscriptions,
     physicalDeclarations,
+    placementAttestedAgents,
     decommissionedSeats,
   };
 }

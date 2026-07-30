@@ -1020,7 +1020,7 @@ export class RealTmux implements TmuxControlPlane {
   async startPerpetualAgent(launch: PerpetualAgentLaunch): Promise<boolean> {
     const paneId = await this.resolvePane(launch.seatId);
     if (!paneId) return false;
-    const command = `exec /usr/bin/env ${PANE_ID_ENV}=${this.shellQuote(launch.seatId)} ${this.shellQuote(launch.wrapper)} ${launch.engine}`;
+    const command = `exec /usr/bin/env ${PANE_ID_ENV}=${this.shellQuote(launch.seatId)} ${this.shellQuote(launch.wrapper)} ${this.shellQuote(launch.engine)}`;
     const result = await this.command('start_perpetual_agent', launch.seatId, [
       'respawn-pane', '-k',
       ...paneEnvironment(launch.seatId), '-t', paneId, command,
@@ -1127,10 +1127,17 @@ export class RealTmux implements TmuxControlPlane {
 
   async attestEnginePlacement(wrapperPid: number): Promise<EnginePlacementAttestation> {
     const children: ProcessWitness[] = [];
-    for (const entry of await readdir('/proc')) {
-      if (!/^[1-9][0-9]*$/.test(entry)) continue;
-      const witness = await processWitness(Number(entry));
-      if (witness?.parent_pid === wrapperPid) children.push(witness);
+    const pids = (await readdir('/proc'))
+      .filter((entry) => /^[1-9][0-9]*$/.test(entry))
+      .map(Number);
+    for (let offset = 0; offset < pids.length && children.length < 2; offset += 64) {
+      const witnesses = await Promise.all(
+        pids.slice(offset, offset + 64).map((pid) => processWitness(pid)),
+      );
+      for (const witness of witnesses) {
+        if (witness?.parent_pid === wrapperPid) children.push(witness);
+        if (children.length === 2) break;
+      }
     }
     if (children.length === 0) return { ok: false, reason: 'engine_process_missing' };
     if (children.length !== 1) return { ok: false, reason: 'engine_process_ambiguous' };

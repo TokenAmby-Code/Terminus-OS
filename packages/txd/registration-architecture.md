@@ -179,7 +179,7 @@ A perpetual persona is an ordinary pane whose configuration automatically
 starts the same wrapper a human invokes. Custodes and Fabricator-General are
 the equivalence proof. Their colors remain `#302800` and `#300808`.
 Restart and reconstruction relaunch the wrapper and create a new generic birth
-generation. txd contains no persona launch or identity policy.
+generation. txd contains no persona allocation or identity policy.
 
 For k12-work placement, the canonical pane remains in the k12-personal estate.
 Its configured command opens one persistent SSH connection and starts the
