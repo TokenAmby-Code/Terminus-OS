@@ -77,6 +77,23 @@ export const CONSUMED_BUS_EVENT_TYPES = [
   'hook.user_prompt_submit',
 ] as const;
 
+const PHYSICAL_REFUSALS = new Set([
+  'physical_registration_unconfigured',
+  'physical_configuration_skew',
+  'physical_declaration_contradicted',
+  'physical_declaration_conflict',
+  'physical_binding_conflict',
+  'physical_declaration_missing',
+  'wrapper_placement_changed',
+  'engine_process_missing',
+  'engine_process_ambiguous',
+  'engine_process_changed',
+  'tint_attestation_failed',
+  'physical_binding_incomplete',
+  'registered_agent_physical_conflict',
+  'registered_agent_package_conflict',
+]);
+
 const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?\n/;
 
 function stringField(payload: Record<string, unknown>, field: string): string | undefined {
@@ -417,6 +434,16 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const busReceipt = `bus:${event.seq}`;
         const ack = (consumed: boolean, reason: string | null, extra: Record<string, unknown> = {}) =>
           json({ ok: true, seq: event.seq, consumed, reason, ...extra });
+        const physicalAck = async (operation: () => Promise<void>) => {
+          try {
+            await operation();
+            return ack(true, null);
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            if (PHYSICAL_REFUSALS.has(reason)) return ack(false, reason);
+            throw error;
+          }
+        };
         if (event.event_type === 'hook.wrapper_start') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const hook = WrapperStartHookSchema.safeParse(event.payload);
@@ -428,22 +455,19 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const declaration = PhysicalDeclarationSchema.safeParse(event.payload);
           if (!declaration.success) return ack(false, 'invalid_physical_declaration');
-          await daemon.recordPhysicalDeclaration(declaration.data);
-          return ack(true, null);
+          return physicalAck(() => daemon.recordPhysicalDeclaration(declaration.data));
         }
         if (event.event_type === 'hook.session_start') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const agentId = stringField(event.payload, 'agent_id');
           if (!agentId) return ack(false, 'invalid_session_start_payload');
-          await daemon.attestEngineSession(agentId, busReceipt);
-          return ack(true, null);
+          return physicalAck(() => daemon.attestEngineSession(agentId, busReceipt));
         }
         if (event.event_type === 'agent.registered') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const agent = AgentSchema.safeParse(event.payload);
           if (!agent.success) return ack(false, 'invalid_registered_agent');
-          await daemon.activateRegisteredAgent(agent.data);
-          return ack(true, null);
+          return physicalAck(() => daemon.activateRegisteredAgent(agent.data));
         }
         if (event.event_type === 'hook.stop') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');

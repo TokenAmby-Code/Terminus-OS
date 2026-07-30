@@ -6,6 +6,7 @@
 
 ALTER TABLE txd.events RENAME TO prior_events;
 ALTER INDEX txd.idx_txd_events_entity RENAME TO idx_txd_prior_events_entity;
+ALTER SEQUENCE txd.events_seq_seq RENAME TO prior_events_seq_seq;
 
 CREATE TABLE txd.events (
     seq          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

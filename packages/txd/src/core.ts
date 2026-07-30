@@ -60,6 +60,7 @@ import { buildProjections, type Projections } from './projections.ts';
 import { DECOMMISSIONED_COUNCIL_SEATS, isTxdPage, TXD_ESTATE, TXD_WINDOWS } from './estate.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
+import type { TxdPublishedEventType } from './events.ts';
 
 // Reg-audit attestation set DEFINED SO FAR (door step 1). The refusal machinery
 // is day-one; later doors grow this list as they add witnesses (rank, commander,
@@ -73,7 +74,7 @@ export type PhysicalRegistrationRuntime = {
   agentWrapper: string;
   perpetual: Record<string, 'claude' | 'codex'>;
   publish: (
-    eventType: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested',
+    eventType: TxdPublishedEventType,
     payload: Record<string, unknown>,
   ) => Promise<unknown>;
 };
@@ -176,6 +177,10 @@ export class Daemon {
         throw new Error('physical_declaration_missing');
       }
       let binding = projections.currentBindings.find((candidate) => candidate.agent_id === agentId);
+      if (binding?.birth_generation === declaration.birth_generation
+          && projections.placementAttestedAgents.has(agentId)) {
+        return;
+      }
       if (!binding) {
         const wrapper = await this.tmux.attestWrapperPlacement(declaration.wrapper_pid);
         if (!wrapper.ok
@@ -276,18 +281,26 @@ export class Daemon {
         transport_witnesses: { session_start_receipt: receipt },
       });
       await this.physicalRegistration.publish('agent.placement_attested', placement);
+      await this.store.append({
+        entity_type: 'agent',
+        entity_id: binding.agent_id,
+        event_type: 'reg.placement_attested',
+        payload: { birth_generation: declaration.birth_generation },
+        provenance: this.prov('observer', receipt),
+        occurred_at: this.now(),
+      });
     });
   }
 
   activateRegisteredAgent(input: Agent): Promise<void> {
     return this.locked(async () => {
       const agent = AgentSchema.parse(input);
+      if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const projections = await this.projections();
       const binding = projections.currentBindings.find(
         (candidate) => candidate.agent_id === agent.agent_id,
       );
       if (!binding
-          || !this.physicalRegistration
           || binding.birth_generation !== agent.birth_generation
           || binding.seat_id !== agent.placement.pane_id
           || binding.pane_generation !== agent.placement.pane_generation
@@ -1297,7 +1310,11 @@ export class Daemon {
       engine: perpetualEngine,
       wrapper: this.physicalRegistration!.agentWrapper,
     }))) {
-      throw new Error(`perpetual relaunch failed: ${binding.seat_id}`);
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'perpetual_relaunch_failed',
+        seat_id: binding.seat_id,
+      }));
     }
     return true;
   }

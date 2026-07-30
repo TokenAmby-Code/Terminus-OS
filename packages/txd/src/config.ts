@@ -56,18 +56,24 @@ const HARD_DEFAULTS = {
 function envDefaults(): PartialConfig {
   const socket_dir = process.env.TXD_DB_SOCKET_DIR;
   const database = process.env.TXD_DB_DATABASE;
-  const registration = {
+  const registrationRequired = {
     busUrl: process.env.TXD_REGISTRATION_BUS_URL,
     generation: process.env.TXD_REGISTRATION_CONFIG_GENERATION,
     digest: process.env.TXD_REGISTRATION_CONFIG_DIGEST,
-    perpetual: process.env.TXD_PERPETUAL_AGENTS
-      ? JSON.parse(process.env.TXD_PERPETUAL_AGENTS) as Record<string, 'claude' | 'codex'>
-      : undefined,
   };
-  const registrationSeen = Object.values(registration).some((value) => value !== undefined);
-  if (registrationSeen && Object.values(registration).some((value) => !value)) {
+  let perpetual: Record<string, 'claude' | 'codex'> = {};
+  if (process.env.TXD_PERPETUAL_AGENTS !== undefined) {
+    try {
+      perpetual = JSON.parse(process.env.TXD_PERPETUAL_AGENTS) as Record<string, 'claude' | 'codex'>;
+    } catch {
+      throw new Error('txd config error: TXD_PERPETUAL_AGENTS must be valid JSON');
+    }
+  }
+  const registrationSeen = Object.values(registrationRequired).some((value) => value !== undefined);
+  if (registrationSeen && Object.values(registrationRequired).some((value) => !value)) {
     throw new Error('txd config error: physical registration environment is incomplete');
   }
+  const registration = { ...registrationRequired, perpetual };
   return {
     bind: process.env.TXD_BIND,
     port: process.env.TXD_PORT ? Number(process.env.TXD_PORT) : undefined,

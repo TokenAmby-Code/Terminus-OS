@@ -179,6 +179,9 @@ test('physical signoff precedes registration and routing activation', async () =
         pane_generation: paneGeneration,
       },
     });
+    response = await post(delivery('hook.session_start', { agent_id: agentId }, 3));
+    expect(await response.json()).toMatchObject({ ok: true, consumed: true });
+    expect(published.filter(({ type }) => type === 'agent.placement_attested')).toHaveLength(1);
     await expect(d.comm({
       schema_version: SCHEMA_VERSION,
       source_agent_id: agentId,
