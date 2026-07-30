@@ -78,25 +78,28 @@ async function constructAt(width: number, height: number): Promise<Record<'palac
 }
 
 describe('disposable canonical estate geometry', () => {
-  test('every canonical pane owns its unique PANE_ID and txd restamps it on respawn', async () => {
+  test('every canonical pane owns its placement environment and txd restamps it on respawn', async () => {
     const socket = `txd-pane-environment-${process.pid}`;
     sockets.push(socket);
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
-    const control = new RealTmux(socket);
+    const control = new RealTmux(socket, { machine: 'k12-personal' });
     await control.ensureEstate();
 
     for (const seat of TXD_ESTATE) {
       expect(await paneEnvironment(socket, seat)).toContain(`PANE_ID=${seat}`);
+      expect(await paneEnvironment(socket, seat)).toContain('IMPERIUM_MACHINE=k12-personal');
     }
 
     expect(await control.reapSeat('palace:W')).toBe(true);
     await awaitPaneShell(socket, 'palace:W');
     expect(await paneEnvironment(socket, 'palace:W')).toContain('PANE_ID=palace:W');
+    expect(await paneEnvironment(socket, 'palace:W')).toContain('IMPERIUM_MACHINE=k12-personal');
 
     expect(await control.rebuildPage('council')).toBe(true);
     for (const seat of TXD_WINDOWS.council) {
       await awaitPaneShell(socket, seat);
       expect(await paneEnvironment(socket, seat)).toContain(`PANE_ID=${seat}`);
+      expect(await paneEnvironment(socket, seat)).toContain('IMPERIUM_MACHINE=k12-personal');
     }
   });
 

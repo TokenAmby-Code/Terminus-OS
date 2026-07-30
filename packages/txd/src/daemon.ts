@@ -22,7 +22,7 @@ const build: BuildInfo = {
 const cfg = await loadConfig();
 // Connect + migrate (forward-only, shared migrations home) — fail loud at boot.
 const store = await PostgresEventStore.connect(cfg.db);
-const tmux = new RealTmux(cfg.tmuxSocket);
+const tmux = new RealTmux(cfg.tmuxSocket, { machine: cfg.machine });
 const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
 const physicalRegistration = cfg.physicalRegistration
   ? {
