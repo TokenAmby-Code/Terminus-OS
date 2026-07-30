@@ -144,11 +144,8 @@ export interface TmuxControlPlane {
 const CANON_OPT = '@canonical_id';
 const GENERATION_OPT = '@txd_generation';
 const PANE_ID_ENV = 'PANE_ID';
+const MACHINE_ENV = 'IMPERIUM_MACHINE';
 const MAX_PROCESS_ANCESTRY = 256;
-
-function paneEnvironment(seatId: string): string[] {
-  return ['-e', `${PANE_ID_ENV}=${seatId}`];
-}
 type ProcessWitness = { pid: number; parent_pid: number; start_ticks: string };
 
 async function processWitness(pid: number): Promise<ProcessWitness | null> {
@@ -290,6 +287,7 @@ export class RealTmux implements TmuxControlPlane {
   private enterDelayMs: number;
   private binaryRunner: TmuxBinaryRunner;
   private writeClient: WriteClient;
+  private machine: string | undefined;
 
   constructor(
     private socket: string,
@@ -300,6 +298,7 @@ export class RealTmux implements TmuxControlPlane {
       audit?: AuditSink;
       sleep?: Sleep;
       enterDelayMs?: number;
+      machine?: string;
     } = {},
   ) {
     this.runner = options.run ?? run;
@@ -314,9 +313,16 @@ export class RealTmux implements TmuxControlPlane {
         await handle.close();
       }
     });
+    this.machine = options.machine;
     const configured = Number(process.env.TXD_SEND_ENTER_DELAY_MS);
     this.enterDelayMs = options.enterDelayMs
       ?? (Number.isFinite(configured) && configured >= 0 ? configured : 200);
+  }
+
+  private paneEnvironment(seatId: string): string[] {
+    const environment = ['-e', `${PANE_ID_ENV}=${seatId}`];
+    if (this.machine) environment.push('-e', `${MACHINE_ENV}=${this.machine}`);
+    return environment;
   }
 
   private stderrCategory(result: TmuxCommandResult): TmuxAuditRecord['stderr_category'] {
@@ -701,35 +707,35 @@ export class RealTmux implements TmuxControlPlane {
   private async constructPage(page: string, seed?: string): Promise<string[]> {
     const seats = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS];
     const first = seed ?? await this.estateChecked(
-      ['new-window', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[0]!), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', page],
+      ['new-window', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[0]!), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', page],
       `create ${page} window`,
       page,
     );
     let panes: string[];
     if (page === 'reservists' || page === 'palace') {
-      const center = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '70%', '-t', first], `split ${page} center`, page);
-      const east = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '43%', '-t', center], `split ${page} east`, page);
-      const south = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', center], `split ${page} south`, page);
+      const center = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '70%', '-t', first], `split ${page} center`, page);
+      const east = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '43%', '-t', center], `split ${page} east`, page);
+      const south = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', center], `split ${page} south`, page);
       panes = [first, center, south, east];
     } else if (page === 'somnium') {
-      const north = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '70%', '-t', first], 'split somnium grid', page);
-      const northeast = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '50%', '-t', north], 'split somnium east column', page);
-      const south = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', north], 'split somnium south', page);
-      const southeast = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[4]!), '-c', this.homeDirectory(), '-l', '50%', '-t', northeast], 'split somnium southeast', page);
+      const north = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '70%', '-t', first], 'split somnium grid', page);
+      const northeast = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '50%', '-t', north], 'split somnium east column', page);
+      const south = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', north], 'split somnium south', page);
+      const southeast = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[4]!), '-c', this.homeDirectory(), '-l', '50%', '-t', northeast], 'split somnium southeast', page);
       panes = [first, north, south, northeast, southeast];
     } else if (page === 'council') {
       const northeast = await this.estateChecked(
-        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', first],
+        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', first],
         'split council east column',
         page,
       );
       const southwest = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '50%', '-t', first],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '50%', '-t', first],
         'split council southwest',
         page,
       );
       const southeast = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '50%', '-t', northeast],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '50%', '-t', northeast],
         'split council southeast',
         page,
       );
@@ -799,7 +805,7 @@ export class RealTmux implements TmuxControlPlane {
           if (!shellCommand) return false;
           if ((await this.command('reset_page_seed', page, [
             'respawn-pane', '-k', '-c', this.homeDirectory(),
-            ...paneEnvironment(TXD_WINDOWS[page as keyof typeof TXD_WINDOWS][0]!),
+            ...this.paneEnvironment(TXD_WINDOWS[page as keyof typeof TXD_WINDOWS][0]!),
             '-t', seed, '/usr/bin/env',
             `${PANE_ID_ENV}=${TXD_WINDOWS[page as keyof typeof TXD_WINDOWS][0]!}`,
             shellCommand,
@@ -858,54 +864,54 @@ export class RealTmux implements TmuxControlPlane {
     let sessionCreated = false;
     try {
       const reservistsW = await this.estateChecked(
-        ['new-session', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('reservists:W'), '-c', this.homeDirectory(), '-s', TXD_SESSION, '-n', 'reservists', '-x', '200', '-y', '60'],
+        ['new-session', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:W'), '-c', this.homeDirectory(), '-s', TXD_SESSION, '-n', 'reservists', '-x', '200', '-y', '60'],
         'create canonical session',
       );
       sessionCreated = true;
-      const reservistsN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('reservists:N'), '-c', this.homeDirectory(), '-l', '70%', '-t', reservistsW], 'split reservists center');
-      const reservistsE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('reservists:E'), '-c', this.homeDirectory(), '-l', '43%', '-t', reservistsN], 'split reservists east');
-      const reservistsS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('reservists:S'), '-c', this.homeDirectory(), '-l', '50%', '-t', reservistsN], 'split reservists south');
+      const reservistsN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:N'), '-c', this.homeDirectory(), '-l', '70%', '-t', reservistsW], 'split reservists center');
+      const reservistsE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:E'), '-c', this.homeDirectory(), '-l', '43%', '-t', reservistsN], 'split reservists east');
+      const reservistsS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:S'), '-c', this.homeDirectory(), '-l', '50%', '-t', reservistsN], 'split reservists south');
       await Promise.all([
         this.tag(reservistsW, 'reservists:W'), this.tag(reservistsN, 'reservists:N'),
         this.tag(reservistsS, 'reservists:S'), this.tag(reservistsE, 'reservists:E'),
       ]);
 
       const palaceW = await this.estateChecked(
-        ['new-window', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('palace:W'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'palace'],
+        ['new-window', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('palace:W'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'palace'],
         'create palace window',
       );
-      const palaceN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('palace:N'), '-c', this.homeDirectory(), '-l', '70%', '-t', palaceW], 'split palace center');
-      const palaceE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('palace:E'), '-c', this.homeDirectory(), '-l', '43%', '-t', palaceN], 'split palace east');
-      const palaceS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('palace:S'), '-c', this.homeDirectory(), '-l', '50%', '-t', palaceN], 'split palace south');
+      const palaceN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('palace:N'), '-c', this.homeDirectory(), '-l', '70%', '-t', palaceW], 'split palace center');
+      const palaceE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('palace:E'), '-c', this.homeDirectory(), '-l', '43%', '-t', palaceN], 'split palace east');
+      const palaceS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('palace:S'), '-c', this.homeDirectory(), '-l', '50%', '-t', palaceN], 'split palace south');
       await Promise.all([
         this.tag(palaceW, 'palace:W'), this.tag(palaceN, 'palace:N'),
         this.tag(palaceS, 'palace:S'), this.tag(palaceE, 'palace:E'),
       ]);
 
-      const somniumW = await this.estateChecked(['new-window', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('somnium:W'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'somnium'], 'create somnium window');
-      const somniumN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('somnium:N'), '-c', this.homeDirectory(), '-l', '70%', '-t', somniumW], 'split somnium grid');
-      const somniumNE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('somnium:NE'), '-c', this.homeDirectory(), '-l', '50%', '-t', somniumN], 'split somnium east column');
-      const somniumS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('somnium:S'), '-c', this.homeDirectory(), '-l', '50%', '-t', somniumN], 'split somnium south');
-      const somniumSE = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('somnium:SE'), '-c', this.homeDirectory(), '-l', '50%', '-t', somniumNE], 'split somnium southeast');
+      const somniumW = await this.estateChecked(['new-window', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('somnium:W'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'somnium'], 'create somnium window');
+      const somniumN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('somnium:N'), '-c', this.homeDirectory(), '-l', '70%', '-t', somniumW], 'split somnium grid');
+      const somniumNE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('somnium:NE'), '-c', this.homeDirectory(), '-l', '50%', '-t', somniumN], 'split somnium east column');
+      const somniumS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('somnium:S'), '-c', this.homeDirectory(), '-l', '50%', '-t', somniumN], 'split somnium south');
+      const somniumSE = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('somnium:SE'), '-c', this.homeDirectory(), '-l', '50%', '-t', somniumNE], 'split somnium southeast');
       await Promise.all([
         this.tag(somniumW, 'somnium:W'), this.tag(somniumN, 'somnium:N'),
         this.tag(somniumS, 'somnium:S'), this.tag(somniumNE, 'somnium:NE'), this.tag(somniumSE, 'somnium:SE'),
       ]);
 
       const council = await this.estateChecked(
-        ['new-window', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('council:custodes'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'council'],
+        ['new-window', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:custodes'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'council'],
         'create council window',
       );
       const councilNE = await this.estateChecked(
-        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('council:pax'), '-c', this.homeDirectory(), '-l', '50%', '-t', council],
+        ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:pax'), '-c', this.homeDirectory(), '-l', '50%', '-t', council],
         'split council east column',
       );
       const councilSW = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('council:fabricator-general'), '-c', this.homeDirectory(), '-l', '50%', '-t', council],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:fabricator-general'), '-c', this.homeDirectory(), '-l', '50%', '-t', council],
         'split council southwest',
       );
       const councilSE = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...paneEnvironment('council:orchestrator'), '-c', this.homeDirectory(), '-l', '50%', '-t', councilNE],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:orchestrator'), '-c', this.homeDirectory(), '-l', '50%', '-t', councilNE],
         'split council southeast',
       );
       const councilPanes = [council, councilSW, councilNE, councilSE];
@@ -931,7 +937,7 @@ export class RealTmux implements TmuxControlPlane {
     // lives in the pane option only.
     const safe = `seat_${seatId.replace(/[^A-Za-z0-9_]/g, '_')}`;
     const created = await this.command('create_seat', seatId, [
-      'new-session', '-d', ...paneEnvironment(seatId), '-s', safe, '-x', '200', '-y', '50', '-c', this.homeDirectory(),
+      'new-session', '-d', ...this.paneEnvironment(seatId), '-s', safe, '-x', '200', '-y', '50', '-c', this.homeDirectory(),
     ]);
     // Fail loud: if the session didn't come up, do NOT go on to list/retag some
     // other pane and record a seat that was never really created.
@@ -986,7 +992,7 @@ export class RealTmux implements TmuxControlPlane {
     // environment across respawn, so the physical authority must restamp the
     // same canonical PANE_ID on every replacement process.
     const r = await this.command('reap_seat', seatId, [
-      'respawn-pane', '-k', ...paneEnvironment(seatId), '-t', paneId,
+      'respawn-pane', '-k', ...this.paneEnvironment(seatId), '-t', paneId,
       '/usr/bin/env', `${PANE_ID_ENV}=${seatId}`, shell,
     ]);
     if (r.code === 0) return true;
@@ -1006,7 +1012,7 @@ export class RealTmux implements TmuxControlPlane {
     if (!shell) return false;
     if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return false;
     if ((await this.command('reset_seat_process', seatId, [
-      'respawn-pane', '-k', ...paneEnvironment(seatId), '-t', paneId,
+      'respawn-pane', '-k', ...this.paneEnvironment(seatId), '-t', paneId,
       '/usr/bin/env', `${PANE_ID_ENV}=${seatId}`, shell,
     ])).code !== 0) return false;
     const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
@@ -1023,7 +1029,7 @@ export class RealTmux implements TmuxControlPlane {
     const command = `exec /usr/bin/env ${PANE_ID_ENV}=${this.shellQuote(launch.seatId)} ${this.shellQuote(launch.wrapper)} ${this.shellQuote(launch.engine)}`;
     const result = await this.command('start_perpetual_agent', launch.seatId, [
       'respawn-pane', '-k',
-      ...paneEnvironment(launch.seatId), '-t', paneId, command,
+      ...this.paneEnvironment(launch.seatId), '-t', paneId, command,
     ]);
     return result.code === 0;
   }
