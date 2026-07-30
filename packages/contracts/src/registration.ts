@@ -146,4 +146,56 @@ export const WrapperLaunchReplySchema = z.object({
     rendered_path: z.string().startsWith("/"),
   }).strict().nullable(),
 }).strict();
+export type WrapperLaunchReply = z.infer<typeof WrapperLaunchReplySchema>;
+
+export const PhysicalDeclarationSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  pane_id: z.string().min(1),
+  pane_generation: PaneGenerationSchema,
+  configuration: z.object({
+    generation: z.string().min(1),
+    digest: Sha256Schema,
+  }).strict(),
+  engine: EngineSchema,
+  wrapper_pid: z.number().int().positive(),
+  tint: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable(),
+}).strict();
+export type PhysicalDeclaration = z.infer<typeof PhysicalDeclarationSchema>;
+
+export const PlacementAttestedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  pane_id: z.string().min(1),
+  pane_generation: PaneGenerationSchema,
+  configuration: z.object({
+    generation: z.string().min(1),
+    digest: Sha256Schema,
+  }).strict(),
+  machine: z.string().min(1),
+  kind: z.enum(["local", "ssh"]),
+  wrapper_pid: z.number().int().positive(),
+  engine_pid: z.number().int().positive(),
+  engine_binary: z.string().startsWith("/"),
+  cwd: z.string().startsWith("/"),
+  transport_witnesses: z.record(z.string(), z.unknown()),
+}).strict();
+export type PlacementAttested = z.infer<typeof PlacementAttestedSchema>;
+
+export const LifecycleReadySchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  pane_id: z.string().min(1),
+  pane_generation: PaneGenerationSchema,
+  ready_at: z.string().datetime({ offset: true }),
+  evidence: z.object({
+    registration_prepared: z.number().int().positive(),
+    placement_attested: z.number().int().positive(),
+    session_started: z.number().int().positive(),
+  }).strict(),
+}).strict();
+export type LifecycleReady = z.infer<typeof LifecycleReadySchema>;
 // AGENT_CONTRACT_MIRROR_END

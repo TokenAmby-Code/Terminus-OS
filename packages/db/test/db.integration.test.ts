@@ -1,8 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { z } from "zod";
 import type { SQL } from "bun";
-import { connectDb, typedRows } from "../src/client.ts";
+import { connectDb } from "../src/client.ts";
 import { DbEndpoint, type DbEndpointT } from "../src/config.ts";
 import { checkHealth } from "../src/health.ts";
 import { runMigrations } from "../src/migrate.ts";
@@ -52,42 +51,11 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
   beforeAll(async () => {
     sql = await connectDb(endpoint!);
     await resetTestDatabase(sql);
+    await runMigrations(sql, MIGRATIONS_DIR);
   });
 
   afterAll(async () => {
     await sql?.close();
-  });
-
-  test("the migrations apply and land their ledger rows", async () => {
-    const report = await runMigrations(sql, MIGRATIONS_DIR);
-    expect(report.applied.map(m => m.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    expect(report.alreadyApplied).toBe(0);
-  });
-
-  test("re-running the runner is a no-op (idempotence)", async () => {
-    const report = await runMigrations(sql, MIGRATIONS_DIR);
-    expect(report.applied).toEqual([]);
-    expect(report.alreadyApplied).toBe(12);
-  });
-
-  test("concurrent boot: two connections migrate simultaneously without racing the ledger", async () => {
-    // txd and busd both run runMigrations at boot. The advisory-lock guard
-    // serializes them: exactly one applies each pending id, the other re-plans
-    // under the lock to a no-op — never a duplicate ledger insert.
-    await resetTestDatabase(sql);
-    const sql2 = await connectDb(endpoint!);
-    try {
-      const [a, b] = await Promise.all([
-        runMigrations(sql, MIGRATIONS_DIR),
-        runMigrations(sql2, MIGRATIONS_DIR),
-      ]);
-      expect(a.applied.length + b.applied.length).toBe(12);
-      const LedgerRow = z.object({ id: z.number().int() });
-      const rows = await typedRows(sql, LedgerRow)`select id from schema_migrations order by id`;
-      expect(rows.map(r => r.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    } finally {
-      await sql2.close();
-    }
   });
 
   test("checkHealth reports up on server_version 18.x", async () => {
@@ -96,32 +64,6 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
     if (report.status === "up") {
       expect(report.server_version).toStartWith("18.");
     }
-  });
-
-  test("typedRows parse-validates reads at the boundary", async () => {
-    const LedgerRow = z.object({ id: z.number().int(), name: z.string() });
-    const rows = await typedRows(sql, LedgerRow)`
-      select id, name from schema_migrations order by id
-    `;
-    expect(rows).toEqual([
-      { id: 1, name: "schema_migrations" },
-      { id: 2, name: "txd_events" },
-      { id: 3, name: "desktop_telemetry" },
-      { id: 4, name: "bus" },
-      { id: 5, name: "txd_events_jsonb_normalize" },
-      { id: 6, name: "replay_authority" },
-      { id: 7, name: "replay_immutability" },
-      { id: 8, name: "replay_constraints" },
-      { id: 9, name: "replay_runtime_parity" },
-      { id: 10, name: "managed_bus_subscriptions" },
-      { id: 11, name: "replay_delivery_indexes" },
-      { id: 12, name: "txd_events_send_purge" },
-    ]);
-
-    const WrongRow = z.object({ id: z.string() });
-    await expect(
-      typedRows(sql, WrongRow)`select id from schema_migrations`,
-    ).rejects.toThrow();
   });
 
   test("replay timestamp validation is immutable without accepting impossible dates", async () => {

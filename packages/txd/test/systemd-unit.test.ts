@@ -92,9 +92,8 @@ describe('systemd/txd.service pins', () => {
     pin('Environment=TXD_ROTATION_SIGNAL_FIFO=%h/.local/state/txd/estate-rotation.signal');
   });
 
-  test('static persona launch paths resolve through the converged Fleet locations', () => {
+  test('the generic agent wrapper resolves through the converged Fleet location', () => {
     pin('Environment=TXD_AGENT_WRAPPER=%h/runtimes/Token-Fleet/live/shared/bin/agent-wrapper');
-    pin('Environment=TXD_PERSONA_WORKSPACE_ROOT=%h/.local/share/token-fleet/persona-workspaces');
   });
 });
 

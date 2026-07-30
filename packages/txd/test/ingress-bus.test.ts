@@ -8,7 +8,7 @@
 // just ride an ack now instead of a 422.
 
 import { expect, test } from 'bun:test';
-import { BUS_SCHEMA_VERSION, type BusDelivery } from '@terminus-os/contracts';
+import { BUS_SCHEMA_VERSION, SCHEMA_VERSION, type BusDelivery } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -17,10 +17,10 @@ import { findTmuxIdDeep } from '../src/ids.ts';
 
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
-function setup(physicalRegistration: ConstructorParameters<typeof Daemon>[5] = null) {
+function setup(physicalRegistration: ConstructorParameters<typeof Daemon>[4] = null) {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
-  const d = new Daemon(store, tmux, undefined, undefined, null, physicalRegistration);
+  const d = new Daemon(store, tmux, undefined, undefined, physicalRegistration);
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   const post = (body: unknown) =>
     fetch(`http://127.0.0.1:${srv.port}/ingress/bus`, { method: 'POST', body: JSON.stringify(body) });
@@ -49,7 +49,9 @@ test('wrapper start publishes txd-observed pane truth even when the environmenta
   const runtime = {
     machine: 'k12-personal',
     configuration: { generation: 'estate-1', digest: 'a'.repeat(64) },
-    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused', payload: Record<string, unknown>) => {
+    agentWrapper: '/fleet/agent-wrapper',
+    perpetual: {},
+    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested', payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
   };
@@ -93,7 +95,9 @@ test('wrapper outside a managed pane emits a factual refusal and never attests p
   const runtime = {
     machine: 'k12-personal',
     configuration: { generation: 'estate-1', digest: 'b'.repeat(64) },
-    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused', payload: Record<string, unknown>) => {
+    agentWrapper: '/fleet/agent-wrapper',
+    perpetual: {},
+    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested', payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
   };
@@ -130,18 +134,127 @@ test('wrapper outside a managed pane emits a factual refusal and never attests p
   }
 });
 
+test('physical signoff precedes registration and routing activation', async () => {
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const runtime = {
+    machine: 'k12-personal',
+    configuration: { generation: 'estate-1', digest: 'c'.repeat(64) },
+    agentWrapper: '/fleet/agent-wrapper',
+    perpetual: {},
+    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested', payload: Record<string, unknown>) => {
+      published.push({ type, payload });
+    },
+  };
+  const { tmux, d, srv, post } = setup(runtime);
+  const agentId = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
+  const birthGeneration = '1cc2112c-9c38-45a1-839f-831c33a1096a';
+  try {
+    await tmux.createSeat('palace:W');
+    const paneGeneration = (await tmux.seatGeneration('palace:W'))!;
+    tmux.bindWrapper(4101, 'palace:W');
+    tmux.bindEngine(4101, 5101, '/sanctioned/claude', '/workspace');
+
+    let response = await post(delivery('agent.physical_declared', {
+      schema_version: 1,
+      agent_id: agentId,
+      birth_generation: birthGeneration,
+      pane_id: 'palace:W',
+      pane_generation: paneGeneration,
+      configuration: runtime.configuration,
+      engine: 'claude',
+      wrapper_pid: 4101,
+      tint: '#302800',
+    }));
+    expect(await response.json()).toMatchObject({ ok: true, consumed: true });
+
+    response = await post(delivery('hook.session_start', { agent_id: agentId }));
+    expect(await response.json()).toMatchObject({ ok: true, consumed: true });
+    expect(await tmux.seatTint('palace:W')).toBe('#302800');
+    expect(published.at(-1)).toMatchObject({
+      type: 'agent.placement_attested',
+      payload: {
+        agent_id: agentId,
+        birth_generation: birthGeneration,
+        pane_id: 'palace:W',
+        pane_generation: paneGeneration,
+      },
+    });
+    await expect(d.comm({
+      schema_version: SCHEMA_VERSION,
+      source_agent_id: agentId,
+      target: agentId,
+      message: 'not yet routable',
+      ask: false,
+      reply: false,
+    })).rejects.toThrow('source_not_registered');
+
+    const agent = {
+      schema_version: 1,
+      agent_id: agentId,
+      birth_generation: birthGeneration,
+      registered_at: '2026-07-29T12:00:00.000Z',
+      engine: 'claude',
+      launch: {
+        argv: [],
+        requested_cwd: '/workspace',
+        engine_binary: '/sanctioned/claude',
+      },
+      placement: {
+        pane_id: 'palace:W',
+        pane_generation: paneGeneration,
+        machine: 'k12-personal',
+        kind: 'local',
+        wrapper_pid: 4101,
+        engine_pid: 5101,
+        cwd: '/workspace',
+        transport_witnesses: {},
+      },
+      configuration: runtime.configuration,
+      persona: {
+        persona: 'custodes',
+        rank: 'overseer',
+        commander: null,
+        tint: '#302800',
+        workspace: '/workspace',
+        continuity_references: [],
+        instruction_package: {
+          digest: 'd'.repeat(64),
+          sources: [],
+          rendered_path: '/workspace/CLAUDE.md',
+        },
+      },
+      resources: [],
+    };
+    response = await post(delivery('agent.registered', agent));
+    expect(await response.json()).toMatchObject({ ok: true, consumed: true });
+    expect(await d.comm({
+      schema_version: SCHEMA_VERSION,
+      source_agent_id: agentId,
+      target: agentId,
+      message: 'now routable',
+      ask: false,
+      reply: false,
+    })).toMatchObject({
+      ok: true,
+      targets: [{ agent_id: agentId, seat_id: 'palace:W', persona: 'custodes' }],
+    });
+  } finally {
+    srv.stop(true);
+  }
+});
+
 test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance from the bus row', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 9, identity: 'i1', persona: 'p', tint: '#1' });
-    const res = await post(delivery('hook.stop', { instance_id: 'i1', hook_event_name: 'Stop' }, 41));
+    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+    const res = await post(delivery('hook.stop', { agent_id: 'i1', hook_event_name: 'Stop' }, 41));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       ok: true,
       seq: 41,
       consumed: true,
       reason: null,
-      receipt: { ok: true, instance_id: 'i1', recorded: true, deduped: false, activity: 'stopped', auto_close: 'none' },
+      receipt: { ok: true, agent_id: 'i1', recorded: true, deduped: false, activity: 'stopped', auto_close: 'none' },
     });
     const stops = (await store.readAll()).filter((e) => e.event_type === 'act.stop_reported');
     expect(stops).toHaveLength(1);
@@ -152,44 +265,12 @@ test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance
   }
 });
 
-test('a native delivered stop projects assistant content into exactly one comm callback', async () => {
-  const { store, d, srv, post } = setup();
-  try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 9, identity: 'src', persona: 'p1', tint: '#1' });
-    await d.launch({ seat_id: 'palace:N', schema_version: 9, identity: 'dst', persona: 'p2', tint: '#2' });
-    const ask = await d.comm({ schema_version: 9, source_instance_id: 'src', target: 'dst', message: 'question', ask: true, reply: false });
-    const res = await post(delivery('hook.stop', {
-      instance_id: 'dst',
-      hook_event_name: 'Stop',
-      last_assistant_message: 'final words',
-      prompt_id: 'prompt-1',
-    }, 42));
-    expect(res.status).toBe(200);
-    expect(((await res.json()) as { consumed: boolean }).consumed).toBe(true);
-    const events = await store.readAll();
-    expect(events.some((e) => e.event_type === 'act.stop_reported')).toBe(true);
-    const callbacks = events.filter((e) => e.event_type === 'act.comm_callback_asserted');
-    expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]).toMatchObject({
-      payload: {
-        ask_id: ask.ask_id,
-        target_instance_id: 'dst',
-        content: 'final words',
-        source: 'stop',
-        stop_event_id: 'bus:42',
-      },
-    });
-  } finally {
-    srv.stop(true);
-  }
-});
-
 test('duplicate stop deliveries dedupe (act.receipt_deduped), never a second stop_reported', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 9, identity: 'i1', persona: 'p', tint: '#1' });
-    await post(delivery('hook.stop', { instance_id: 'i1', schema_version: 9 }));
-    const res = await post(delivery('hook.stop', { instance_id: 'i1', schema_version: 9 }));
+    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+    await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 10 }));
+    const res = await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 10 }));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: true, receipt: { recorded: false, deduped: true } });
     const events = await store.readAll();
@@ -203,10 +284,10 @@ test('duplicate stop deliveries dedupe (act.receipt_deduped), never a second sto
 test('a GHOST stop is acked-not-consumed with zero footprint — refused at admission, lane never wedged', async () => {
   const { store, srv, post } = setup();
   try {
-    const res = await post(delivery('hook.stop', { instance_id: '77f7cfb4-orphan', schema_version: 9 }));
+    const res = await post(delivery('hook.stop', { agent_id: '77f7cfb4-orphan', schema_version: 10 }));
     // 2xx (busd must not retry a ghost forever), but honestly not consumed…
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'no_such_instance' });
+    expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'no_such_agent' });
     // …and the whole point: no phantom row, no stop_reported, no dedupe.
     expect(await store.count()).toBe(0);
   } finally {
@@ -217,9 +298,9 @@ test('a GHOST stop is acked-not-consumed with zero footprint — refused at admi
 test('schema-version mismatch inside the stop payload refuses consumption, acks the delivery', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 9, identity: 'i1', persona: 'p', tint: '#1' });
+    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
     const before = await store.count();
-    const res = await post(delivery('hook.stop', { instance_id: 'i1', schema_version: 999 }));
+    const res = await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 1099 }));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'schema_version_mismatch' });
     expect(await store.count()).toBe(before);
@@ -228,32 +309,12 @@ test('schema-version mismatch inside the stop payload refuses consumption, acks 
   }
 });
 
-test('a delivered hook.user_prompt_submit with comm context asserts delivery via the ruled prompt path', async () => {
-  const { d, srv, post } = setup();
-  try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 9, identity: 'src', persona: 'p1', tint: '#1' });
-    await d.launch({ seat_id: 'palace:N', schema_version: 9, identity: 'dst', persona: 'p2', tint: '#2' });
-    const acc = await d.comm({ schema_version: 9, source_instance_id: 'src', target: 'dst', message: 'hi', ask: false, reply: false });
-    const res = await post(
-      delivery('hook.user_prompt_submit', {
-        instance_id: 'dst',
-        hook_event_name: 'UserPromptSubmit',
-        prompt: `[tx comm ${acc.message_id} from src]\nhi`,
-      }),
-    );
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, consumed: true, receipt: { ok: true, asserted: true } });
-  } finally {
-    srv.stop(true);
-  }
-});
-
 test('a NATURAL prompt-submit (no comm-message context) is acked-not-consumed — a daily hook can never wedge the lane', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 9, identity: 'i1', persona: 'p', tint: '#1' });
+    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
     const before = await store.count();
-    const res = await post(delivery('hook.user_prompt_submit', { instance_id: 'i1', schema_version: 9 }));
+    const res = await post(delivery('hook.user_prompt_submit', { agent_id: 'i1', schema_version: 10 }));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'message_target_mismatch' });
     expect(await store.count()).toBe(before);
@@ -295,10 +356,10 @@ test('an unconsumed payload carrying raw-tmux-id-shaped text is acked — arbitr
 test('the membrane still guards what txd INGESTS: a consumed-type payload with a raw tmux id is refused, acked, zero footprint', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 9, identity: 'i1', persona: 'p', tint: '#1' });
+    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
     const before = await store.count();
     const res = await post(
-      delivery('hook.stop', { instance_id: 'i1', schema_version: 9, content: 'leaked pane %7' }),
+      delivery('hook.stop', { agent_id: 'i1', schema_version: 10, content: 'leaked pane %7' }),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'tmux_id_refused' });
@@ -315,8 +376,8 @@ test('envelope/contract skew is the ONE loud non-2xx: malformed deliveries and v
     expect(res.status).toBe(422);
     expect(((await res.json()) as { error: string }).error).toBe('invalid_bus_delivery');
 
-    const valid = delivery('hook.stop', { instance_id: 'i1', schema_version: 9 });
-    res = await post({ ...valid, schema_version: 999 });
+    const valid = delivery('hook.stop', { agent_id: 'i1', schema_version: 10 });
+    res = await post({ ...valid, schema_version: 1099 });
     expect(res.status).toBe(422);
     expect(await res.json()).toEqual({ ok: false, error: 'invalid_bus_delivery', field: '$.schema_version' });
 

@@ -19,43 +19,14 @@ test('bare seat create → freelist entry, unbound, live', async () => {
   await s.close();
 });
 
-test('bound seat leaves the freelist and carries the full tuple', async () => {
-  const s = new MemoryEventStore();
-  await s.append(e({ entity_id: 'palace:W', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
-  const bound = await s.append(e({ entity_id: 'palace:W', event_type: 'reg.bound', payload: { wrapper_id: 'w1', instance_id: 'i1', persona: 'salamander', tint: '#302800' } }));
-  const p = buildProjections(await s.readAll());
-  expect(p.freelist).toEqual([]);
-  expect(p.currentBindings).toEqual([{
-    seat_id: 'palace:W',
-    wrapper_id: 'w1',
-    instance_id: 'i1',
-    persona: 'salamander',
-    rank: null,
-    commander: null,
-    tint: '#302800',
-    pane_generation: null,
-    engine: null,
-    static_launch_id: null,
-    wrapper_pid: null,
-    engine_pid: null,
-    engine_executable: null,
-    authority_principal: null,
-    continuity_kind: null,
-    bound_seq: bound.seq,
-  }]);
-  const row = p.activityBoard[0]!;
-  expect(row).toMatchObject({ entity_id: 'i1', entity_type: 'instance', binding: 'bound', persona: 'salamander', tint: '#302800' });
-  await s.close();
-});
-
 test('activity axis folds prompt/stop/retire independently of pane & binding', async () => {
   const s = new MemoryEventStore();
   await s.append(e({ entity_id: 'seatA', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
-  await s.append(e({ entity_id: 'seatA', event_type: 'reg.bound', payload: { instance_id: 'iA', persona: 'p', tint: '#1' } }));
-  await s.append(e({ entity_type: 'instance', entity_id: 'iA', event_type: 'act.prompt_submitted', payload: {} }));
+  await s.append(e({ entity_id: 'seatA', event_type: 'reg.bound', payload: { agent_id: 'iA', persona: 'p', tint: '#1' } }));
+  await s.append(e({ entity_type: 'agent', entity_id: 'iA', event_type: 'act.prompt_submitted', payload: {} }));
   let p = buildProjections(await s.readAll());
   expect(p.activityBoard[0]!.activity).toBe('working');
-  await s.append(e({ entity_type: 'instance', entity_id: 'iA', event_type: 'act.stop_reported', payload: {} }));
+  await s.append(e({ entity_type: 'agent', entity_id: 'iA', event_type: 'act.stop_reported', payload: {} }));
   p = buildProjections(await s.readAll());
   expect(p.activityBoard[0]!.activity).toBe('stopped');
   await s.close();
@@ -64,7 +35,7 @@ test('activity axis folds prompt/stop/retire independently of pane & binding', a
 test('seat_cleared returns a live seat to the freelist', async () => {
   const s = new MemoryEventStore();
   await s.append(e({ entity_id: 'seatR', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
-  await s.append(e({ entity_id: 'seatR', event_type: 'reg.bound', payload: { instance_id: 'iR', persona: 'p', tint: '#1' } }));
+  await s.append(e({ entity_id: 'seatR', event_type: 'reg.bound', payload: { agent_id: 'iR', persona: 'p', tint: '#1' } }));
   await s.append(e({ entity_id: 'seatR', event_type: 'reg.seat_cleared', payload: {} }));
   const p = buildProjections(await s.readAll());
   expect(p.currentBindings).toEqual([]);

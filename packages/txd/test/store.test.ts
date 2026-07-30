@@ -30,7 +30,7 @@ describe('MemoryEventStore', () => {
     let tick = 0;
     const store = new MemoryEventStore(() => `2026-07-12T00:00:0${tick++}.000Z`);
     const a = await store.append(ev());
-    const b = await store.append(ev({ event_type: 'reg.bound', payload: { instance_id: 'i', persona: 'p', tint: '#111' } }));
+    const b = await store.append(ev({ event_type: 'reg.bound', payload: { agent_id: 'i', persona: 'p', tint: '#111' } }));
     expect(a.seq).toBe(1);
     expect(b.seq).toBe(2);
     expect(a.recorded_at).toBe('2026-07-12T00:00:00.000Z');
@@ -134,7 +134,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
 
   test('connect migrates a pristine database and append assigns monotonic seq + recorded_at', async () => {
     const a = await store.append(ev());
-    const b = await store.append(ev({ event_type: 'reg.bound', payload: { instance_id: 'i', persona: 'p', tint: '#111' } }));
+    const b = await store.append(ev({ event_type: 'reg.bound', payload: { agent_id: 'i', persona: 'p', tint: '#111' } }));
     expect(b.seq).toBe(a.seq + 1);
     expect(a.recorded_at).toBe('2026-07-12T00:00:00.000Z');
     expect(b.recorded_at).toBe('2026-07-12T00:00:01.000Z');

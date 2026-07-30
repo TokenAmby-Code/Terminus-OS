@@ -18,8 +18,8 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 9 (v9 = typed plan-mode transitions)", () => {
-    expect(SCHEMA_VERSION).toBe(9);
+  test("schema_version pins at 10 (registrationd-owned identity)", () => {
+    expect(SCHEMA_VERSION).toBe(10);
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
@@ -48,18 +48,18 @@ describe("txd lifecycle vocabulary", () => {
 
   test("mode transition input is semantic and logical, never raw tmux input", () => {
     expect(ModeTransitionRequestSchema.parse({
-      schema_version: 9,
+      schema_version: 10,
       target: "council:custodes",
       intent: "enter_plan",
       trigger: "preplan",
     })).toEqual({
-      schema_version: 9,
+      schema_version: 10,
       target: "council:custodes",
       intent: "enter_plan",
       trigger: "preplan",
     });
     expect(() => ModeTransitionRequestSchema.parse({
-      schema_version: 9,
+      schema_version: 10,
       target: "council:custodes",
       intent: "send_keys",
       trigger: "operator",
@@ -69,7 +69,7 @@ describe("txd lifecycle vocabulary", () => {
       { keys: ["BTab"] },
     ]) {
       expect(() => ModeTransitionRequestSchema.parse({
-        schema_version: 9,
+        schema_version: 10,
         target: "council:custodes",
         intent: "enter_plan",
         trigger: "preplan",
@@ -91,14 +91,14 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test('tmux lifecycle ingress accepts only typed pane events with canonical page input', () => {
-    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 9, event: 'pane-exited', page: 'palace' })).toEqual({
-      schema_version: 9, event: 'pane-exited', page: 'palace',
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-exited', page: 'palace' })).toEqual({
+      schema_version: 10, event: 'pane-exited', page: 'palace',
     });
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 9, event: 'pane-vanished', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-vanished', page: 'palace' })).toThrow();
   });
 
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
-    const base = { schema_version: 9, source_instance_id: "source", target: "target", ask: false, reply: false };
+    const base = { schema_version: 10, source_agent_id: "source", target: "target", ask: false, reply: false };
     expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
     expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
@@ -116,7 +116,6 @@ describe("txd lifecycle vocabulary", () => {
       events: 0,
       open_contradictions: 0,
       tmux_reachable: true,
-      static_personas: [],
       tints: [],
     };
     expect(HealthSchema.parse(health).service).toBe("txd");

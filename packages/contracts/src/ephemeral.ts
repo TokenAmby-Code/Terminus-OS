@@ -8,7 +8,7 @@ import { z } from "zod";
  * the disabled state into success, a no-op, an automatic reprompt, or an automatic retry.
  *
  * Revival is a deliberate contract replacement, not a relaxation of this schema. Before a
- * replacement state can ship, the parked canonical instance-id resolution fix must be
+ * replacement state can ship, the parked canonical agent-id resolution fix must be
  * implemented in the delivery path.
  */
 

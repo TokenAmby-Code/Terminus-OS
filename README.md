@@ -12,7 +12,7 @@ language-neutral service boundaries.
 packages/
   contracts/          @terminus-os/contracts
     src/
-      registration.ts   instance registration row  (foundation)
+      registration.ts   agent registration row  (foundation)
       bind.ts           bind lifecycle state machine (foundation)
       ledger.ts         wrapper-ledger seat occupancy (foundation)
       envelope.ts       generic ok/error loopback envelope
@@ -45,7 +45,7 @@ not yet contain a daemon endpoint or other runtime enforcement path; the contrac
 adds none.
 
 Revival requires replacing the temporary contract state **and** implementing the parked
-canonical instance-ID resolution fix in the delivery path. The temporary state is not a
+canonical agent-ID resolution fix in the delivery path. The temporary state is not a
 permanent prohibition and must not be bypassed with a compatibility shim, silent no-op, prompt
 hook, or retry worker.
 

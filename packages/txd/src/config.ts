@@ -22,13 +22,12 @@ export type DaemonConfig = {
   rotationSignalFifo: string;
   /** Sanctioned Fleet wrapper executable. Identity remains compiled into txd. */
   agentWrapper: string;
-  /** Machine-local root containing rendered persona workspaces. */
-  personaWorkspaceRoot: string;
   /** Generated physical-only view of Token-Fleet's canonical pane allocation. */
   physicalRegistration?: {
     busUrl: string;
     generation: string;
     digest: string;
+    perpetual: Record<string, 'claude' | 'codex'>;
   };
 };
 
@@ -57,6 +56,18 @@ const HARD_DEFAULTS = {
 function envDefaults(): PartialConfig {
   const socket_dir = process.env.TXD_DB_SOCKET_DIR;
   const database = process.env.TXD_DB_DATABASE;
+  const registration = {
+    busUrl: process.env.TXD_REGISTRATION_BUS_URL,
+    generation: process.env.TXD_REGISTRATION_CONFIG_GENERATION,
+    digest: process.env.TXD_REGISTRATION_CONFIG_DIGEST,
+    perpetual: process.env.TXD_PERPETUAL_AGENTS
+      ? JSON.parse(process.env.TXD_PERPETUAL_AGENTS) as Record<string, 'claude' | 'codex'>
+      : undefined,
+  };
+  const registrationSeen = Object.values(registration).some((value) => value !== undefined);
+  if (registrationSeen && Object.values(registration).some((value) => !value)) {
+    throw new Error('txd config error: physical registration environment is incomplete');
+  }
   return {
     bind: process.env.TXD_BIND,
     port: process.env.TXD_PORT ? Number(process.env.TXD_PORT) : undefined,
@@ -73,8 +84,9 @@ function envDefaults(): PartialConfig {
     rotationLockFile: process.env.TXD_ROTATION_LOCK_FILE,
     rotationSignalFifo: process.env.TXD_ROTATION_SIGNAL_FIFO,
     agentWrapper: process.env.TXD_AGENT_WRAPPER,
-    personaWorkspaceRoot: process.env.TXD_PERSONA_WORKSPACE_ROOT,
-    physicalRegistration: undefined,
+    physicalRegistration: registrationSeen
+      ? registration as DaemonConfig['physicalRegistration']
+      : undefined,
   };
 }
 
@@ -89,8 +101,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     rotationLockFile: raw.rotationLockFile ?? env.rotationLockFile ?? HARD_DEFAULTS.rotationLockFile,
     rotationSignalFifo: raw.rotationSignalFifo ?? env.rotationSignalFifo ?? HARD_DEFAULTS.rotationSignalFifo,
     agentWrapper: raw.agentWrapper ?? env.agentWrapper,
-    personaWorkspaceRoot: raw.personaWorkspaceRoot ?? env.personaWorkspaceRoot,
-    physicalRegistration: raw.physicalRegistration,
+    physicalRegistration: raw.physicalRegistration ?? env.physicalRegistration,
   };
 
   if (!cfg.bind) throw new Error('txd config error: bind is required');
@@ -107,7 +118,6 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
   if (!cfg.rotationLockFile) throw new Error('txd config error: rotationLockFile is required');
   if (!cfg.rotationSignalFifo) throw new Error('txd config error: rotationSignalFifo is required');
   if (!cfg.agentWrapper) throw new Error('txd config error: agentWrapper is required');
-  if (!cfg.personaWorkspaceRoot) throw new Error('txd config error: personaWorkspaceRoot is required');
   if (cfg.physicalRegistration !== undefined) {
     const physical = cfg.physicalRegistration as DaemonConfig['physicalRegistration'];
     let busUrl: URL;
@@ -124,6 +134,12 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     }
     if (!/^[0-9a-f]{64}$/.test(physical.digest)) {
       throw new Error('txd config error: physicalRegistration.digest must be a sha256 hex digest');
+    }
+    if (!physical.perpetual || typeof physical.perpetual !== 'object'
+        || Array.isArray(physical.perpetual)
+        || Object.entries(physical.perpetual).some(([pane, engine]) =>
+          !pane || (engine !== 'claude' && engine !== 'codex'))) {
+      throw new Error('txd config error: physicalRegistration.perpetual must map panes to engines');
     }
   }
 

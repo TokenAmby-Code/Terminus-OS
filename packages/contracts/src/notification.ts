@@ -41,8 +41,8 @@ const AdministratumNotification = z.strictObject({
   notification_class: z.literal("administratum"),
   event: EventIdentity.extend({
     kind: z.enum([
-      "instance_started",
-      "instance_stopped",
+      "agent_started",
+      "agent_stopped",
       "health_changed",
       "delivery_succeeded",
       "delivery_failed",
@@ -120,8 +120,8 @@ const ObservationBase = {
 };
 
 const SimpleObservationKind = z.enum([
-  "instance_started",
-  "instance_stopped",
+  "agent_started",
+  "agent_stopped",
   "health_changed",
   "delivery_succeeded",
   "delivery_failed",

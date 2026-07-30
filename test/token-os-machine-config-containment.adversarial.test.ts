@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const root = join(import.meta.dir, "..");
@@ -22,7 +22,9 @@ describe("adversarial: Token-OS machine configuration containment", () => {
     const violations: string[] = [];
     for (const path of result.stdout.toString().split("\0").filter(Boolean)) {
       if (path === self) continue;
-      const content = readFileSync(join(root, path), "utf8");
+      const absolute = join(root, path);
+      if (!existsSync(absolute)) continue;
+      const content = readFileSync(absolute, "utf8");
       for (const pattern of forbidden) {
         if (pattern.test(content)) violations.push(`${path}: forbidden archived-platform surface ${pattern}`);
       }

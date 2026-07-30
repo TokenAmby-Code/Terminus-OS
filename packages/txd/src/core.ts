@@ -32,6 +32,11 @@ import {
   type OpenContradiction,
   PaneAttestedSchema,
   PaneRefusedSchema,
+  PhysicalDeclarationSchema,
+  PlacementAttestedSchema,
+  AgentSchema,
+  type Agent,
+  type PhysicalDeclaration,
   type Provenance,
   type ProvenanceSource,
   type ReconcileResponse,
@@ -40,8 +45,6 @@ import {
   type StopRefusal,
   type StopRefusalReason,
   type StopRequest,
-  type StaticLaunchHandshake,
-  type StaticLaunchHandshakeResponse,
   type SubscribeRequest,
   type SubscribeResponse,
   type TmuxLifecycleEventRequest,
@@ -54,13 +57,7 @@ import {
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections } from './projections.ts';
-import {
-  DECOMMISSIONED_COUNCIL_SEATS,
-  isTxdPage,
-  STATIC_PERSONAS,
-  TXD_ESTATE,
-  TXD_WINDOWS,
-} from './estate.ts';
+import { DECOMMISSIONED_COUNCIL_SEATS, isTxdPage, TXD_ESTATE, TXD_WINDOWS } from './estate.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 
@@ -70,18 +67,18 @@ import type { TmuxControlPlane } from './tmux.ts';
 export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as const;
 
 type Now = () => string;
-export type StaticLaunchRuntime = {
-  agentWrapper: string;
-  personaWorkspaceRoot: string;
-  acknowledgeUrl: string;
-};
 export type PhysicalRegistrationRuntime = {
   machine: string;
   configuration: { generation: string; digest: string };
-  publish: (eventType: 'agent.pane_attested' | 'agent.pane_refused', payload: Record<string, unknown>) => Promise<unknown>;
+  agentWrapper: string;
+  perpetual: Record<string, 'claude' | 'codex'>;
+  publish: (
+    eventType: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested',
+    payload: Record<string, unknown>,
+  ) => Promise<unknown>;
 };
 
-const COUNCIL_MIGRATION_ID = 'council-static-personas';
+const COUNCIL_MIGRATION_ID = 'council-four-seat-layout';
 
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
@@ -92,7 +89,6 @@ export class Daemon {
     private tmux: TmuxControlPlane,
     private now: Now = () => new Date().toISOString(),
     private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
-    private staticRuntime: StaticLaunchRuntime | null = null,
     private physicalRegistration: PhysicalRegistrationRuntime | null = null,
   ) {}
 
@@ -130,6 +126,207 @@ export class Daemon {
     });
     await this.physicalRegistration.publish('agent.pane_attested', attestation);
     return { attested: true, reason: null };
+  }
+
+  recordPhysicalDeclaration(input: PhysicalDeclaration): Promise<void> {
+    return this.locked(async () => {
+      if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
+      const declaration = PhysicalDeclarationSchema.parse(input);
+      if (declaration.configuration.generation !== this.physicalRegistration.configuration.generation
+          || declaration.configuration.digest !== this.physicalRegistration.configuration.digest) {
+        throw new Error('physical_configuration_skew');
+      }
+      const observed = await this.tmux.attestWrapperPlacement(declaration.wrapper_pid);
+      if (!observed.ok
+          || observed.pane_id !== declaration.pane_id
+          || observed.pane_generation !== declaration.pane_generation) {
+        throw new Error('physical_declaration_contradicted');
+      }
+      const projections = await this.projections();
+      const existing = projections.physicalDeclarations.get(declaration.agent_id);
+      if (existing) {
+        if (JSON.stringify(existing) !== JSON.stringify(declaration)) {
+          throw new Error('physical_declaration_conflict');
+        }
+        return;
+      }
+      if (projections.currentBindings.some((binding) =>
+        binding.agent_id === declaration.agent_id || binding.seat_id === declaration.pane_id)) {
+        throw new Error('physical_binding_conflict');
+      }
+      await this.store.append({
+        entity_type: 'agent',
+        entity_id: declaration.agent_id,
+        event_type: 'reg.physical_declared',
+        payload: declaration,
+        provenance: this.prov('observer', null),
+        occurred_at: this.now(),
+      });
+    });
+  }
+
+  attestEngineSession(agentId: string, receipt: string | null): Promise<void> {
+    return this.locked(async () => {
+      if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
+      let projections = await this.projections();
+      const declaration = projections.physicalDeclarations.get(agentId);
+      if (!declaration) {
+        const already = projections.currentBindings.find((binding) => binding.agent_id === agentId);
+        if (already?.registered) return;
+        throw new Error('physical_declaration_missing');
+      }
+      let binding = projections.currentBindings.find((candidate) => candidate.agent_id === agentId);
+      if (!binding) {
+        const wrapper = await this.tmux.attestWrapperPlacement(declaration.wrapper_pid);
+        if (!wrapper.ok
+            || wrapper.pane_id !== declaration.pane_id
+            || wrapper.pane_generation !== declaration.pane_generation) {
+          throw new Error('wrapper_placement_changed');
+        }
+        const engine = await this.tmux.attestEnginePlacement(declaration.wrapper_pid);
+        if (!engine.ok) throw new Error(engine.reason);
+        const occupied = projections.currentBindings.some((candidate) =>
+          candidate.seat_id === declaration.pane_id || candidate.agent_id === declaration.agent_id,
+        );
+        if (occupied) throw new Error('physical_binding_conflict');
+        const provenance = this.prov('observer', receipt);
+        const occurredAt = this.now();
+        const prepareId = await this.prepareBinding(
+          declaration.pane_id,
+          declaration.pane_generation,
+          {
+            agent_id: declaration.agent_id,
+            birth_generation: declaration.birth_generation,
+            engine: declaration.engine,
+            wrapper_pid: declaration.wrapper_pid,
+            engine_pid: engine.engine_pid,
+            engine_executable: engine.engine_binary,
+            cwd: engine.cwd,
+            configuration_generation: declaration.configuration.generation,
+            configuration_digest: declaration.configuration.digest,
+            tint: declaration.tint,
+          },
+          provenance,
+          occurredAt,
+        );
+        const tintApplied = declaration.tint === null
+          ? await this.tmux.setSeatTint(declaration.pane_id, null)
+          : await this.applyBindingTint(declaration.pane_id, declaration.tint);
+        if (!tintApplied) {
+          await this.abortBinding(
+            declaration.pane_id,
+            prepareId,
+            'tint_attestation_failed',
+            provenance,
+          );
+          throw new Error('tint_attestation_failed');
+        }
+        await this.store.append({
+          entity_type: 'seat',
+          entity_id: declaration.pane_id,
+          event_type: 'reg.bound',
+          payload: {
+            agent_id: declaration.agent_id,
+            birth_generation: declaration.birth_generation,
+            persona: null,
+            rank: null,
+            commander: null,
+            tint: declaration.tint,
+            pane_generation: declaration.pane_generation,
+            engine: declaration.engine,
+            wrapper_pid: declaration.wrapper_pid,
+            engine_pid: engine.engine_pid,
+            engine_executable: engine.engine_binary,
+            cwd: engine.cwd,
+            configuration_generation: declaration.configuration.generation,
+            configuration_digest: declaration.configuration.digest,
+            binding_prepare_id: prepareId,
+          },
+          provenance,
+          occurred_at: occurredAt,
+        });
+        projections = await this.projections();
+        binding = projections.currentBindings.find((candidate) => candidate.agent_id === agentId);
+      }
+      if (!binding?.agent_id
+          || !binding.wrapper_pid
+          || !binding.engine_pid
+          || !binding.engine_executable
+          || !binding.cwd
+          || !binding.configuration_generation
+          || !binding.configuration_digest) {
+        throw new Error('physical_binding_incomplete');
+      }
+      const placement = PlacementAttestedSchema.parse({
+        schema_version: 1,
+        agent_id: binding.agent_id,
+        birth_generation: declaration.birth_generation,
+        pane_id: binding.seat_id,
+        pane_generation: binding.pane_generation,
+        configuration: {
+          generation: binding.configuration_generation,
+          digest: binding.configuration_digest,
+        },
+        machine: this.physicalRegistration.machine,
+        kind: 'local',
+        wrapper_pid: binding.wrapper_pid,
+        engine_pid: binding.engine_pid,
+        engine_binary: binding.engine_executable,
+        cwd: binding.cwd,
+        transport_witnesses: { session_start_receipt: receipt },
+      });
+      await this.physicalRegistration.publish('agent.placement_attested', placement);
+    });
+  }
+
+  activateRegisteredAgent(input: Agent): Promise<void> {
+    return this.locked(async () => {
+      const agent = AgentSchema.parse(input);
+      const projections = await this.projections();
+      const binding = projections.currentBindings.find(
+        (candidate) => candidate.agent_id === agent.agent_id,
+      );
+      if (!binding
+          || !this.physicalRegistration
+          || binding.birth_generation !== agent.birth_generation
+          || binding.seat_id !== agent.placement.pane_id
+          || binding.pane_generation !== agent.placement.pane_generation
+          || binding.wrapper_pid !== agent.placement.wrapper_pid
+          || binding.engine_pid !== agent.placement.engine_pid
+          || binding.engine !== agent.engine
+          || binding.engine_executable !== agent.launch.engine_binary
+          || binding.cwd !== agent.placement.cwd
+          || binding.configuration_generation !== agent.configuration.generation
+          || binding.configuration_digest !== agent.configuration.digest
+          || agent.placement.machine !== this.physicalRegistration.machine
+          || agent.placement.kind !== 'local'
+          || binding.tint !== (agent.persona?.tint ?? null)) {
+        throw new Error('registered_agent_physical_conflict');
+      }
+      if (binding.registered) {
+        if (binding.persona !== (agent.persona?.persona ?? null)
+            || binding.rank !== (agent.persona?.rank ?? null)
+            || binding.commander !== (agent.persona?.commander ?? null)) {
+          throw new Error('registered_agent_package_conflict');
+        }
+        return;
+      }
+      await this.store.append({
+        entity_type: 'agent',
+        entity_id: agent.agent_id,
+        event_type: 'reg.agent_registered',
+        payload: {
+          birth_generation: agent.birth_generation,
+          pane_id: agent.placement.pane_id,
+          pane_generation: agent.placement.pane_generation,
+          persona: agent.persona?.persona ?? null,
+          rank: agent.persona?.rank ?? null,
+          commander: agent.persona?.commander ?? null,
+        },
+        provenance: this.prov('observer', null),
+        occurred_at: this.now(),
+      });
+    });
   }
 
   /** Serialize a mutating op — the single-writer discipline. */
@@ -399,32 +596,34 @@ export class Daemon {
 
   private commTargets(identity: string, proj: Projections): CommTarget[] {
     const matches = proj.currentBindings.filter((b) =>
-      b.instance_id === identity || b.persona === identity || b.seat_id === identity,
+      b.registered
+      && (b.agent_id === identity || b.persona === identity || b.seat_id === identity),
     );
-    return matches.map((b) => ({ instance_id: b.instance_id!, seat_id: b.seat_id, persona: b.persona }));
+    return matches.map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
   }
 
   comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
-      if (!proj.currentBindings.some((b) => b.instance_id === req.source_instance_id)) throw new Error('source_not_bound');
+      if (!proj.currentBindings.some((b) =>
+        b.registered && b.agent_id === req.source_agent_id)) throw new Error('source_not_registered');
       const events = await this.store.readAll();
-      let targetIdentity = req.target;
+      let targetIdentity = req.target === '--self' ? req.source_agent_id : req.target;
       let replyingToAsk: string | null = null;
       if (req.reply) {
         const inbound = [...events].reverse().find((e) => e.event_type === 'reg.comm_accepted'
-          && Array.isArray(e.payload.target_instance_ids)
-          && e.payload.target_instance_ids.includes(req.source_instance_id));
+          && Array.isArray(e.payload.target_agent_ids)
+          && e.payload.target_agent_ids.includes(req.source_agent_id));
         if (!inbound) throw new Error('no_recent_inbound_sender');
-        targetIdentity = String(inbound.payload.source_instance_id);
+        targetIdentity = String(inbound.payload.source_agent_id);
         replyingToAsk = typeof inbound.payload.ask_id === 'string' ? inbound.payload.ask_id : null;
       }
       let targets: CommTarget[];
       if (req.page) {
         targets = proj.currentBindings
-          .filter((b) => b.seat_id.split(':', 1)[0] === req.page)
-          .map((b) => ({ instance_id: b.instance_id!, seat_id: b.seat_id, persona: b.persona }));
+          .filter((b) => b.registered && b.seat_id.split(':', 1)[0] === req.page)
+          .map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
         if (targets.length === 0) throw new Error(`page_absent: ${req.page}`);
       } else {
         targets = this.commTargets(targetIdentity!, proj);
@@ -438,22 +637,22 @@ export class Daemon {
       const askId = req.ask ? crypto.randomUUID() : null;
       const occurred_at = this.now();
       const accepted = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted', payload: {
-        source_instance_id: req.source_instance_id, target_instance_ids: targets.map((t) => t.instance_id), targets,
+        source_agent_id: req.source_agent_id, target_agent_ids: targets.map((t) => t.agent_id), targets,
         ask_id: askId, reply_to_ask_id: replyingToAsk, message: req.message,
       }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
       const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
       const event_ids = [accepted.seq, snapshot.seq];
       for (const target of targets) {
-        const frame = `[tx comm ${messageId} from ${req.source_instance_id}${askId ? ` ask ${askId}` : ''}]\n${req.message}`;
+        const frame = `[tx comm ${messageId} from ${req.source_agent_id}${askId ? ` ask ${askId}` : ''}]\n${req.message}`;
         const sent = await this.tmux.sendToSeat(target.seat_id, frame);
-        if (sent.verdict !== 'delivered') throw new Error(`transport_${sent.verdict}: ${target.instance_id}`);
+        if (sent.verdict !== 'delivered') throw new Error(`transport_${sent.verdict}: ${target.agent_id}`);
         const event = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
-          payload: { target_instance_id: target.instance_id, seat_id: target.seat_id, bytes: sent.bytes }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+          payload: { target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
       }
-      if (replyingToAsk) await this.assertCallback(replyingToAsk, req.source_instance_id, req.message, 'reply', null, transportReceipt);
-      return { ok: true, message_id: messageId, ask_id: askId, source_instance_id: req.source_instance_id, targets, bytes_sent: true, event_ids };
+      if (replyingToAsk) await this.assertCallback(replyingToAsk, req.source_agent_id, req.message, 'reply', null, transportReceipt);
+      return { ok: true, message_id: messageId, ask_id: askId, source_agent_id: req.source_agent_id, targets, bytes_sent: true, event_ids };
     });
   }
 
@@ -467,20 +666,22 @@ export class Daemon {
       }
       const proj = await this.projections();
       const matches = proj.currentBindings.filter((binding) =>
-        binding.instance_id === req.target
-        || binding.persona === req.target
-        || binding.seat_id === req.target,
+        binding.registered && (
+          binding.agent_id === req.target
+          || binding.persona === req.target
+          || binding.seat_id === req.target
+        ),
       );
       if (matches.length === 0) throw new Error(`identity_absent: ${req.target}`);
       if (matches.length > 1) throw new Error(`identity_ambiguous: ${req.target}`);
       const binding = matches[0]!;
-      if (!binding.instance_id || !binding.engine) {
+      if (!binding.agent_id || !binding.engine) {
         throw new Error(`engine_unattested: ${req.target}`);
       }
       const occurred_at = this.now();
       const requested = await this.store.append({
-        entity_type: 'instance',
-        entity_id: binding.instance_id,
+        entity_type: 'agent',
+        entity_id: binding.agent_id,
         event_type: 'act.mode_transition_requested',
         payload: {
           seat_id: binding.seat_id,
@@ -505,8 +706,8 @@ export class Daemon {
         };
       }
       const terminal = await this.store.append({
-        entity_type: 'instance',
-        entity_id: binding.instance_id,
+        entity_type: 'agent',
+        entity_id: binding.agent_id,
         event_type: outcome.verified
           ? 'act.mode_transition_attested'
           : 'act.mode_transition_failed',
@@ -529,7 +730,7 @@ export class Daemon {
         ok: outcome.verified,
         target: req.target,
         seat_id: binding.seat_id,
-        instance_id: binding.instance_id,
+        agent_id: binding.agent_id,
         engine: binding.engine,
         intent: req.intent,
         trigger: req.trigger,
@@ -540,18 +741,18 @@ export class Daemon {
     });
   }
 
-  private async assertCallback(askId: string, targetInstance: string, content: string, source: 'reply' | 'stop', stopEventId: string | null, receipt: string | null): Promise<void> {
+  private async assertCallback(askId: string, targetAgent: string, content: string, source: 'reply' | 'stop', stopEventId: string | null, receipt: string | null): Promise<void> {
     const events = await this.store.readAll();
     const snapshot = events.find((e) => e.entity_id === askId && e.event_type === 'reg.comm_target_snapshotted');
     const targets = (snapshot?.payload.targets ?? []) as CommTarget[];
-    if (!targets.some((t) => t.instance_id === targetInstance)) return;
-    if (events.some((e) => e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === askId && e.payload.target_instance_id === targetInstance)) return;
+    if (!targets.some((t) => t.agent_id === targetAgent)) return;
+    if (events.some((e) => e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === askId && e.payload.target_agent_id === targetAgent)) return;
     const accepted = events.find((e) => e.entity_id === snapshot?.payload.message_id && e.event_type === 'reg.comm_accepted');
-    const subscriber = String(accepted?.payload.source_instance_id ?? '');
-    const assertionId = source === 'stop' ? `${stopEventId ?? 'stop'}:${subscriber}:${targetInstance}` : `${askId}:${targetInstance}`;
+    const subscriber = String(accepted?.payload.source_agent_id ?? '');
+    const assertionId = source === 'stop' ? `${stopEventId ?? 'stop'}:${subscriber}:${targetAgent}` : `${askId}:${targetAgent}`;
     if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_callback_asserted')) return;
     await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_callback_asserted',
-      payload: { ask_id: askId, subscriber_instance_id: subscriber, target_instance_id: targetInstance, content, source, stop_event_id: stopEventId }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
+      payload: { ask_id: askId, subscriber_agent_id: subscriber, target_agent_id: targetAgent, content, source, stop_event_id: stopEventId }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
     this.wakeAsk(askId);
   }
 
@@ -559,19 +760,19 @@ export class Daemon {
     return this.locked(async () => {
       const events = await this.store.readAll();
       const accepted = events.find((e) => e.entity_id === hook.message_id && e.event_type === 'reg.comm_accepted');
-      if (!accepted || !(accepted.payload.target_instance_ids as unknown[]).includes(hook.instance_id)) throw new Error('message_target_mismatch');
-      const assertionId = `${hook.message_id}:${hook.instance_id}`;
+      if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) throw new Error('message_target_mismatch');
+      const assertionId = `${hook.message_id}:${hook.agent_id}`;
       if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) return { ok: true, asserted: false };
       await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
-        payload: { message_id: hook.message_id, target_instance_id: hook.instance_id, source_instance_id: accepted.payload.source_instance_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
+        payload: { message_id: hook.message_id, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
       const proj = await this.projections();
-      const sender = proj.currentBindings.find((b) => b.instance_id === accepted.payload.source_instance_id);
-      if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${hook.message_id} target ${hook.instance_id}]`);
+      const sender = proj.currentBindings.find((b) => b.agent_id === accepted.payload.source_agent_id);
+      if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${hook.message_id} target ${hook.agent_id}]`);
       return { ok: true, asserted: true };
     });
   }
 
-  commStop(instanceId: string, content: string, stopEventId: string | null, receipt: string | null): Promise<void> {
+  commStop(agentId: string, content: string, stopEventId: string | null, receipt: string | null): Promise<void> {
     return this.locked(async () => {
       const events = await this.store.readAll();
       const askIds = new Set(events
@@ -579,8 +780,8 @@ export class Daemon {
         .map((e) => String(e.payload.ask_id)));
       const asks = events.filter((e) => e.event_type === 'reg.comm_target_snapshotted'
         && askIds.has(e.entity_id)
-        && (e.payload.targets as CommTarget[]).some((t) => t.instance_id === instanceId));
-      for (const ask of asks) await this.assertCallback(ask.entity_id, instanceId, content, 'stop', stopEventId, receipt);
+        && (e.payload.targets as CommTarget[]).some((t) => t.agent_id === agentId));
+      for (const ask of asks) await this.assertCallback(ask.entity_id, agentId, content, 'stop', stopEventId, receipt);
     });
   }
 
@@ -592,15 +793,15 @@ export class Daemon {
       if (!snapshot) throw new Error('ask_absent');
       const targets = snapshot.payload.targets as CommTarget[];
       const accepted = events.find((e) => e.entity_id === snapshot.payload.message_id && e.event_type === 'reg.comm_accepted');
-      if (accepted?.payload.source_instance_id !== req.subscriber_instance_id) throw new Error('ask_subscriber_mismatch');
-      const targetIds = new Set(targets.map((t) => t.instance_id));
+      if (accepted?.payload.source_agent_id !== req.subscriber_agent_id) throw new Error('ask_subscriber_mismatch');
+      const targetIds = new Set(targets.map((t) => t.agent_id));
       const callbacks: CommCallback[] = events.filter((e) => e.event_type === 'act.comm_callback_asserted' && (
-        e.payload.ask_id === req.ask_id || (e.payload.source === 'stop' && e.payload.subscriber_instance_id === req.subscriber_instance_id && targetIds.has(String(e.payload.target_instance_id)))
+        e.payload.ask_id === req.ask_id || (e.payload.source === 'stop' && e.payload.subscriber_agent_id === req.subscriber_agent_id && targetIds.has(String(e.payload.target_agent_id)))
       )).map((e) => ({
-        target: targets.find((t) => t.instance_id === e.payload.target_instance_id)!, content: String(e.payload.content), assertion_event_id: e.seq, source: e.payload.source as 'reply' | 'stop',
+        target: targets.find((t) => t.agent_id === e.payload.target_agent_id)!, content: String(e.payload.content), assertion_event_id: e.seq, source: e.payload.source as 'reply' | 'stop',
       }));
-      const done = new Set(callbacks.map((c) => c.target.instance_id));
-      const outstanding = targets.filter((t) => !done.has(t.instance_id));
+      const done = new Set(callbacks.map((c) => c.target.agent_id));
+      const outstanding = targets.filter((t) => !done.has(t.agent_id));
       return { ask_id: req.ask_id, complete: outstanding.length === 0, callbacks, outstanding };
     };
     const deadline = Date.now() + req.timeout_ms;
@@ -624,7 +825,7 @@ export class Daemon {
       const occurred_at = this.now();
       const prov = this.prov('wrapper', transportReceipt);
 
-      // SCHEMA-level invariant (the instances.tmux_pane lesson): pin exact version.
+      // SCHEMA-level invariant (the agents.tmux_pane lesson): pin exact version.
       if (req.schema_version !== SCHEMA_VERSION) {
         return {
           ok: false,
@@ -669,18 +870,9 @@ export class Daemon {
           reason: `seat_decommissioned: ${req.seat_id}`,
         };
       }
-      if (STATIC_PERSONAS.some((declaration) => declaration.seat === req.seat_id)) {
-        return {
-          ok: false,
-          seat_id: req.seat_id,
-          handover: false,
-          missing_attestations: [],
-          reason: `static_seat_requires_handshake: ${req.seat_id}`,
-        };
-      }
       const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
       if (seatBinding) {
-        const exactRepeat = seatBinding.instance_id === req.identity
+        const exactRepeat = seatBinding.agent_id === req.identity
           && seatBinding.persona === req.persona
           && seatBinding.tint === req.tint
           && seatBinding.rank === (req.rank ?? null)
@@ -706,23 +898,23 @@ export class Daemon {
           reason: `seat_occupied: ${req.seat_id} already has a current binding`,
         };
       }
-      const instanceBinding = proj.currentBindings.find((binding) => binding.instance_id === req.identity);
-      if (instanceBinding) {
+      const agentBinding = proj.currentBindings.find((binding) => binding.agent_id === req.identity);
+      if (agentBinding) {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `instance_already_bound: identity already has a current seat binding`,
+          reason: `agent_already_bound: identity already has a current seat binding`,
         };
       }
-      if (proj.activityByInstance.get(req.identity!) === 'retired') {
+      if (proj.activityByAgent.get(req.identity!) === 'retired') {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: 'instance_retired: retired identities cannot be rebound',
+          reason: 'agent_retired: retired identities cannot be rebound',
         };
       }
 
@@ -758,8 +950,7 @@ export class Daemon {
         };
       }
       const prepareId = await this.prepareBinding(req.seat_id, paneGeneration, {
-        wrapper_id: null,
-        instance_id: req.identity,
+        agent_id: req.identity,
         persona: req.persona,
         tint: req.tint,
         rank: req.rank ?? null,
@@ -784,8 +975,7 @@ export class Daemon {
           entity_id: req.seat_id,
           event_type: 'reg.bound',
           payload: {
-            wrapper_id: null,
-            instance_id: req.identity,
+            agent_id: req.identity,
             persona: req.persona,
             tint: req.tint,
             rank: req.rank ?? null,
@@ -853,10 +1043,10 @@ export class Daemon {
         const provenance = this.prov('observer', null);
         const inputs: EventInput[] = [];
         for (const binding of bindings) {
-          if (binding.instance_id) {
+          if (binding.agent_id) {
             inputs.push({
-              entity_type: 'instance',
-              entity_id: binding.instance_id,
+              entity_type: 'agent',
+              entity_id: binding.agent_id,
               event_type: 'reg.retired',
               payload: {},
               provenance,
@@ -867,7 +1057,7 @@ export class Daemon {
             entity_type: 'seat',
             entity_id: binding.seat_id,
             event_type: 'reg.process_reaped',
-            payload: { instance_id: binding.instance_id },
+            payload: { agent_id: binding.agent_id },
             provenance,
             occurred_at,
           });
@@ -918,12 +1108,8 @@ export class Daemon {
           .filter((binding) => binding.seat_id.startsWith('council:'));
         let bindingProjectionHealthy = true;
         for (const binding of councilBindings) {
-          const declaration = STATIC_PERSONAS.find((candidate) => candidate.seat === binding.seat_id);
-          if (!declaration
-            || binding.persona !== declaration.persona
-            || binding.tint !== declaration.tint
-            || binding.pane_generation !== await this.tmux.seatGeneration(binding.seat_id)
-            || await this.tmux.seatTint(binding.seat_id) !== declaration.tint) {
+          if (binding.pane_generation !== await this.tmux.seatGeneration(binding.seat_id)
+            || await this.tmux.seatTint(binding.seat_id) !== binding.tint) {
             bindingProjectionHealthy = false;
           }
         }
@@ -1031,11 +1217,11 @@ export class Daemon {
 
       return { created, existing, backfilled, failed };
     });
-    await this.provisionStaticPersonas(true);
+    await this.provisionPerpetualAgents();
     return result;
   }
 
-  // ── /agents/close — the generic "close this instance" system (rung 3) ──────────────
+  // ── /agents/close — the generic "close this agent" system (rung 3) ──────────────
   // Reaps the agent process and returns the estate seat to the freelist. Terminal
   // chain (retired + process_reaped + seat_cleared) is atomic and only written
   // AFTER the process is confirmed reaped — a retire-with-live-process is
@@ -1048,14 +1234,14 @@ export class Daemon {
           ok: false,
           target: req.target,
           seat_id: null,
-          instance_id: null,
+          agent_id: null,
           closed: false,
           reason: `schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`,
         };
       }
 
       const proj = await this.projections();
-      const binding = proj.currentBindings.find((b) => b.seat_id === req.target || b.instance_id === req.target);
+      const binding = proj.currentBindings.find((b) => b.seat_id === req.target || b.agent_id === req.target);
       if (!binding) {
         // Refuse loud — closing a non-bound target is a no-op the caller must see,
         // never a silent success.
@@ -1063,7 +1249,7 @@ export class Daemon {
           ok: false,
           target: req.target,
           seat_id: null,
-          instance_id: null,
+          agent_id: null,
           closed: false,
           reason: 'no_binding: target resolves to no current binding (already free or never bound)',
         };
@@ -1077,12 +1263,12 @@ export class Daemon {
           ok: false,
           target: req.target,
           seat_id: binding.seat_id,
-          instance_id: binding.instance_id,
+          agent_id: binding.agent_id,
           closed: false,
           reason: 'reap_failed: agent process could not be reaped; seat left bound (fail-loud, no half-close)',
         };
       }
-      return { ok: true, target: req.target, seat_id: binding.seat_id, instance_id: binding.instance_id, closed: true, reason: null };
+      return { ok: true, target: req.target, seat_id: binding.seat_id, agent_id: binding.agent_id, closed: true, reason: null };
     });
   }
 
@@ -1099,18 +1285,26 @@ export class Daemon {
     const occurred_at = this.now();
     const prov = this.prov('observer', transportReceipt);
     const inputs: EventInput[] = [];
-    if (binding.instance_id) {
-      inputs.push({ entity_type: 'instance', entity_id: binding.instance_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
+    if (binding.agent_id) {
+      inputs.push({ entity_type: 'agent', entity_id: binding.agent_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
     }
-    inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { instance_id: binding.instance_id }, provenance: prov, occurred_at });
+    inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     await this.store.appendAll(inputs);
+    const perpetualEngine = this.physicalRegistration?.perpetual[binding.seat_id];
+    if (perpetualEngine && !(await this.tmux.startPerpetualAgent({
+      seatId: binding.seat_id,
+      engine: perpetualEngine,
+      wrapper: this.physicalRegistration!.agentWrapper,
+    }))) {
+      throw new Error(`perpetual relaunch failed: ${binding.seat_id}`);
+    }
     return true;
   }
 
   // ── /agents/subscribe — the generic stop-hook subscription system (rung 3) ─────────
   // Records a close-on-next-stop subscription. BOUND-KEYED: refuses unless the
-  // instance is currently bound, so an orphan/never-bound id can never hold a
+  // agent is currently bound, so an orphan/never-bound id can never hold a
   // subscription (the 77f7cfb4 re-firing class is structurally dead). Composing
   // this with the bus-delivered stop hook (/ingress/bus, hook.stop) yields
   // `final message → auto-close on next stop-hook`.
@@ -1119,31 +1313,31 @@ export class Daemon {
       if (req.schema_version !== SCHEMA_VERSION) {
         return {
           ok: false,
-          instance_id: req.instance_id,
+          agent_id: req.agent_id,
           action: null,
           subscribed: false,
           reason: `schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`,
         };
       }
       const proj = await this.projections();
-      if (!proj.currentBindings.some((b) => b.instance_id === req.instance_id)) {
+      if (!proj.currentBindings.some((b) => b.agent_id === req.agent_id)) {
         return {
           ok: false,
-          instance_id: req.instance_id,
+          agent_id: req.agent_id,
           action: null,
           subscribed: false,
-          reason: 'not_bound: subscriptions are bound-keyed — an unbound/never-bound instance cannot subscribe',
+          reason: 'not_bound: subscriptions are bound-keyed — an unbound/never-bound agent cannot subscribe',
         };
       }
       await this.store.append({
-        entity_type: 'instance',
-        entity_id: req.instance_id,
+        entity_type: 'agent',
+        entity_id: req.agent_id,
         event_type: 'reg.stop_subscribed',
         payload: { action: req.action },
         provenance: this.prov('wrapper', transportReceipt),
         occurred_at: this.now(),
       });
-      return { ok: true, instance_id: req.instance_id, action: req.action, subscribed: true, reason: null };
+      return { ok: true, agent_id: req.agent_id, action: req.action, subscribed: true, reason: null };
     });
   }
 
@@ -1156,35 +1350,35 @@ export class Daemon {
   stop(req: StopRequest, transportReceipt: string | null = null): Promise<StopReceipt | StopRefusal> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {
-        return this.refuseStop('schema_version_mismatch', req.instance_id);
+        return this.refuseStop('schema_version_mismatch', req.agent_id);
       }
 
       const proj = await this.projections();
       // Ghost preclusion: never bound ⇒ never existed ⇒ refuse loud.
-      if (!proj.everBoundInstances.has(req.instance_id)) {
-        return this.refuseStop('no_such_instance', req.instance_id);
+      if (!proj.everBoundAgents.has(req.agent_id)) {
+        return this.refuseStop('no_such_agent', req.agent_id);
       }
 
-      const activity = proj.activityByInstance.get(req.instance_id) ?? null;
-      const stillBound = proj.currentBindings.some((b) => b.instance_id === req.instance_id);
+      const activity = proj.activityByAgent.get(req.agent_id) ?? null;
+      const stillBound = proj.currentBindings.some((b) => b.agent_id === req.agent_id);
       // Dedupe: already stopped/retired, or already closed (no longer bound) →
       // idempotent, but RECORDED as receipt_deduped (never a blind swallow).
       if (activity === 'stopped' || activity === 'retired' || !stillBound) {
         await this.store.append({
-          entity_type: 'instance',
-          entity_id: req.instance_id,
+          entity_type: 'agent',
+          entity_id: req.agent_id,
           event_type: 'act.receipt_deduped',
           payload: { of: 'stop_reported', reason: activity ?? 'unbound' },
           provenance: this.prov('observer', transportReceipt),
           occurred_at: this.now(),
         });
-        return { ok: true, instance_id: req.instance_id, recorded: false, deduped: true, activity, auto_close: 'none' };
+        return { ok: true, agent_id: req.agent_id, recorded: false, deduped: true, activity, auto_close: 'none' };
       }
 
-      // Fresh stop for a live, bound instance → record it (activity → stopped).
+      // Fresh stop for a live, bound agent → record it (activity → stopped).
       await this.store.append({
-        entity_type: 'instance',
-        entity_id: req.instance_id,
+        entity_type: 'agent',
+        entity_id: req.agent_id,
         event_type: 'act.stop_reported',
         payload: {},
         provenance: this.prov('hook', transportReceipt),
@@ -1195,28 +1389,28 @@ export class Daemon {
       // we just recorded satiates it). `proj` is the pre-stop read, so the binding
       // is still present; executeClose is the SAME mechanism as /agents/close.
       let auto_close: StopAutoCloseOutcome = 'none';
-      if (proj.openStopSubscriptions.has(req.instance_id)) {
-        const binding = proj.currentBindings.find((b) => b.instance_id === req.instance_id);
+      if (proj.openStopSubscriptions.has(req.agent_id)) {
+        const binding = proj.currentBindings.find((b) => b.agent_id === req.agent_id);
         if (binding) {
           const closed = await this.executeClose(binding, transportReceipt);
           auto_close = closed ? 'fired' : 'reap_failed';
           if (!closed) {
-            // Loud, not silent: the instance stays stopped+bound (visible), never a
+            // Loud, not silent: the agent stays stopped+bound (visible), never a
             // quiet leak. Reconcile catches any lingering retire-with-live-process.
             console.error(
-              JSON.stringify({ level: 'error', event: 'auto_close_reap_failed', instance_id: req.instance_id, seat_id: binding.seat_id }),
+              JSON.stringify({ level: 'error', event: 'auto_close_reap_failed', agent_id: req.agent_id, seat_id: binding.seat_id }),
             );
           }
         }
       }
-      return { ok: true, instance_id: req.instance_id, recorded: true, deduped: false, activity: 'stopped', auto_close };
+      return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, activity: 'stopped', auto_close };
     });
   }
 
-  private refuseStop(reason: StopRefusalReason, instanceId: string): StopRefusal {
-    const logged = findTmuxId(instanceId) ? '<redacted-tmux-id>' : instanceId;
-    console.error(JSON.stringify({ level: 'error', event: 'stop_refused', reason, instance_id: logged }));
-    return { ok: false, refused: true, reason, instance_id: instanceId };
+  private refuseStop(reason: StopRefusalReason, agentId: string): StopRefusal {
+    const logged = findTmuxId(agentId) ? '<redacted-tmux-id>' : agentId;
+    console.error(JSON.stringify({ level: 'error', event: 'stop_refused', reason, agent_id: logged }));
+    return { ok: false, refused: true, reason, agent_id: agentId };
   }
 
   // ── /ctl/reconcile — replay + contradiction observation (spec §6) ───────────────
@@ -1334,7 +1528,7 @@ export class Daemon {
         );
       }
 
-      // Retired instance whose pane is still live (retire-with-live-process).
+      // Retired agent whose pane is still live (retire-with-live-process).
       for (const row of proj.activityBoard) {
         if (row.seat_id === null) continue; // board row without a seat can't be a seat-liveness contradiction
         if (row.activity === 'retired' && observedPane.get(row.seat_id) === 'live') {
@@ -1352,13 +1546,13 @@ export class Daemon {
         replay_ms,
         bindings: proj.currentBindings.length,
         freelist: proj.freelist.length,
-        instances: proj.activityBoard.length,
+        agents: proj.activityBoard.length,
         new_contradictions: newContradictions,
         open_contradictions: openContradictions,
         p0,
       };
     });
-    if (councilRebuilt) await this.provisionStaticPersonas();
+    if (councilRebuilt) await this.provisionPerpetualAgents();
     return response;
   }
 
@@ -1402,253 +1596,24 @@ export class Daemon {
     return rows;
   }
 
-  async staticPersonaReadiness(): Promise<Array<{
-    seat_id: string;
-    state: 'ready' | 'missing' | 'mismatched' | 'awaiting_ack';
-    instance_id: string | null;
-    tint: string;
-    tint_attested: boolean;
-  }>> {
-    const proj = await this.projections();
-    const launches = [...proj.staticLaunches.values()];
-    const rows: Array<{
-      seat_id: string;
-      state: 'ready' | 'missing' | 'mismatched' | 'awaiting_ack';
-      instance_id: string | null;
-      tint: string;
-      tint_attested: boolean;
-    }> = [];
-    for (const declaration of STATIC_PERSONAS) {
-      const binding = proj.currentBindings.find((candidate) => candidate.seat_id === declaration.seat);
-      if (!binding) {
-        const pending = launches.findLast((launch) =>
-          launch.seat_id === declaration.seat && launch.state === 'awaiting_ack',
-        );
-        rows.push({
-          seat_id: declaration.seat,
-          state: pending ? 'awaiting_ack' : 'missing',
-          instance_id: pending?.instance_id ?? null,
-          tint: declaration.tint,
-          tint_attested: false,
-        });
-        continue;
-      }
-      const tupleMatches =
-        binding.persona === declaration.persona
-        && binding.tint === declaration.tint
-        && binding.rank === declaration.rank
-        && binding.commander === declaration.commander
-        && binding.engine === declaration.engine
-        && binding.authority_principal === declaration.authority_principal
-        && binding.continuity_kind === declaration.continuity_kind
-        && binding.wrapper_pid !== null
-        && binding.engine_pid !== null
-        && binding.engine_executable !== null
-        && binding.static_launch_id !== null;
-      const alive = tupleMatches && await this.tmux.attestStaticAgent(
-        declaration.seat,
-        binding.wrapper_pid!,
-        binding.engine_pid!,
-        declaration.engine,
-        binding.engine_executable!,
-      );
-      const tint_attested = await this.tmux.seatTint(declaration.seat) === declaration.tint;
-      const generation_attested = binding.pane_generation !== null
-        && await this.tmux.seatGeneration(declaration.seat) === binding.pane_generation;
-      rows.push({
-        seat_id: declaration.seat,
-        state: alive && tint_attested && generation_attested ? 'ready' : 'mismatched',
-        instance_id: binding.instance_id,
-        tint: declaration.tint,
-        tint_attested,
-      });
-    }
-    return rows;
-  }
-
-  provisionStaticPersonas(recoverPending = false): Promise<void> {
+  async provisionPerpetualAgents(): Promise<void> {
+    if (!this.physicalRegistration) return;
     return this.locked(async () => {
-      if (!this.staticRuntime) return;
-      let proj = await this.projections();
-      if (recoverPending) {
-        const interrupted = [...proj.staticLaunches.values()]
-          .filter((launch) => launch.state === 'awaiting_ack')
-          .map((launch): EventInput => ({
-            entity_type: 'instance',
-            entity_id: launch.launch_id,
-            event_type: 'reg.static_launch_failed',
-            payload: {
-              reason: 'daemon_restarted_before_ack',
-              seat_id: launch.seat_id,
-              instance_id: launch.instance_id,
-            },
-            provenance: this.prov('observer', null),
-            occurred_at: this.now(),
-          }));
-        if (interrupted.length > 0) {
-          await this.store.appendAll(interrupted);
-          proj = await this.projections();
+      const projections = await this.projections();
+      const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
+      for (const [seatId, engine] of Object.entries(this.physicalRegistration!.perpetual)) {
+        if (!TXD_ESTATE.includes(seatId)) {
+          throw new Error(`perpetual pane is outside the canonical estate: ${seatId}`);
         }
+        if (projections.currentBindings.some((binding) => binding.seat_id === seatId)) continue;
+        const workload = workloads.get(seatId);
+        if (workload && !workload.idle) continue;
+        if (!(await this.tmux.startPerpetualAgent({
+          seatId,
+          engine,
+          wrapper: this.physicalRegistration!.agentWrapper,
+        }))) throw new Error(`perpetual launch failed: ${seatId}`);
       }
-      for (const declaration of STATIC_PERSONAS) {
-        const binding = proj.currentBindings.find((candidate) => candidate.seat_id === declaration.seat);
-        if (binding) continue;
-        const latest = [...proj.staticLaunches.values()].findLast((launch) => launch.seat_id === declaration.seat);
-        if (latest?.state === 'awaiting_ack') continue;
-
-        const launch_id = crypto.randomUUID();
-        const instance_id = crypto.randomUUID();
-        const token = crypto.randomUUID();
-        const token_hash = new Bun.CryptoHasher('sha256').update(token).digest('hex');
-        const occurred_at = this.now();
-        await this.store.append({
-          entity_type: 'instance',
-          entity_id: launch_id,
-          event_type: 'reg.static_launch_requested',
-          payload: {
-            seat_id: declaration.seat,
-            instance_id,
-            engine: declaration.engine,
-            persona: declaration.persona,
-            rank: declaration.rank,
-            commander: declaration.commander,
-            authority_principal: declaration.authority_principal,
-            continuity_kind: declaration.continuity_kind,
-            tint: declaration.tint,
-            token_hash,
-          },
-          provenance: this.prov('observer', null),
-          occurred_at,
-        });
-        const started = await this.tmux.startStaticAgent({
-          seatId: declaration.seat,
-          engine: declaration.engine,
-          wrapper: this.staticRuntime.agentWrapper,
-          workspace: `${this.staticRuntime.personaWorkspaceRoot}/${declaration.workspace}`,
-          environment: {
-            TXD_STATIC_LAUNCH_ID: launch_id,
-            TXD_STATIC_LAUNCH_TOKEN: token,
-            TXD_STATIC_INSTANCE_ID: instance_id,
-            TXD_STATIC_SEAT: declaration.seat,
-            TXD_STATIC_ACK_URL: this.staticRuntime.acknowledgeUrl,
-            TXD_STATIC_ENGINE: declaration.engine,
-            TXD_STATIC_OBSIDIAN_PERSONA: declaration.persona,
-          },
-        });
-        if (!started) {
-          await this.store.append({
-            entity_type: 'instance',
-            entity_id: launch_id,
-            event_type: 'reg.static_launch_failed',
-            payload: { reason: 'wrapper_start_failed', seat_id: declaration.seat, instance_id },
-            provenance: this.prov('observer', null),
-            occurred_at: this.now(),
-          });
-        }
-      }
-    });
-  }
-
-  acknowledgeStaticLaunch(handshake: StaticLaunchHandshake): Promise<StaticLaunchHandshakeResponse> {
-    return this.locked(async () => {
-      const proj = await this.projections();
-      const launch = proj.staticLaunches.get(handshake.launch_id);
-      if (!launch || launch.state !== 'awaiting_ack') {
-        return { ok: false, acknowledged: false, reason: 'launch_absent_or_closed' };
-      }
-      const token_hash = new Bun.CryptoHasher('sha256').update(handshake.token).digest('hex');
-      if (token_hash !== launch.token_hash) {
-        return { ok: false, acknowledged: false, reason: 'launch_authentication_failed' };
-      }
-      const declaration = STATIC_PERSONAS.find((candidate) => candidate.seat === launch.seat_id);
-      const tupleMatches = declaration
-        && handshake.instance_id === launch.instance_id
-        && handshake.seat_id === launch.seat_id
-        && handshake.engine === launch.engine
-        && handshake.engine === declaration.engine
-        && launch.tint === declaration.tint;
-      const physicallyAttested = tupleMatches && await this.tmux.attestStaticAgent(
-        handshake.seat_id,
-        handshake.wrapper_pid,
-        handshake.engine_pid,
-        handshake.engine,
-        handshake.engine_executable,
-      );
-      if (!tupleMatches || !physicallyAttested) {
-        await this.store.append({
-          entity_type: 'instance',
-          entity_id: handshake.launch_id,
-          event_type: 'reg.static_launch_failed',
-          payload: {
-            reason: tupleMatches ? 'physical_attestation_failed' : 'launch_tuple_mismatch',
-            seat_id: launch.seat_id,
-            instance_id: launch.instance_id,
-          },
-          provenance: this.prov('wrapper', null),
-          occurred_at: this.now(),
-        });
-        return { ok: false, acknowledged: false, reason: 'launch_attestation_failed' };
-      }
-      const occupied = proj.currentBindings.some((binding) =>
-        binding.seat_id === declaration.seat || binding.instance_id === launch.instance_id,
-      );
-      if (occupied) return { ok: false, acknowledged: false, reason: 'binding_conflict' };
-      if (this.pendingScopedResetSeats(await this.store.readAll()).has(declaration.seat)) {
-        return { ok: false, acknowledged: false, reason: 'scoped_reset_pending' };
-      }
-      const paneGeneration = await this.tmux.seatGeneration(declaration.seat);
-      if (!paneGeneration) return { ok: false, acknowledged: false, reason: 'pane_generation_unattested' };
-      const provenance = this.prov('wrapper', null);
-      const occurred_at = this.now();
-      const prepareId = await this.prepareBinding(declaration.seat, paneGeneration, {
-        wrapper_id: handshake.launch_id,
-        instance_id: handshake.instance_id,
-        persona: declaration.persona,
-        rank: declaration.rank,
-        commander: declaration.commander,
-        tint: declaration.tint,
-        engine: declaration.engine,
-        engine_executable: handshake.engine_executable,
-        static_launch_id: handshake.launch_id,
-      }, provenance, occurred_at);
-      if (!(await this.applyBindingTint(declaration.seat, declaration.tint))) {
-        await this.abortBinding(declaration.seat, prepareId, 'tint_attestation_failed', provenance);
-        return { ok: false, acknowledged: false, reason: 'tint_attestation_failed' };
-      }
-      try {
-        await this.store.append({
-          entity_type: 'seat',
-          entity_id: declaration.seat,
-          event_type: 'reg.bound',
-          payload: {
-            wrapper_id: handshake.launch_id,
-            instance_id: handshake.instance_id,
-            persona: declaration.persona,
-            rank: declaration.rank,
-            commander: declaration.commander,
-            tint: declaration.tint,
-            engine: declaration.engine,
-            static_launch_id: handshake.launch_id,
-            wrapper_pid: handshake.wrapper_pid,
-            engine_pid: handshake.engine_pid,
-            engine_executable: handshake.engine_executable,
-            authority_principal: declaration.authority_principal,
-            continuity_kind: declaration.continuity_kind,
-            pane_generation: paneGeneration,
-            binding_prepare_id: prepareId,
-          },
-          provenance,
-          occurred_at,
-        });
-      } catch (error) {
-        await this.compensateBindingCommitFailure(
-          declaration.seat,
-          prepareId,
-          provenance,
-          error,
-        );
-      }
-      return { ok: true, acknowledged: true, reason: null };
     });
   }
 
@@ -1694,7 +1659,7 @@ export class Daemon {
    */
   async resetEstateScope(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
     const result = await this.locked(() => this.resetEstateScopeUnlocked(req, transportReceipt));
-    if (result.ok && result.scope === 'page' && req.page === 'council') await this.provisionStaticPersonas();
+    if (result.ok) await this.provisionPerpetualAgents();
     return result;
   }
 
@@ -1805,7 +1770,7 @@ export class Daemon {
         reason: reset.reason,
       };
     });
-    if (result.ok && result.reconstructed && result.page === 'council') await this.provisionStaticPersonas();
+    if (result.ok && result.reconstructed) await this.provisionPerpetualAgents();
     return result;
   }
 
@@ -1816,8 +1781,8 @@ export class Daemon {
   ): EventInput[] {
     const prov = this.prov('observer', transportReceipt);
     const inputs: EventInput[] = [];
-    if (binding.instance_id) inputs.push({ entity_type: 'instance', entity_id: binding.instance_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
-    inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { instance_id: binding.instance_id }, provenance: prov, occurred_at });
+    if (binding.agent_id) inputs.push({ entity_type: 'agent', entity_id: binding.agent_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
+    inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     return inputs;
   }
@@ -1852,12 +1817,10 @@ export class Daemon {
     // responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
     const open = proj.openContradictions.length;
-    const static_personas = await this.staticPersonaReadiness();
     const tints = await this.tintReadiness();
     return {
       ok: open === 0
         && tmux_reachable
-        && static_personas.every((persona) => persona.state === 'ready')
         && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
@@ -1868,7 +1831,6 @@ export class Daemon {
       events: await this.store.count(),
       open_contradictions: open,
       tmux_reachable,
-      static_personas,
       tints,
     };
   }

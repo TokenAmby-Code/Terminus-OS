@@ -10,23 +10,23 @@ function setup() {
   return { store, tmux, d: new Daemon(store, tmux) };
 }
 
-const FULL = { schema_version: 9, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
+const FULL = { schema_version: 10, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
 
 // Rung 3 PR-B: the generic stop-hook subscription system composes with the bus-delivered stop hook to
 // give `final message → auto-close on next stop-hook`. No bespoke latch.
 
-test('subscribe records reg.stop_subscribed for a bound instance', async () => {
+test('subscribe records reg.stop_subscribed for a bound agent', async () => {
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  const res = await d.subscribe({ instance_id: 'i1', schema_version: 9, action: 'close' });
+  const res = await d.subscribe({ agent_id: 'i1', schema_version: 10, action: 'close' });
   expect(res).toMatchObject({ ok: true, subscribed: true, action: 'close' });
   expect((await store.readAll()).some((e) => e.event_type === 'reg.stop_subscribed')).toBe(true);
   expect(buildProjections(await store.readAll()).openStopSubscriptions.has('i1')).toBe(true);
 });
 
-test('subscribe is BOUND-KEYED — an unbound/never-bound instance is refused (ghost cannot subscribe)', async () => {
+test('subscribe is BOUND-KEYED — an unbound/never-bound agent is refused (ghost cannot subscribe)', async () => {
   const { store, d } = setup();
-  const res = await d.subscribe({ instance_id: '77f7cfb4-orphan', schema_version: 9, action: 'close' });
+  const res = await d.subscribe({ agent_id: '77f7cfb4-orphan', schema_version: 10, action: 'close' });
   expect(res).toMatchObject({ ok: false, subscribed: false });
   expect(res.reason).toContain('not_bound');
   expect(await store.count()).toBe(0); // nothing recorded — no orphan subscription can exist
@@ -35,10 +35,10 @@ test('subscribe is BOUND-KEYED — an unbound/never-bound instance is refused (g
 test('COMPOSE: final message → auto-close on next stop-hook (seat returns to freelist, estate stands)', async () => {
   const { store, tmux, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  await d.subscribe({ instance_id: 'i1', schema_version: 9, action: 'close' });
+  await d.subscribe({ agent_id: 'i1', schema_version: 10, action: 'close' });
 
-  // The stop-hook fires → the open subscription reflexively closes the instance.
-  const res = await d.stop({ instance_id: 'i1', schema_version: 9 });
+  // The stop-hook fires → the open subscription reflexively closes the agent.
+  const res = await d.stop({ agent_id: 'i1', schema_version: 10 });
   expect(res).toMatchObject({ ok: true, recorded: true, auto_close: 'fired' });
 
   const types = (await store.readAll()).map((e) => e.event_type);
@@ -57,32 +57,32 @@ test('COMPOSE: final message → auto-close on next stop-hook (seat returns to f
 test('a SECOND stop after auto-close is deduped — the subscription NEVER re-fires', async () => {
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  await d.subscribe({ instance_id: 'i1', schema_version: 9, action: 'close' });
-  await d.stop({ instance_id: 'i1', schema_version: 9 }); // fires auto-close
+  await d.subscribe({ agent_id: 'i1', schema_version: 10, action: 'close' });
+  await d.stop({ agent_id: 'i1', schema_version: 10 }); // fires auto-close
 
-  const res = await d.stop({ instance_id: 'i1', schema_version: 9 }); // late/dup stop
+  const res = await d.stop({ agent_id: 'i1', schema_version: 10 }); // late/dup stop
   expect(res).toMatchObject({ ok: true, recorded: false, deduped: true, auto_close: 'none' });
   // Exactly ONE retire chain — no re-fire (satiated-once).
   expect((await store.readAll()).filter((e) => e.event_type === 'reg.retired')).toHaveLength(1);
   expect((await store.readAll()).filter((e) => e.event_type === 'reg.seat_cleared')).toHaveLength(1);
 });
 
-test('a stop with NO subscription does not auto-close (auto_close none, instance just stopped)', async () => {
+test('a stop with NO subscription does not auto-close (auto_close none, agent just stopped)', async () => {
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  const res = await d.stop({ instance_id: 'i1', schema_version: 9 });
+  const res = await d.stop({ agent_id: 'i1', schema_version: 10 });
   expect(res).toMatchObject({ recorded: true, auto_close: 'none' });
   expect((await store.readAll()).some((e) => e.event_type === 'reg.seat_cleared')).toBe(false);
   expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.seat_id)).toEqual(['palace:W']);
 });
 
-test('auto-close whose reap FAILS is loud (auto_close reap_failed), instance left stopped+bound — no silent leak', async () => {
+test('auto-close whose reap FAILS is loud (auto_close reap_failed), agent left stopped+bound — no silent leak', async () => {
   const { store, tmux, d } = setup();
   await d.launch({ seat_id: 'palace:N', ...FULL });
-  await d.subscribe({ instance_id: 'i1', schema_version: 9, action: 'close' });
+  await d.subscribe({ agent_id: 'i1', schema_version: 10, action: 'close' });
   tmux.failReapSeat('palace:N');
 
-  const res = await d.stop({ instance_id: 'i1', schema_version: 9 });
+  const res = await d.stop({ agent_id: 'i1', schema_version: 10 });
   expect(res).toMatchObject({ ok: true, recorded: true, auto_close: 'reap_failed' });
   // Stop is recorded, but the close chain never wrote — binding stands (visible).
   const p = buildProjections(await store.readAll());
@@ -93,7 +93,7 @@ test('auto-close whose reap FAILS is loud (auto_close reap_failed), instance lef
 test('schema mismatch refuses subscribe loud', async () => {
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  const res = await d.subscribe({ instance_id: 'i1', schema_version: 999, action: 'close' });
+  const res = await d.subscribe({ agent_id: 'i1', schema_version: 1099, action: 'close' });
   expect(res).toMatchObject({ ok: false, subscribed: false });
   expect(res.reason).toContain('schema_version_mismatch');
   expect((await store.readAll()).some((e) => e.event_type === 'reg.stop_subscribed')).toBe(false);

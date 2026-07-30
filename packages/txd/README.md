@@ -29,13 +29,13 @@ contracts source, and the public route shape.
   constructs.
 - **Static Council singletons.** Custodes (Claude) and Fabricator-General
   (Codex) are compile-time declarations launched through the Fleet wrapper.
-  A private one-time handshake binds each fresh instance only after txd
+  A private one-time handshake binds each fresh agent only after txd
   attests the wrapper-selected executable, process pair, and expected physical
   seat, then applies
   and reads back the declaration's pane tint. Custodes is `#302800`;
   Fabricator-General is `#300808`. Pax and Orchestrator remain live, unbound,
   untinted shells. Any Council reconstruction wipes all four panes and launches
-  fresh Custodes and Fabricator-General instances.
+  fresh Custodes and Fabricator-General agents.
 - **Tint is binding evidence.** A bound pane's declared tint is applied and
   physically verified before `reg.bound`; bind failure compensates fail-dark.
   Close and reconstruction clear it. Health and estate reads expose tint
@@ -58,7 +58,6 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/clipboard/pull`   | Load UTF-8 into the transient, non-executing `tx-clipboard` buffer |
 | POST   | `/ctl/clipboard/selection` | Commit bounded UTF-8 through txd to `tx-clipboard` and one validated attached client |
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` event ingress; reconstructs a damaged canonical page |
-| POST   | `/ingress/static-launch`| Private wrapper attestation for a pending static launch |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
 | POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
@@ -91,9 +90,9 @@ each route is the ruled daemon behavior, unchanged.
   whether to reconstruct. A page reconstruction wipes every process, history,
   pane-local option, and split inside that page border, then rebuilds the full
   declared geometry before retiring the old bindings in event truth.
-- `/ingress/static-launch` is a private, one-time wrapper door. A request must
-  match a pending launch's token, instance, engine, and physical Council seat.
-  Forged, duplicated, stale, or mismatched handshakes create no binding.
+- `/ingress/bus` also consumes generic wrapper-start, physical declaration,
+  literal engine-session, and final registration facts. It attests pane and
+  process reality, projects tint, and never allocates identity or persona.
 - `/tmux/read/*` is txd's ONLY public read surface — side-effect-free by
   construction. "entities" is dead as public API vocabulary, and the old
   per-entity event-history endpoint is REMOVED: agent-biography serving is not
@@ -137,7 +136,7 @@ The event stream lives in the `terminus` database, schema `txd`, table
 | Column        | Type     | Notes                                             |
 |---------------|----------|---------------------------------------------------|
 | `seq`         | `bigint` | identity, monotonic — assigned by the store       |
-| `entity_type` | `text`   | `seat` \| `instance` \| `message`                 |
+| `entity_type` | `text`   | `seat` \| `agent` \| `message`                 |
 | `entity_id`   | `text`   | canonical id (never a raw tmux `%id`)             |
 | `event_type`  | `text`   | pinned vocabulary (`@terminus-os/contracts`)      |
 | `payload`     | `jsonb`  | dumb facts only, never derived state              |

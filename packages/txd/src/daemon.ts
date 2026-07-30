@@ -31,14 +31,12 @@ const physicalRegistration = cfg.physicalRegistration
         generation: cfg.physicalRegistration.generation,
         digest: cfg.physicalRegistration.digest,
       },
+      agentWrapper: cfg.agentWrapper,
+      perpetual: cfg.physicalRegistration.perpetual,
       publish: makeBusPublisher(cfg.physicalRegistration.busUrl),
     }
   : null;
-const daemon = new Daemon(store, tmux, undefined, rotationBarrier, {
-  agentWrapper: cfg.agentWrapper,
-  personaWorkspaceRoot: cfg.personaWorkspaceRoot,
-  acknowledgeUrl: `http://${cfg.bind}:${cfg.port}/ingress/static-launch`,
-}, physicalRegistration);
+const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration);
 const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
 
 console.log(

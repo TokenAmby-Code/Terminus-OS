@@ -24,8 +24,8 @@ export type Command = {
 };
 
 function commSource(): string {
-  const value = process.env.TX_INSTANCE_ID;
-  if (!value) throw new Error('TX_INSTANCE_ID is required for tx comm');
+  const value = process.env.AGENT_ID;
+  if (!value) throw new Error('AGENT_ID is required for tx comm');
   return value;
 }
 
@@ -41,6 +41,7 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
     }
     const arg = args[index]!;
     if (arg === '--ask') ask = true;
+    else if (arg === '--self') positional.push(arg);
     else if (arg === '--reply') reply = true;
     else if (arg === '--page') {
       page = args[++index];
@@ -58,13 +59,13 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
   } else if (positional.length !== 2) throw new Error('usage: tx comm [--ask] <identity> <message>');
   const message = positional.at(-1)!;
   const accepted = await request('POST', '/agents/comm', {
-    schema_version: SCHEMA_VERSION, source_instance_id: commSource(), message, ask, reply,
+    schema_version: SCHEMA_VERSION, source_agent_id: commSource(), message, ask, reply,
     ...(page ? { page } : {}), ...(!page && !reply ? { target: positional[0] } : {}),
   }) as { ask_id: string | null };
   write(accepted);
   if (!ask) return 0;
   const result = await request('POST', '/agents/comm/wait', {
-    schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_instance_id: commSource(), timeout_ms: 7 * 60 * 1000,
+    schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_agent_id: commSource(), timeout_ms: 7 * 60 * 1000,
   }) as { complete: boolean };
   write(result);
   return result.complete ? 0 : 3;

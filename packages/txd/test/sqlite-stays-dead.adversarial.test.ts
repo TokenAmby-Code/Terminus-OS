@@ -11,6 +11,7 @@
 // loud with the exact file:line.
 
 import { describe, expect, test } from 'bun:test';
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '../../..');
@@ -24,7 +25,9 @@ const BANNED: { name: string; re: RegExp }[] = [
 function trackedFiles(): string[] {
   const proc = Bun.spawnSync(['git', 'ls-files'], { cwd: root });
   if (proc.exitCode !== 0) throw new Error(`git ls-files failed: ${proc.stderr.toString()}`);
-  return proc.stdout.toString().split('\n').filter((f) => f.length > 0 && f !== SELF);
+  return proc.stdout.toString().split('\n').filter((f) =>
+    f.length > 0 && f !== SELF && existsSync(join(root, f)),
+  );
 }
 
 describe('adversarial: sqlite stays dead repo-wide', () => {

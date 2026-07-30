@@ -28,11 +28,11 @@ import { z } from 'zod';
 // unchanged; the seed set grew by one WITH this bump, per spec §3 ("no additions
 // without a schema_version bump").
 // v6: additive — explicit estate rotation request/refusal/completion lifecycle.
-// v7: additive — Council topology migration, canonical seat decommissioning,
-// and authenticated static-persona launch facts/readiness.
+// v7: additive — Council topology migration and canonical seat decommissioning.
 // v8: physical persona-tint apply/read-back, fail-dark reset, and readiness.
 // v9: typed, engine-aware plan-mode transition request/attestation lifecycle.
-export const SCHEMA_VERSION = 9;
+// v10: registrationd-owned identity and generation-bound physical facts.
+export const SCHEMA_VERSION = 10;
 
 export const CLIPBOARD_BUFFER_NAME = 'tx-clipboard';
 export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
@@ -82,7 +82,7 @@ export type ClipboardPushResponse = z.infer<typeof ClipboardPushResponseSchema>;
 
 // ── Entities ────────────────────────────────────────────────────────────────
 // The entity kinds the daemon tracks.
-export const ENTITY_TYPES = ['seat', 'wrapper', 'instance', 'message', 'ask', 'assertion', 'estate'] as const;
+export const ENTITY_TYPES = ['seat', 'wrapper', 'agent', 'message', 'ask', 'assertion', 'estate'] as const;
 export type EntityType = (typeof ENTITY_TYPES)[number];
 export const EntityTypeSchema = z.enum(ENTITY_TYPES);
 
@@ -99,8 +99,8 @@ export const REG_EVENT_NAMES = [
   'pane_created',
   'wrapper_started',
   'session_started',
-  'static_launch_requested',
-  'static_launch_failed',
+  'physical_declared',
+  'agent_registered',
   'binding_prepared',
   'binding_aborted',
   'bound',
@@ -146,8 +146,8 @@ export const EVENT_TYPES = [
   'reg.pane_created',
   'reg.wrapper_started',
   'reg.session_started',
-  'reg.static_launch_requested',
-  'reg.static_launch_failed',
+  'reg.physical_declared',
+  'reg.agent_registered',
   'reg.binding_prepared',
   'reg.binding_aborted',
   'reg.bound',
@@ -234,20 +234,21 @@ export type EventRecord = z.infer<typeof EventRecordSchema>;
 // ── Projections (spec §10) — all three rebuilt by replay, nobody writes them ─
 export const CurrentBindingSchema = z.object({
   seat_id: z.string(),
-  wrapper_id: z.string().nullable(),
-  instance_id: z.string().nullable(),
+  agent_id: z.string().nullable(),
+  birth_generation: z.string().nullable(),
+  registered: z.boolean(),
   persona: z.string().nullable(),
   rank: z.string().nullable(),
   commander: z.string().nullable(),
   tint: z.string().nullable(),
   pane_generation: z.string().nullable(),
   engine: z.enum(['claude', 'codex']).nullable(),
-  static_launch_id: z.string().nullable(),
   wrapper_pid: z.number().int().positive().nullable(),
   engine_pid: z.number().int().positive().nullable(),
   engine_executable: z.string().nullable(),
-  authority_principal: z.string().nullable(),
-  continuity_kind: z.literal('daily_note').nullable(),
+  cwd: z.string().nullable(),
+  configuration_generation: z.string().nullable(),
+  configuration_digest: z.string().nullable(),
   // The bound-event seq the binding resolved against — receipts and drains
   // resolve against this exact seq (stale-target-at-drain unrepresentable).
   bound_seq: z.number().int(),
@@ -309,13 +310,6 @@ export const HealthSchema = z.object({
   open_contradictions: z.number().int(),
   tmux_reachable: z.boolean(),
   tints: z.array(TintReadinessSchema),
-  static_personas: z.array(z.object({
-    seat_id: z.string(),
-    state: z.enum(['ready', 'missing', 'mismatched', 'awaiting_ack']),
-    instance_id: z.string().nullable(),
-    tint: z.string(),
-    tint_attested: z.boolean(),
-  })),
 });
 export type Health = z.infer<typeof HealthSchema>;
 
@@ -344,7 +338,7 @@ export const LaunchResponseSchema = z.object({
 });
 export type LaunchResponse = z.infer<typeof LaunchResponseSchema>;
 
-// ── Close operation (rung 3) — the generic "close this instance" system ──────
+// ── Close operation (rung 3) — the generic "close this agent" system ──────
 // Executes the terminal-retirement chain for a bound estate seat: reg.retired +
 // reg.process_reaped (the agent process is reaped) + reg.seat_cleared (binding
 // cleared → seat returns to the freelist). The persistent estate PANE is kept
@@ -353,7 +347,7 @@ export type LaunchResponse = z.infer<typeof LaunchResponseSchema>;
 // retire-with-live-process is unspellable — a failed reap refuses loud, changing
 // nothing (spec §4: retired is not terminal until process_reaped + seat_cleared).
 export const CloseRequestSchema = z.object({
-  target: z.string().min(1), // canonical seat id OR instance id — never a tmux %id
+  target: z.string().min(1), // canonical seat id OR agent id — never a tmux %id
   schema_version: z.number().int(),
 });
 export type CloseRequest = z.infer<typeof CloseRequestSchema>;
@@ -362,38 +356,38 @@ export const CloseResponseSchema = z.object({
   ok: z.boolean(),
   target: z.string(),
   seat_id: z.string().nullable(),
-  instance_id: z.string().nullable(),
+  agent_id: z.string().nullable(),
   closed: z.boolean(), // true = full retire chain attested + seat freed
   reason: z.string().nullable(),
 });
 export type CloseResponse = z.infer<typeof CloseResponseSchema>;
 
 // ── Stop ingestion (rung 3) — the stop-hook's door into the daemon ───────────
-// A stop-hook reports that an instance's turn ended. The door has three honest
+// A stop-hook reports that an agent's turn ended. The door has three honest
 // outcomes, none of them a blind swallow:
 //   - recorded: a fresh act.stop_reported for a currently-bound, not-yet-stopped
-//     instance (activity → stopped).
-//   - deduped: a repeat/late stop for an instance already stopped or already
+//     agent (activity → stopped).
+//   - deduped: a repeat/late stop for an agent already stopped or already
 //     closed — writes act.receipt_deduped (idempotent, NO blind swallow).
-//   - refused: a stop for an instance that NEVER walked through /agents/launch (never
+//   - refused: a stop for an agent that NEVER walked through /agents/launch (never
 //     bound) — a ghost. Refused loud at admission; nothing recorded, so no
 //     phantom row and no re-firing subscription can exist (the 77f7cfb4 class).
 export const StopRequestSchema = z.object({
-  instance_id: z.string().min(1), // canonical instance id ONLY — never a tmux %id
+  agent_id: z.string().min(1), // canonical agent id ONLY — never a tmux %id
   schema_version: z.number().int(),
   content: z.string().optional(),
   stop_event_id: z.string().min(1).optional(),
 });
 export type StopRequest = z.infer<typeof StopRequestSchema>;
 
-export const STOP_REFUSAL_REASONS = ['no_such_instance', 'schema_version_mismatch'] as const;
+export const STOP_REFUSAL_REASONS = ['no_such_agent', 'schema_version_mismatch'] as const;
 export type StopRefusalReason = (typeof STOP_REFUSAL_REASONS)[number];
 export const StopRefusalReasonSchema = z.enum(STOP_REFUSAL_REASONS);
 
 // A recorded stop can reflexively fire a close-on-stop subscription (rung-3 PR-B).
 // `auto_close` reports that side effect honestly: 'fired' = the subscription ran
 // and the seat was closed; 'reap_failed' = it tried but the process wouldn't reap
-// (logged loud, instance left stopped+bound — visible, never a silent leak);
+// (logged loud, agent left stopped+bound — visible, never a silent leak);
 // 'none' = no open subscription (the common case).
 export const STOP_AUTO_CLOSE_OUTCOMES = ['none', 'fired', 'reap_failed'] as const;
 export type StopAutoCloseOutcome = (typeof STOP_AUTO_CLOSE_OUTCOMES)[number];
@@ -401,10 +395,10 @@ export const StopAutoCloseOutcomeSchema = z.enum(STOP_AUTO_CLOSE_OUTCOMES);
 
 export const StopReceiptSchema = z.object({
   ok: z.literal(true),
-  instance_id: z.string(),
+  agent_id: z.string(),
   recorded: z.boolean(), // true = stop_reported appended; false = deduped
   deduped: z.boolean(),
-  activity: ActivityStateSchema.nullable(), // resulting activity for the instance
+  activity: ActivityStateSchema.nullable(), // resulting activity for the agent
   auto_close: StopAutoCloseOutcomeSchema, // reflexive close-on-stop side effect
 });
 export type StopReceipt = z.infer<typeof StopReceiptSchema>;
@@ -413,7 +407,7 @@ export type StopReceipt = z.infer<typeof StopReceiptSchema>;
 // One day-one action: `close`. Composing `/agents/subscribe` (mark) with the
 // bus-delivered stop hook (`/ingress/bus`, `hook.stop`) yields `final message → auto-close on next stop-hook` — no bespoke
 // latch, no special reflexive fold. BOUND-KEYED by construction: a subscription
-// can only be created for a currently-bound instance, so an orphan/never-bound id
+// can only be created for a currently-bound agent, so an orphan/never-bound id
 // can never hold one — the 77f7cfb4 re-firing-subscription class is structurally
 // dead. Satiation is DERIVED (fires on the first stop_reported after the subscribe
 // seq); no separate fire/satiate event.
@@ -422,7 +416,7 @@ export type SubscribeAction = (typeof SUBSCRIBE_ACTIONS)[number];
 export const SubscribeActionSchema = z.enum(SUBSCRIBE_ACTIONS);
 
 export const SubscribeRequestSchema = z.object({
-  instance_id: z.string().min(1), // canonical instance id ONLY — never a tmux %id
+  agent_id: z.string().min(1), // canonical agent id ONLY — never a tmux %id
   schema_version: z.number().int(),
   action: SubscribeActionSchema.default('close'),
 });
@@ -434,7 +428,7 @@ export const SubscribeRefusalReasonSchema = z.enum(SUBSCRIBE_REFUSAL_REASONS);
 
 export const SubscribeResponseSchema = z.object({
   ok: z.boolean(),
-  instance_id: z.string(),
+  agent_id: z.string(),
   action: SubscribeActionSchema.nullable(),
   subscribed: z.boolean(), // false = refused (never bound / schema mismatch)
   reason: z.string().nullable(),
@@ -445,7 +439,7 @@ export const StopRefusalSchema = z.object({
   ok: z.literal(false),
   refused: z.literal(true),
   reason: StopRefusalReasonSchema,
-  instance_id: z.string(),
+  agent_id: z.string(),
 });
 export type StopRefusal = z.infer<typeof StopRefusalSchema>;
 
@@ -455,7 +449,7 @@ export const ReconcileResponseSchema = z.object({
   replay_ms: z.number(),
   bindings: z.number().int(),
   freelist: z.number().int(),
-  instances: z.number().int(),
+  agents: z.number().int(),
   // New contradictions flagged this reconcile pass, and all currently-open ones.
   new_contradictions: z.array(OpenContradictionSchema),
   open_contradictions: z.array(OpenContradictionSchema),
@@ -475,7 +469,6 @@ export type ReconcileResponse = z.infer<typeof ReconcileResponseSchema>;
 export const EstateReadResponseSchema = z.object({
   schema_version: z.number().int(),
   rows: z.array(ActivityBoardRowSchema),
-  static_personas: HealthSchema.shape.static_personas,
   tints: HealthSchema.shape.tints,
 });
 export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;
@@ -529,25 +522,6 @@ export const TmuxLifecycleEventResponseSchema = z.object({
 });
 export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventResponseSchema>;
 
-export const StaticLaunchHandshakeSchema = z.object({
-  launch_id: z.string().uuid(),
-  token: z.string().min(32),
-  instance_id: z.string().uuid(),
-  seat_id: z.string().min(1),
-  engine: z.enum(['claude', 'codex']),
-  wrapper_pid: z.number().int().positive(),
-  engine_pid: z.number().int().positive(),
-  engine_executable: z.string().startsWith('/'),
-});
-export type StaticLaunchHandshake = z.infer<typeof StaticLaunchHandshakeSchema>;
-
-export const StaticLaunchHandshakeResponseSchema = z.object({
-  ok: z.boolean(),
-  acknowledged: z.boolean(),
-  reason: z.string().nullable(),
-});
-export type StaticLaunchHandshakeResponse = z.infer<typeof StaticLaunchHandshakeResponseSchema>;
-
 // Communications are admitted as one atomic request.  `message` is opaque;
 // txd never parses or normalizes it.  Pages are resolved to an immutable list
 // before the accepted event is appended.
@@ -555,7 +529,7 @@ export const MAX_COMM_MESSAGE_BYTES = 64 * 1024;
 export const COMM_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
 export const CommRequestSchema = z.object({
   schema_version: z.number().int(),
-  source_instance_id: z.string().min(1),
+  source_agent_id: z.string().min(1),
   target: z.string().min(1).optional(),
   page: z.string().min(1).optional(),
   message: z.string().refine((value) => new TextEncoder().encode(value).length <= MAX_COMM_MESSAGE_BYTES, 'message exceeds maximum encoded size'),
@@ -568,22 +542,22 @@ export const CommRequestSchema = z.object({
 });
 export type CommRequest = z.infer<typeof CommRequestSchema>;
 
-export const CommTargetSchema = z.object({ instance_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
+export const CommTargetSchema = z.object({ agent_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
 export type CommTarget = z.infer<typeof CommTargetSchema>;
 export const CommAcceptedSchema = z.object({
   ok: z.literal(true), message_id: z.string(), ask_id: z.string().nullable(),
-  source_instance_id: z.string(), targets: z.array(CommTargetSchema), bytes_sent: z.boolean(), event_ids: z.array(z.number().int()),
+  source_agent_id: z.string(), targets: z.array(CommTargetSchema), bytes_sent: z.boolean(), event_ids: z.array(z.number().int()),
 });
 export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
 
 export const CommHookSchema = z.object({
-  schema_version: z.number().int(), instance_id: z.string().min(1), message_id: z.string().min(1).optional(),
+  schema_version: z.number().int(), agent_id: z.string().min(1), message_id: z.string().min(1).optional(),
   content: z.string().optional(), stop_event_id: z.string().min(1).optional(),
 });
 export type CommHook = z.infer<typeof CommHookSchema>;
 
 export const CommWaitRequestSchema = z.object({
-  schema_version: z.number().int(), ask_id: z.string().min(1), subscriber_instance_id: z.string().min(1),
+  schema_version: z.number().int(), ask_id: z.string().min(1), subscriber_agent_id: z.string().min(1),
   timeout_ms: z.number().int().min(COMM_WAIT_TIMEOUT_MS).default(COMM_WAIT_TIMEOUT_MS),
 });
 export type CommWaitRequest = z.infer<typeof CommWaitRequestSchema>;
@@ -623,7 +597,7 @@ export const ModeTransitionResponseSchema = z.object({
   ok: z.boolean(),
   target: z.string(),
   seat_id: z.string(),
-  instance_id: z.string(),
+  agent_id: z.string(),
   engine: z.enum(['claude', 'codex']),
   intent: ModeTransitionIntentSchema,
   trigger: ModeTransitionTriggerSchema,
