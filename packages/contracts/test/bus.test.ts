@@ -13,7 +13,7 @@ const record = {
   seq: 42,
   event_type: "hook.stop",
   source: "claude",
-  payload: { instance_id: "i1", schema_version: 6 },
+  payload: { agent_id: "i1", schema_version: 6 },
   provenance: { ingress: "hooks", transport_receipt: "edge_proxy", machine: "k12-personal" },
   occurred_at: "2026-07-22T00:00:00.000Z",
   recorded_at: "2026-07-22T00:00:00.100Z",

@@ -91,7 +91,7 @@ describe.skipIf(!endpoint)('migration 0012 send purge (live postgres 18)', () =>
     }
     await seeded.append({
       entity_type: 'seat', entity_id: 'palace:W', event_type: 'reg.bound',
-      payload: { instance_id: 'i1', persona: 'p', tint: '#111111' }, provenance: prov,
+      payload: { agent_id: 'i1', persona: 'p', tint: '#111111' }, provenance: prov,
       occurred_at: '2026-07-01T00:00:02.000Z',
     });
     // A store carrying legacy rows cannot replay: the boundary refuses loudly.

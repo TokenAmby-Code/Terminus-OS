@@ -45,8 +45,9 @@ import {
   EstateRotateRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
+  PhysicalDeclarationSchema,
+  AgentSchema,
   StopRequestSchema,
-  StaticLaunchHandshakeSchema,
   SubscribeRequestSchema,
   TmuxLifecycleEventRequestSchema,
   WrapperStartHookSchema,
@@ -69,6 +70,9 @@ export type Route = {
 // else delivered on the lane is acked untouched (ack ≠ consume).
 export const CONSUMED_BUS_EVENT_TYPES = [
   'hook.wrapper_start',
+  'hook.session_start',
+  'agent.physical_declared',
+  'agent.registered',
   'hook.stop',
   'hook.user_prompt_submit',
 ] as const;
@@ -82,7 +86,7 @@ function stringField(payload: Record<string, unknown>, field: string): string | 
 
 function stopHookInput(payload: Record<string, unknown>, seq: number): unknown {
   return {
-    instance_id: payload.instance_id,
+    agent_id: payload.agent_id,
     schema_version: payload.schema_version ?? SCHEMA_VERSION,
     content: stringField(payload, 'content') ?? stringField(payload, 'last_assistant_message'),
     stop_event_id: stringField(payload, 'stop_event_id') ?? `bus:${seq}`,
@@ -92,7 +96,7 @@ function stopHookInput(payload: Record<string, unknown>, seq: number): unknown {
 function promptHookInput(payload: Record<string, unknown>): unknown {
   const prompt = stringField(payload, 'prompt');
   return {
-    instance_id: payload.instance_id,
+    agent_id: payload.agent_id,
     schema_version: payload.schema_version ?? SCHEMA_VERSION,
     message_id: stringField(payload, 'message_id') ?? prompt?.match(TX_COMM_FRAME)?.[1],
     content: stringField(payload, 'content'),
@@ -345,17 +349,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         return json(result, result.ok ? 200 : 409);
       },
     },
-    {
-      method: 'POST',
-      match: exact('/ingress/static-launch'),
-      label: 'POST /ingress/static-launch',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, StaticLaunchHandshakeSchema, 'invalid_static_launch_handshake');
-        if (parsed instanceof Response) return parsed;
-        const result = await daemon.acknowledgeStaticLaunch(parsed);
-        return json(result, result.acknowledged ? 200 : 409);
-      },
-    },
     // ── /agents/* — the deliberate-action plane ─────────────────────────────
     {
       method: 'POST',
@@ -431,6 +424,27 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           const result = await daemon.attestWrapperStart(hook.data);
           return ack(result.attested, result.reason);
         }
+        if (event.event_type === 'agent.physical_declared') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const declaration = PhysicalDeclarationSchema.safeParse(event.payload);
+          if (!declaration.success) return ack(false, 'invalid_physical_declaration');
+          await daemon.recordPhysicalDeclaration(declaration.data);
+          return ack(true, null);
+        }
+        if (event.event_type === 'hook.session_start') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const agentId = stringField(event.payload, 'agent_id');
+          if (!agentId) return ack(false, 'invalid_session_start_payload');
+          await daemon.attestEngineSession(agentId, busReceipt);
+          return ack(true, null);
+        }
+        if (event.event_type === 'agent.registered') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const agent = AgentSchema.safeParse(event.payload);
+          if (!agent.success) return ack(false, 'invalid_registered_agent');
+          await daemon.activateRegisteredAgent(agent.data);
+          return ack(true, null);
+        }
         if (event.event_type === 'hook.stop') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const stop = StopRequestSchema.safeParse(stopHookInput(event.payload, event.seq));
@@ -440,7 +454,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           // but the DELIVERY is acked — a ghost must not wedge the lane.
           if ('refused' in res) return ack(false, res.reason);
           if (stop.data.content !== undefined) {
-            await daemon.commStop(stop.data.instance_id, stop.data.content, stop.data.stop_event_id ?? null, busReceipt);
+            await daemon.commStop(stop.data.agent_id, stop.data.content, stop.data.stop_event_id ?? null, busReceipt);
           }
           return ack(true, null, { receipt: res });
         }
@@ -472,7 +486,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const body: EstateReadResponse = {
           schema_version: SCHEMA_VERSION,
           rows: await daemon.estateRows(),
-          static_personas: await daemon.staticPersonaReadiness(),
           tints: await daemon.tintReadiness(),
         };
         return json(body);

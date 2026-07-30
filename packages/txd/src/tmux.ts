@@ -11,7 +11,7 @@
 // tmux dependency; on-box acceptance exercises the real plane.
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
-import { open, readFile, readlink } from 'node:fs/promises';
+import { open, readFile, readlink, readdir } from 'node:fs/promises';
 import {
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
@@ -28,12 +28,10 @@ export type EstateEnsureResult = {
   rebuilt_pages: TxdPage[];
 };
 export type EstateGeneration = 'empty' | 'canonical' | 'council-mechanicus' | 'migration-interrupted' | 'recoverable' | 'foreign';
-export type StaticAgentLaunch = {
+export type PerpetualAgentLaunch = {
   seatId: string;
   engine: 'claude' | 'codex';
   wrapper: string;
-  workspace: string;
-  environment: Record<string, string>;
 };
 export type WrapperPlacementAttestation =
   | {
@@ -54,6 +52,18 @@ export type WrapperPlacementAttestation =
         | 'pane_generation_missing'
         | 'ambiguous_placement'
         | 'process_changed';
+    };
+export type EnginePlacementAttestation =
+  | {
+      ok: true;
+      engine_pid: number;
+      engine_binary: string;
+      cwd: string;
+      process_start_ticks: string;
+    }
+  | {
+      ok: false;
+      reason: 'engine_process_missing' | 'engine_process_ambiguous' | 'engine_process_changed';
     };
 
 // Below-membrane delivery outcome (discriminated by verdict). `partial_delivered`
@@ -103,16 +113,8 @@ export interface TmuxControlPlane {
   resetSeat(seatId: string): Promise<boolean>;
   /** Reconstruct every terminal process and the declared geometry inside one page border. */
   rebuildPage(page: string): Promise<boolean>;
-  /** Start through the sanctioned wrapper in the already-declared physical seat. */
-  startStaticAgent(launch: StaticAgentLaunch): Promise<boolean>;
-  /** Prove the wrapper/engine process pair belongs to the expected physical seat. */
-  attestStaticAgent(
-    seatId: string,
-    wrapperPid: number,
-    enginePid: number,
-    engine: 'claude' | 'codex',
-    engineExecutable: string,
-  ): Promise<boolean>;
+  /** Start a configured perpetual engine through the same generic wrapper as a manual launch. */
+  startPerpetualAgent(launch: PerpetualAgentLaunch): Promise<boolean>;
   /** Apply or clear the persona tint and verify both pane-local tmux style options. */
   setSeatTint(seatId: string, tint: string | null): Promise<boolean>;
   /** Observe the verified pane-local tint; undefined means absent/unreadable, null means fail-dark. */
@@ -121,6 +123,8 @@ export interface TmuxControlPlane {
   seatGeneration(seatId: string): Promise<string | undefined>;
   /** Resolve a wrapper PID to canonical pane truth through /proc ancestry and tmux witnesses. */
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
+  /** Resolve the wrapper's sole direct engine child and return kernel witnesses. */
+  attestEnginePlacement(wrapperPid: number): Promise<EnginePlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   /** Apply one semantic plan-mode intent with engine-specific input and screen read-back. */
@@ -1013,50 +1017,15 @@ export class RealTmux implements TmuxControlPlane {
     return `'${value.replaceAll("'", "'\"'\"'")}'`;
   }
 
-  async startStaticAgent(launch: StaticAgentLaunch): Promise<boolean> {
+  async startPerpetualAgent(launch: PerpetualAgentLaunch): Promise<boolean> {
     const paneId = await this.resolvePane(launch.seatId);
     if (!paneId) return false;
-    const environment = Object.entries(launch.environment)
-      .filter(([key]) => key !== PANE_ID_ENV)
-      .flatMap(([key, value]) => ['-e', `${key}=${value}`]);
     const command = `exec /usr/bin/env ${PANE_ID_ENV}=${this.shellQuote(launch.seatId)} ${this.shellQuote(launch.wrapper)} ${launch.engine}`;
-    const result = await this.command('start_static_agent', launch.seatId, [
-      'respawn-pane', '-k', '-c', launch.workspace,
-      ...paneEnvironment(launch.seatId), ...environment, '-t', paneId, command,
+    const result = await this.command('start_perpetual_agent', launch.seatId, [
+      'respawn-pane', '-k',
+      ...paneEnvironment(launch.seatId), '-t', paneId, command,
     ]);
     return result.code === 0;
-  }
-
-  async attestStaticAgent(
-    seatId: string,
-    wrapperPid: number,
-    enginePid: number,
-    engine: 'claude' | 'codex',
-    engineExecutable: string,
-  ): Promise<boolean> {
-    const paneId = await this.resolvePane(seatId);
-    if (!paneId) return false;
-    const pane = await this.command('attest_static_agent', seatId, [
-      'display-message', '-p', '-t', paneId, '#{pane_pid}\t#{pane_dead}',
-    ]);
-    if (pane.code !== 0) return false;
-    const [observedPid, dead] = pane.stdout.trim().split('\t');
-    if (Number(observedPid) !== wrapperPid || dead !== '0') return false;
-    try {
-      const [rawStat, rawComm, observedExecutable] = await Promise.all([
-        readFile(`/proc/${enginePid}/stat`, 'utf8'),
-        readFile(`/proc/${enginePid}/comm`, 'utf8'),
-        readlink(`/proc/${enginePid}/exe`),
-      ]);
-      const afterName = rawStat.slice(rawStat.lastIndexOf(')') + 2).trim().split(/\s+/);
-      const parentPid = Number(afterName[1]);
-      const processName = rawComm.trim();
-      return parentPid === wrapperPid
-        && processName === engine
-        && observedExecutable === engineExecutable;
-    } catch {
-      return false;
-    }
   }
 
   private async observePaneStyles(
@@ -1154,6 +1123,37 @@ export class RealTmux implements TmuxControlPlane {
         ancestry.map((witness) => [String(witness.pid), witness.start_ticks]),
       ),
     };
+  }
+
+  async attestEnginePlacement(wrapperPid: number): Promise<EnginePlacementAttestation> {
+    const children: ProcessWitness[] = [];
+    for (const entry of await readdir('/proc')) {
+      if (!/^[1-9][0-9]*$/.test(entry)) continue;
+      const witness = await processWitness(Number(entry));
+      if (witness?.parent_pid === wrapperPid) children.push(witness);
+    }
+    if (children.length === 0) return { ok: false, reason: 'engine_process_missing' };
+    if (children.length !== 1) return { ok: false, reason: 'engine_process_ambiguous' };
+    const child = children[0]!;
+    try {
+      const [engine_binary, cwd, after] = await Promise.all([
+        readlink(`/proc/${child.pid}/exe`),
+        readlink(`/proc/${child.pid}/cwd`),
+        processWitness(child.pid),
+      ]);
+      if (!after || after.parent_pid !== wrapperPid || after.start_ticks !== child.start_ticks) {
+        return { ok: false, reason: 'engine_process_changed' };
+      }
+      return {
+        ok: true,
+        engine_pid: child.pid,
+        engine_binary,
+        cwd,
+        process_start_ticks: child.start_ticks,
+      };
+    } catch {
+      return { ok: false, reason: 'engine_process_changed' };
+    }
   }
 
   async setSeatTint(seatId: string, tint: string | null): Promise<boolean> {
@@ -1301,8 +1301,8 @@ export class FakeTmux implements TmuxControlPlane {
   reachableFlag = true;
   killed = false;
   private commands = new Map<string, string>();
-  private staticAgents = new Map<string, { wrapperPid: number; enginePid: number; engine: 'claude' | 'codex'; launch: StaticAgentLaunch }>();
-  private staticStartFailures = new Set<string>();
+  private perpetualAgents = new Map<string, PerpetualAgentLaunch>();
+  private perpetualStartFailures = new Set<string>();
   private tints = new Map<string, string>();
   private tintFailures = new Set<string>();
   private tintClearFailures = new Set<string>();
@@ -1315,6 +1315,12 @@ export class FakeTmux implements TmuxControlPlane {
   private attachedClients = new Set<string>();
   private deliveredSelections: string[] = [];
   private wrapperPlacements = new Map<number, string>();
+  private enginePlacements = new Map<number, {
+    engine_pid: number;
+    engine_binary: string;
+    cwd: string;
+    process_start_ticks: string;
+  }>();
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
@@ -1512,7 +1518,7 @@ export class FakeTmux implements TmuxControlPlane {
     this.shape.sessions = [TXD_SESSION];
     this.shape.windows[page] = seats;
     for (const [seat] of this.seats) if (seat.startsWith(`${page}:`)) this.seats.delete(seat);
-    for (const [seat] of this.staticAgents) if (seat.startsWith(`${page}:`)) this.staticAgents.delete(seat);
+    for (const [seat] of this.perpetualAgents) if (seat.startsWith(`${page}:`)) this.perpetualAgents.delete(seat);
     for (const [seat] of this.tints) if (seat.startsWith(`${page}:`)) this.tints.delete(seat);
     for (const seat of seats) {
       this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
@@ -1521,36 +1527,17 @@ export class FakeTmux implements TmuxControlPlane {
     this.pageRebuilds.push(page);
     return true;
   }
-  async startStaticAgent(launch: StaticAgentLaunch): Promise<boolean> {
-    if (this.staticStartFailures.has(launch.seatId)) return false;
+  async startPerpetualAgent(launch: PerpetualAgentLaunch): Promise<boolean> {
+    if (this.perpetualStartFailures.has(launch.seatId)) return false;
     const seat = this.seats.get(launch.seatId);
     if (!seat || seat.pane === 'dead') return false;
-    const ordinal = this.staticAgents.size + 1;
-    this.staticAgents.set(launch.seatId, {
-      wrapperPid: 10_000 + ordinal,
-      enginePid: 20_000 + ordinal,
-      engine: launch.engine,
-      launch,
-    });
+    this.perpetualAgents.set(launch.seatId, launch);
     this.commands.set(launch.seatId, launch.engine);
     return true;
   }
-  failStaticAgentStart(seatId: string): void { this.staticStartFailures.add(seatId); }
-  staticAgent(seatId: string) {
-    return this.staticAgents.get(seatId);
-  }
-  async attestStaticAgent(
-    seatId: string,
-    wrapperPid: number,
-    enginePid: number,
-    engine: 'claude' | 'codex',
-    engineExecutable: string,
-  ): Promise<boolean> {
-    const agent = this.staticAgents.get(seatId);
-    return agent?.wrapperPid === wrapperPid
-      && agent.enginePid === enginePid
-      && agent.engine === engine
-      && engineExecutable === `/sanctioned/${engine}`;
+  failPerpetualAgentStart(seatId: string): void { this.perpetualStartFailures.add(seatId); }
+  perpetualAgent(seatId: string): PerpetualAgentLaunch | undefined {
+    return this.perpetualAgents.get(seatId);
   }
   async setSeatTint(seatId: string, tint: string | null): Promise<boolean> {
     const seat = this.seats.get(seatId);
@@ -1576,6 +1563,19 @@ export class FakeTmux implements TmuxControlPlane {
   bindWrapper(wrapperPid: number, seatId: string): void {
     this.wrapperPlacements.set(wrapperPid, seatId);
   }
+  bindEngine(
+    wrapperPid: number,
+    enginePid: number,
+    engineBinary = '/sanctioned/claude',
+    cwd = '/workspace',
+  ): void {
+    this.enginePlacements.set(wrapperPid, {
+      engine_pid: enginePid,
+      engine_binary: engineBinary,
+      cwd,
+      process_start_ticks: '300',
+    });
+  }
   async attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation> {
     const pane_id = this.wrapperPlacements.get(wrapperPid);
     if (!pane_id) return { ok: false, reason: 'wrapper_not_in_managed_pane' };
@@ -1594,6 +1594,12 @@ export class FakeTmux implements TmuxControlPlane {
         [String(wrapperPid - 1)]: '100',
       },
     };
+  }
+  async attestEnginePlacement(wrapperPid: number): Promise<EnginePlacementAttestation> {
+    const observed = this.enginePlacements.get(wrapperPid);
+    return observed
+      ? { ok: true, ...observed }
+      : { ok: false, reason: 'engine_process_missing' };
   }
   failTintSeat(seatId: string): void { this.tintFailures.add(seatId); }
   failTintClearSeat(seatId: string): void { this.tintClearFailures.add(seatId); }

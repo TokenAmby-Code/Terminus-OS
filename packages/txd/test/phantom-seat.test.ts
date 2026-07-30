@@ -42,9 +42,9 @@ function setup() {
 test('a cleared seat whose pane is gone is flagged as a phantom', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 9, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 10, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
-  await d.close({ target: 'proof:bus', schema_version: 9 });
+  await d.close({ target: 'proof:bus', schema_version: 10 });
   tmux.deleteOutOfBand('proof:bus');
 
   const rec = await d.reconcile();
@@ -93,9 +93,9 @@ test('a seat dropped from the declaration without a decommission is flagged', as
 test('a phantom is exactly a row with no tint-readiness counterpart', async () => {
   const { tmux, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 9, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 10, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
-  await d.close({ target: 'proof:bus', schema_version: 9 });
+  await d.close({ target: 'proof:bus', schema_version: 10 });
   tmux.deleteOutOfBand('proof:bus');
 
   const rows = await d.estateRows();
@@ -129,7 +129,7 @@ test('a fully-attested estate flags no phantom', async () => {
 test('an observable dead pane is not reported as absent', async () => {
   const { tmux, d } = setup();
   await d.launch({
-    seat_id: 'palace:W', schema_version: 9, identity: 'i-1', persona: 'salamander', tint: '#302800',
+    seat_id: 'palace:W', schema_version: 10, identity: 'i-1', persona: 'salamander', tint: '#302800',
   });
   tmux.killOutOfBand('palace:W');
 
@@ -144,9 +144,9 @@ test('an observable dead pane is not reported as absent', async () => {
 test('a phantom is not double-flagged across reconcile passes', async () => {
   const { tmux, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 9, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 10, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
-  await d.close({ target: 'proof:bus', schema_version: 9 });
+  await d.close({ target: 'proof:bus', schema_version: 10 });
   tmux.deleteOutOfBand('proof:bus');
 
   const first = await d.reconcile();

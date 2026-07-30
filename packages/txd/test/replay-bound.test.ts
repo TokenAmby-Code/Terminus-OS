@@ -15,9 +15,9 @@ test('full projection rebuild is < 1s at 10k events', async () => {
     const seat = `seat:${i}`;
     const inst = `inst:${i}`;
     batch.push({ entity_type: 'seat', entity_id: seat, event_type: 'reg.pane_created', payload: { pane_state: 'live' }, provenance: prov, occurred_at: '2026-07-12T00:00:00Z' });
-    batch.push({ entity_type: 'seat', entity_id: seat, event_type: 'reg.bound', payload: { instance_id: inst, persona: 'p', tint: '#101010' }, provenance: prov, occurred_at: '2026-07-12T00:00:00Z' });
-    batch.push({ entity_type: 'instance', entity_id: inst, event_type: 'act.prompt_submitted', payload: {}, provenance: prov, occurred_at: '2026-07-12T00:00:00Z' });
-    batch.push({ entity_type: 'instance', entity_id: inst, event_type: 'act.receipt_deduped', payload: {}, provenance: prov, occurred_at: '2026-07-12T00:00:00Z' });
+    batch.push({ entity_type: 'seat', entity_id: seat, event_type: 'reg.bound', payload: { agent_id: inst, persona: 'p', tint: '#101010' }, provenance: prov, occurred_at: '2026-07-12T00:00:00Z' });
+    batch.push({ entity_type: 'agent', entity_id: inst, event_type: 'act.prompt_submitted', payload: {}, provenance: prov, occurred_at: '2026-07-12T00:00:00Z' });
+    batch.push({ entity_type: 'agent', entity_id: inst, event_type: 'act.receipt_deduped', payload: {}, provenance: prov, occurred_at: '2026-07-12T00:00:00Z' });
   }
   await store.appendAll(batch);
   expect(await store.count()).toBe(10_000);

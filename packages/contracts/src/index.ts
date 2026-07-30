@@ -4,9 +4,6 @@
 // consume those foundation types. Ops-cockpit read-model converges here later.
 export * from "./envelope.ts";
 export * from "./registration.ts";
-export * from "./ledger.ts";
-export * from "./bind.ts";
-export * from "./tmuxctld.ts";
 export * from "./ephemeral.ts";
 export * from "./notification.ts";
 export * from "./txd.ts";

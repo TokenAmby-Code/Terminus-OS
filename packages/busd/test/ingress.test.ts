@@ -32,7 +32,7 @@ test('a hook POST journals hook.<type> with harness attribution, proxy receipt, 
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/stop`, {
       method: 'POST',
       headers: { 'x-edge-proxy': 'edge_proxy' },
-      body: JSON.stringify({ harness: 'codex', session_id: 's1', instance_id: 'i1', schema_version: 6 }),
+      body: JSON.stringify({ harness: 'codex', session_id: 's1', agent_id: 'i1', schema_version: 6 }),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, seq: 1, event_type: 'hook.stop' });
@@ -41,7 +41,7 @@ test('a hook POST journals hook.<type> with harness attribution, proxy receipt, 
       seq: 1,
       event_type: 'hook.stop',
       source: 'codex',
-      payload: { harness: 'codex', session_id: 's1', instance_id: 'i1', schema_version: 6 },
+      payload: { harness: 'codex', session_id: 's1', agent_id: 'i1', schema_version: 6 },
       provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'k12-personal' },
       occurred_at: '2026-07-22T00:00:00.000Z',
       recorded_at: '2026-07-22T00:00:00.000Z',
@@ -147,7 +147,7 @@ test('the generic door refuses malformed envelopes and schema-version skew loud'
     expect(res.status).toBe(422);
     res = await fetch(`http://127.0.0.1:${srv.port}/ingress/events`, {
       method: 'POST',
-      body: JSON.stringify({ ...valid, schema_version: 999 }),
+      body: JSON.stringify({ ...valid, schema_version: 1099 }),
     });
     expect(res.status).toBe(422);
     expect(((await res.json()) as { error: string }).error).toBe('schema_version_mismatch');
