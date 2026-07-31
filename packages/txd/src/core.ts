@@ -6,6 +6,7 @@
 // projection directly.
 
 import {
+  AGENT_SCHEMA_VERSION,
   SCHEMA_VERSION,
   type ActivityBoardRow,
   type CloseRequest,
@@ -21,6 +22,10 @@ import {
   type CommWaitRequest,
   type CommWaitResponse,
   type CurrentBinding,
+  DispatchAttestedSchema,
+  DispatchRefusedSchema,
+  type DispatchRefused,
+  type DispatchRequested,
   type EventInput,
   type Health,
   type EstateRotateRequest,
@@ -81,6 +86,22 @@ export type PhysicalRegistrationRuntime = {
 
 const COUNCIL_MIGRATION_ID = 'council-four-seat-layout';
 
+// A persona name addresses one agent only while one agent wears it. Several
+// agents may share a worker persona at once, so the caller is told the two
+// identities that always resolve to exactly one seat.
+const AMBIGUOUS_IDENTITY = (identity: string): string =>
+  `identity_ambiguous: ${identity} — address one agent by AGENT_ID or seat id`;
+
+// txd's own answer to "which seat may hold which persona". Derived from the
+// estate declaration, not from anything an asserting service sends: a council
+// seat's canonical id names the one persona it may hold, and every other seat
+// names nobody. tmux attests the canonical id, so this is checkable against the
+// physical estate.
+const COUNCIL_SEAT_PERSONAS = new Map<string, string>(
+  TXD_WINDOWS.council.map((seatId) => [seatId, seatId.slice(seatId.indexOf(':') + 1)]),
+);
+const COUNCIL_PERSONAS = new Set(COUNCIL_SEAT_PERSONAS.values());
+
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
@@ -129,6 +150,71 @@ export class Daemon {
     return { attested: true, reason: null };
   }
 
+  /**
+   * Seat resolution for a dispatch. registrationd owns who an agent becomes;
+   * txd owns where it sits, so a dispatch names a page and gets back whichever
+   * seat on it was free. The seat is started with the sanctioned wrapper and
+   * the birth proceeds from the wrapper's own hook.
+   */
+  dispatch(request: DispatchRequested): Promise<void> {
+    return this.locked(async () => {
+      if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
+      const publish = this.physicalRegistration.publish;
+      const machine = this.physicalRegistration.machine;
+      const refuse = (reason: DispatchRefused['reason']) => publish(
+        'agent.dispatch_refused',
+        DispatchRefusedSchema.parse({
+          schema_version: request.schema_version,
+          dispatch_id: request.dispatch_id,
+          machine,
+          page: request.page,
+          engine: request.engine,
+          reason,
+        }),
+      );
+      if (!isTxdPage(request.page)) {
+        await refuse('page_absent');
+        return;
+      }
+      const events = await this.store.readAll();
+      const pendingResetSeats = this.pendingScopedResetSeats(events);
+      const projections = buildProjections(events);
+      const free = new Set(projections.freelist.map((entry) => entry.seat_id));
+      const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
+      // Declared page order, so which seat a dispatch takes is reproducible.
+      const seatId = TXD_WINDOWS[request.page].find((candidate) =>
+        free.has(candidate)
+        && !projections.decommissionedSeats.has(candidate)
+        && !pendingResetSeats.has(candidate)
+        && (workloads.get(candidate)?.idle ?? false));
+      if (!seatId) {
+        await refuse(pendingResetSeats.size > 0 ? 'estate_reset_pending' : 'page_full');
+        return;
+      }
+      const paneGeneration = await this.tmux.seatGeneration(seatId);
+      if (!paneGeneration) {
+        await refuse('seat_generation_unattested');
+        return;
+      }
+      if (!(await this.tmux.startSeatEngine({
+        seatId,
+        engine: request.engine,
+        wrapper: this.physicalRegistration.agentWrapper,
+      }))) {
+        await refuse('seat_start_failed');
+        return;
+      }
+      await publish('agent.dispatch_attested', DispatchAttestedSchema.parse({
+        schema_version: request.schema_version,
+        dispatch_id: request.dispatch_id,
+        machine,
+        seat_id: seatId,
+        pane_generation: paneGeneration,
+        engine: request.engine,
+      }));
+    });
+  }
+
   recordPhysicalDeclaration(input: PhysicalDeclaration): Promise<void> {
     return this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
@@ -142,6 +228,17 @@ export class Daemon {
           || observed.pane_id !== declaration.pane_id
           || observed.pane_generation !== declaration.pane_generation) {
         throw new Error('physical_declaration_contradicted');
+      }
+      // Level-two coherence. The asserted persona is checked against the seat
+      // tmux says the wrapper is in — never against the pane the declaration
+      // claims, which is the thing under audit. A council persona belongs to
+      // exactly one council seat, so asserting one into a worker seat, or into
+      // another council seat, is incoherent whatever the asserting service
+      // believes. A worker persona names no seat and is constrained by nothing
+      // here — several agents may wear one at once.
+      if (declaration.persona !== null && COUNCIL_PERSONAS.has(declaration.persona)
+          && COUNCIL_SEAT_PERSONAS.get(observed.pane_id) !== declaration.persona) {
+        throw new Error('persona_seat_incoherent');
       }
       const projections = await this.projections();
       const existing = projections.physicalDeclarations.get(declaration.agent_id);
@@ -233,8 +330,8 @@ export class Daemon {
           payload: {
             agent_id: declaration.agent_id,
             birth_generation: declaration.birth_generation,
-            persona: null,
-            rank: null,
+            persona: declaration.persona,
+            rank: declaration.rank,
             commander: null,
             tint: declaration.tint,
             pane_generation: declaration.pane_generation,
@@ -263,7 +360,7 @@ export class Daemon {
         throw new Error('physical_binding_incomplete');
       }
       const placement = PlacementAttestedSchema.parse({
-        schema_version: 1,
+        schema_version: AGENT_SCHEMA_VERSION,
         agent_id: binding.agent_id,
         birth_generation: declaration.birth_generation,
         pane_id: binding.seat_id,
@@ -313,13 +410,18 @@ export class Daemon {
           || binding.configuration_digest !== agent.configuration.digest
           || agent.placement.machine !== this.physicalRegistration.machine
           || agent.placement.kind !== 'local'
-          || binding.tint !== (agent.persona?.tint ?? null)) {
+          || binding.tint !== (agent.persona?.tint ?? null)
+          // The registered agent must be the agent txd signed off at bind time.
+          // registrationd holds the persona authority; txd holds it to the
+          // assertion it already attested rather than transcribing a new one.
+          || binding.persona !== (agent.persona?.persona ?? null)
+          || binding.rank !== (agent.persona?.rank ?? null)) {
         throw new Error('registered_agent_physical_conflict');
       }
       if (binding.registered) {
-        if (binding.persona !== (agent.persona?.persona ?? null)
-            || binding.rank !== (agent.persona?.rank ?? null)
-            || binding.commander !== (agent.persona?.commander ?? null)) {
+        // Persona and rank were attested at bind time and checked above; the
+        // commander arrives with the registration itself.
+        if (binding.commander !== (agent.persona?.commander ?? null)) {
           throw new Error('registered_agent_package_conflict');
         }
         return;
@@ -641,7 +743,7 @@ export class Daemon {
       } else {
         targets = this.commTargets(targetIdentity!, proj);
         if (targets.length === 0) throw new Error(`identity_absent: ${targetIdentity}`);
-        if (targets.length > 1) throw new Error(`identity_ambiguous: ${targetIdentity}`);
+        if (targets.length > 1) throw new Error(AMBIGUOUS_IDENTITY(targetIdentity!));
       }
       const pendingResetSeats = this.pendingScopedResetSeats(events);
       const fenced = targets.find((target) => pendingResetSeats.has(target.seat_id));
@@ -686,7 +788,7 @@ export class Daemon {
         ),
       );
       if (matches.length === 0) throw new Error(`identity_absent: ${req.target}`);
-      if (matches.length > 1) throw new Error(`identity_ambiguous: ${req.target}`);
+      if (matches.length > 1) throw new Error(AMBIGUOUS_IDENTITY(req.target));
       const binding = matches[0]!;
       if (!binding.agent_id || !binding.engine) {
         throw new Error(`engine_unattested: ${req.target}`);
@@ -1305,7 +1407,7 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     await this.store.appendAll(inputs);
     const perpetualEngine = this.physicalRegistration?.perpetual[binding.seat_id];
-    if (perpetualEngine && !(await this.tmux.startPerpetualAgent({
+    if (perpetualEngine && !(await this.tmux.startSeatEngine({
       seatId: binding.seat_id,
       engine: perpetualEngine,
       wrapper: this.physicalRegistration!.agentWrapper,
@@ -1625,7 +1727,7 @@ export class Daemon {
         if (projections.currentBindings.some((binding) => binding.seat_id === seatId)) continue;
         const workload = workloads.get(seatId);
         if (workload && !workload.idle) continue;
-        if (!(await this.tmux.startPerpetualAgent({
+        if (!(await this.tmux.startSeatEngine({
           seatId,
           engine,
           wrapper: this.physicalRegistration!.agentWrapper,

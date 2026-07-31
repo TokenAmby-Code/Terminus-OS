@@ -7,6 +7,8 @@ import {
 type RequestFunction = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 export type TxdPublishedEventType =
+  | 'agent.dispatch_attested'
+  | 'agent.dispatch_refused'
   | 'agent.pane_attested'
   | 'agent.pane_refused'
   | 'agent.placement_attested';

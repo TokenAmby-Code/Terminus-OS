@@ -42,6 +42,7 @@ import {
   CommHookSchema,
   CommRequestSchema,
   CommWaitRequestSchema,
+  DispatchRequestedSchema,
   EstateRotateRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
@@ -71,6 +72,7 @@ export type Route = {
 export const CONSUMED_BUS_EVENT_TYPES = [
   'hook.wrapper_start',
   'hook.session_start',
+  'agent.dispatch_requested',
   'agent.physical_declared',
   'agent.registered',
   'hook.stop',
@@ -81,6 +83,7 @@ const PHYSICAL_REFUSALS = new Set([
   'physical_registration_unconfigured',
   'physical_configuration_skew',
   'physical_declaration_contradicted',
+  'persona_seat_incoherent',
   'physical_declaration_conflict',
   'physical_binding_conflict',
   'physical_declaration_missing',
@@ -450,6 +453,13 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           if (!hook.success) return ack(false, 'invalid_wrapper_start_payload');
           const result = await daemon.attestWrapperStart(hook.data);
           return ack(result.attested, result.reason);
+        }
+        if (event.event_type === 'agent.dispatch_requested') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const requested = DispatchRequestedSchema.safeParse(event.payload);
+          if (!requested.success) return ack(false, 'invalid_dispatch_request');
+          if (requested.data.machine !== machine) return ack(false, 'foreign_machine');
+          return physicalAck(() => daemon.dispatch(requested.data));
         }
         if (event.event_type === 'agent.physical_declared') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');

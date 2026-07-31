@@ -28,7 +28,7 @@ export type EstateEnsureResult = {
   rebuilt_pages: TxdPage[];
 };
 export type EstateGeneration = 'empty' | 'canonical' | 'council-mechanicus' | 'migration-interrupted' | 'recoverable' | 'foreign';
-export type PerpetualAgentLaunch = {
+export type SeatEngineLaunch = {
   seatId: string;
   engine: 'claude' | 'codex';
   wrapper: string;
@@ -113,8 +113,8 @@ export interface TmuxControlPlane {
   resetSeat(seatId: string): Promise<boolean>;
   /** Reconstruct every terminal process and the declared geometry inside one page border. */
   rebuildPage(page: string): Promise<boolean>;
-  /** Start a configured perpetual engine through the same generic wrapper as a manual launch. */
-  startPerpetualAgent(launch: PerpetualAgentLaunch): Promise<boolean>;
+  /** Replace a seat's process with the sanctioned wrapper running the named engine. */
+  startSeatEngine(launch: SeatEngineLaunch): Promise<boolean>;
   /** Apply or clear the persona tint and verify both pane-local tmux style options. */
   setSeatTint(seatId: string, tint: string | null): Promise<boolean>;
   /** Observe the verified pane-local tint; undefined means absent/unreadable, null means fail-dark. */
@@ -1023,11 +1023,11 @@ export class RealTmux implements TmuxControlPlane {
     return `'${value.replaceAll("'", "'\"'\"'")}'`;
   }
 
-  async startPerpetualAgent(launch: PerpetualAgentLaunch): Promise<boolean> {
+  async startSeatEngine(launch: SeatEngineLaunch): Promise<boolean> {
     const paneId = await this.resolvePane(launch.seatId);
     if (!paneId) return false;
     const command = `exec /usr/bin/env ${PANE_ID_ENV}=${this.shellQuote(launch.seatId)} ${this.shellQuote(launch.wrapper)} ${this.shellQuote(launch.engine)}`;
-    const result = await this.command('start_perpetual_agent', launch.seatId, [
+    const result = await this.command('start_seat_engine', launch.seatId, [
       'respawn-pane', '-k',
       ...this.paneEnvironment(launch.seatId), '-t', paneId, command,
     ]);
@@ -1314,8 +1314,8 @@ export class FakeTmux implements TmuxControlPlane {
   reachableFlag = true;
   killed = false;
   private commands = new Map<string, string>();
-  private perpetualAgents = new Map<string, PerpetualAgentLaunch>();
-  private perpetualStartFailures = new Set<string>();
+  private seatEngines = new Map<string, SeatEngineLaunch>();
+  private seatEngineStartFailures = new Set<string>();
   private tints = new Map<string, string>();
   private tintFailures = new Set<string>();
   private tintClearFailures = new Set<string>();
@@ -1531,7 +1531,7 @@ export class FakeTmux implements TmuxControlPlane {
     this.shape.sessions = [TXD_SESSION];
     this.shape.windows[page] = seats;
     for (const [seat] of this.seats) if (seat.startsWith(`${page}:`)) this.seats.delete(seat);
-    for (const [seat] of this.perpetualAgents) if (seat.startsWith(`${page}:`)) this.perpetualAgents.delete(seat);
+    for (const [seat] of this.seatEngines) if (seat.startsWith(`${page}:`)) this.seatEngines.delete(seat);
     for (const [seat] of this.tints) if (seat.startsWith(`${page}:`)) this.tints.delete(seat);
     for (const seat of seats) {
       this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
@@ -1540,17 +1540,17 @@ export class FakeTmux implements TmuxControlPlane {
     this.pageRebuilds.push(page);
     return true;
   }
-  async startPerpetualAgent(launch: PerpetualAgentLaunch): Promise<boolean> {
-    if (this.perpetualStartFailures.has(launch.seatId)) return false;
+  async startSeatEngine(launch: SeatEngineLaunch): Promise<boolean> {
+    if (this.seatEngineStartFailures.has(launch.seatId)) return false;
     const seat = this.seats.get(launch.seatId);
     if (!seat || seat.pane === 'dead') return false;
-    this.perpetualAgents.set(launch.seatId, launch);
+    this.seatEngines.set(launch.seatId, launch);
     this.commands.set(launch.seatId, launch.engine);
     return true;
   }
-  failPerpetualAgentStart(seatId: string): void { this.perpetualStartFailures.add(seatId); }
-  perpetualAgent(seatId: string): PerpetualAgentLaunch | undefined {
-    return this.perpetualAgents.get(seatId);
+  failSeatEngineStart(seatId: string): void { this.seatEngineStartFailures.add(seatId); }
+  seatEngine(seatId: string): SeatEngineLaunch | undefined {
+    return this.seatEngines.get(seatId);
   }
   async setSeatTint(seatId: string, tint: string | null): Promise<boolean> {
     const seat = this.seats.get(seatId);
