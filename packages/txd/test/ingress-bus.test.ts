@@ -8,12 +8,13 @@
 // just ride an ack now instead of a 422.
 
 import { expect, test } from 'bun:test';
-import { BUS_SCHEMA_VERSION, SCHEMA_VERSION, type BusDelivery } from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION, BUS_SCHEMA_VERSION, SCHEMA_VERSION, type BusDelivery } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
 import { findTmuxIdDeep } from '../src/ids.ts';
+import type { TxdPublishedEventType } from '../src/events.ts';
 
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
@@ -51,7 +52,7 @@ test('wrapper start publishes txd-observed pane truth even when the environmenta
     configuration: { generation: 'estate-1', digest: 'a'.repeat(64) },
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
-    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested', payload: Record<string, unknown>) => {
+    publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
   };
@@ -97,7 +98,7 @@ test('wrapper outside a managed pane emits a factual refusal and never attests p
     configuration: { generation: 'estate-1', digest: 'b'.repeat(64) },
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
-    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested', payload: Record<string, unknown>) => {
+    publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
   };
@@ -141,7 +142,7 @@ test('physical signoff precedes registration and routing activation', async () =
     configuration: { generation: 'estate-1', digest: 'c'.repeat(64) },
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
-    publish: async (type: 'agent.pane_attested' | 'agent.pane_refused' | 'agent.placement_attested', payload: Record<string, unknown>) => {
+    publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
   };
@@ -155,7 +156,7 @@ test('physical signoff precedes registration and routing activation', async () =
     tmux.bindEngine(4101, 5101, '/sanctioned/claude', '/workspace');
 
     let response = await post(delivery('agent.physical_declared', {
-      schema_version: 1,
+      schema_version: AGENT_SCHEMA_VERSION,
       agent_id: agentId,
       birth_generation: birthGeneration,
       pane_id: 'palace:W',
@@ -163,13 +164,15 @@ test('physical signoff precedes registration and routing activation', async () =
       configuration: runtime.configuration,
       engine: 'claude',
       wrapper_pid: 4101,
-      tint: '#302800',
+      persona: 'black-shields',
+      rank: 'astartes',
+      tint: '#111111',
     }));
     expect(await response.json()).toMatchObject({ ok: true, consumed: true });
 
     response = await post(delivery('hook.session_start', { agent_id: agentId }));
     expect(await response.json()).toMatchObject({ ok: true, consumed: true });
-    expect(await tmux.seatTint('palace:W')).toBe('#302800');
+    expect(await tmux.seatTint('palace:W')).toBe('#111111');
     expect(published.at(-1)).toMatchObject({
       type: 'agent.placement_attested',
       payload: {
@@ -192,7 +195,7 @@ test('physical signoff precedes registration and routing activation', async () =
     })).rejects.toThrow('source_not_registered');
 
     const agent = {
-      schema_version: 1,
+      schema_version: AGENT_SCHEMA_VERSION,
       agent_id: agentId,
       birth_generation: birthGeneration,
       registered_at: '2026-07-29T12:00:00.000Z',
@@ -214,10 +217,10 @@ test('physical signoff precedes registration and routing activation', async () =
       },
       configuration: runtime.configuration,
       persona: {
-        persona: 'custodes',
-        rank: 'overseer',
+        persona: 'black-shields',
+        rank: 'astartes',
         commander: null,
-        tint: '#302800',
+        tint: '#111111',
         workspace: '/workspace',
         continuity_references: [],
         instruction_package: {
@@ -239,7 +242,7 @@ test('physical signoff precedes registration and routing activation', async () =
       reply: false,
     })).toMatchObject({
       ok: true,
-      targets: [{ agent_id: agentId, seat_id: 'palace:W', persona: 'custodes' }],
+      targets: [{ agent_id: agentId, seat_id: 'palace:W', persona: 'black-shields' }],
     });
   } finally {
     srv.stop(true);

@@ -4,12 +4,13 @@
 import { z } from "zod";
 
 // AGENT_CONTRACT_MIRROR_START
-export const AGENT_SCHEMA_VERSION = 1;
+export const AGENT_SCHEMA_VERSION = 2;
 
 export const AgentIdSchema = z.string().uuid();
 export const BirthGenerationSchema = z.string().uuid();
 export const PaneGenerationSchema = z.string().uuid();
 export const EngineSchema = z.enum(["claude", "codex"]);
+export type Engine = z.infer<typeof EngineSchema>;
 export const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 
 export const InstructionSourceSchema = z.object({
@@ -160,6 +161,10 @@ export const PhysicalDeclarationSchema = z.object({
   }).strict(),
   engine: EngineSchema,
   wrapper_pid: z.number().int().positive(),
+  // registrationd's assertion of who this agent is. txd checks it against the
+  // tmux estate before it signs off — the declaration is a claim, not a fact.
+  persona: z.string().min(1).nullable(),
+  rank: z.string().min(1).nullable(),
   tint: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullable(),
 }).strict();
 export type PhysicalDeclaration = z.infer<typeof PhysicalDeclarationSchema>;
@@ -198,4 +203,42 @@ export const LifecycleReadySchema = z.object({
   }).strict(),
 }).strict();
 export type LifecycleReady = z.infer<typeof LifecycleReadySchema>;
+
+// registrationd orchestrates the launch: it asks for a worker on a page and txd
+// resolves which seat. A dispatch never names a persona and never names a
+// chapter — the seat it lands in is the only input to persona allocation.
+export const DispatchRequestedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  dispatch_id: z.string().uuid(),
+  machine: z.string().min(1),
+  page: z.string().min(1),
+  engine: EngineSchema,
+}).strict();
+export type DispatchRequested = z.infer<typeof DispatchRequestedSchema>;
+
+export const DispatchAttestedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  dispatch_id: z.string().uuid(),
+  machine: z.string().min(1),
+  seat_id: z.string().min(1),
+  pane_generation: PaneGenerationSchema,
+  engine: EngineSchema,
+}).strict();
+export type DispatchAttested = z.infer<typeof DispatchAttestedSchema>;
+
+export const DispatchRefusedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  dispatch_id: z.string().uuid(),
+  machine: z.string().min(1),
+  page: z.string().min(1),
+  engine: EngineSchema,
+  reason: z.enum([
+    "page_absent",
+    "page_full",
+    "seat_generation_unattested",
+    "seat_start_failed",
+    "estate_reset_pending",
+  ]),
+}).strict();
+export type DispatchRefused = z.infer<typeof DispatchRefusedSchema>;
 // AGENT_CONTRACT_MIRROR_END
