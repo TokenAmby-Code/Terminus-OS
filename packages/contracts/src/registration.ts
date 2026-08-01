@@ -4,7 +4,7 @@
 import { z } from "zod";
 
 // AGENT_CONTRACT_MIRROR_START
-export const AGENT_SCHEMA_VERSION = 2;
+export const AGENT_SCHEMA_VERSION = 3;
 
 export const AgentIdSchema = z.string().uuid();
 export const BirthGenerationSchema = z.string().uuid();
@@ -197,14 +197,21 @@ export const LifecycleReadySchema = z.object({
 }).strict();
 export type LifecycleReady = z.infer<typeof LifecycleReadySchema>;
 
-// registrationd orchestrates the launch: it asks for a worker on a page and txd
-// resolves which seat. A dispatch never names a persona and never names a
-// chapter — the seat it lands in is the only input to persona allocation.
+// registrationd orchestrates the launch: it asks txd for a worker placement.
+// A dispatch never names a persona and never names a chapter — the seat the
+// agent lands in is the only input to persona allocation. The target names
+// either a page (txd autofills a free seat on it) or one exact seat.
+export const DispatchTargetSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("page"), page: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal("seat"), seat_id: z.string().min(1) }).strict(),
+]);
+export type DispatchTarget = z.infer<typeof DispatchTargetSchema>;
+
 export const DispatchRequestedSchema = z.object({
   schema_version: z.literal(AGENT_SCHEMA_VERSION),
   dispatch_id: z.string().uuid(),
   machine: z.string().min(1),
-  page: z.string().min(1),
+  target: DispatchTargetSchema,
   engine: EngineSchema,
 }).strict();
 export type DispatchRequested = z.infer<typeof DispatchRequestedSchema>;
@@ -219,19 +226,40 @@ export const DispatchAttestedSchema = z.object({
 }).strict();
 export type DispatchAttested = z.infer<typeof DispatchAttestedSchema>;
 
+// One candidate seat's disqualifier, as the estate store and tmux attest it.
+export const SeatDisqualifierSchema = z.enum([
+  "bound",
+  "decommissioned",
+  "reset_pending",
+  "dead",
+  "foreign_process",
+]);
+export type SeatDisqualifier = z.infer<typeof SeatDisqualifierSchema>;
+
+// A refusal names the seat-level truth: `seats` carries the disqualifier for
+// every candidate the refusal accounts for — each page seat on an autofill
+// refusal, the one named seat on a seat-target refusal.
 export const DispatchRefusedSchema = z.object({
   schema_version: z.literal(AGENT_SCHEMA_VERSION),
   dispatch_id: z.string().uuid(),
   machine: z.string().min(1),
-  page: z.string().min(1),
+  target: DispatchTargetSchema,
   engine: EngineSchema,
   reason: z.enum([
     "page_absent",
-    "page_full",
+    "seat_absent",
+    "no_free_seat",
+    "seat_bound",
+    "seat_decommissioned",
+    "seat_reset_pending",
+    "pane_dead",
     "seat_generation_unattested",
     "seat_start_failed",
-    "estate_reset_pending",
   ]),
+  seats: z.array(z.object({
+    seat_id: z.string().min(1),
+    state: SeatDisqualifierSchema,
+  }).strict()),
 }).strict();
 export type DispatchRefused = z.infer<typeof DispatchRefusedSchema>;
 // AGENT_CONTRACT_MIRROR_END

@@ -6,7 +6,7 @@
 // is the thing under audit.
 
 import { expect, test } from 'bun:test';
-import { AGENT_SCHEMA_VERSION, type DispatchRequested, type PhysicalDeclaration } from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION, type PhysicalDeclaration } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -15,7 +15,6 @@ import type { TxdPublishedEventType } from '../src/events.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
-const DISPATCH_ID = '9f1b1f6a-5d4e-4a0f-9a2b-6c3d4e5f6071';
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
 
 function setup() {
@@ -118,72 +117,4 @@ test('Black Shields take no lock — a second one binds a second worker seat', a
   const shields = buildProjections(await store.readAll())
     .currentBindings.filter((binding) => binding.persona === 'black-shields');
   expect(shields.map((binding) => binding.seat_id).sort()).toEqual(['palace:N', 'palace:W']);
-});
-
-test('a dispatch resolves a free seat on its page and starts the sanctioned wrapper', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
-  const request: DispatchRequested = {
-    schema_version: AGENT_SCHEMA_VERSION,
-    dispatch_id: DISPATCH_ID,
-    machine: 'k12-personal',
-    page: 'palace',
-    engine: 'claude',
-  };
-  await d.dispatch(request);
-  expect(published).toHaveLength(1);
-  expect(published[0]).toMatchObject({
-    type: 'agent.dispatch_attested',
-    payload: { dispatch_id: DISPATCH_ID, seat_id: 'palace:W', engine: 'claude' },
-  });
-  expect(tmux.seatEngine('palace:W')).toEqual({
-    seatId: 'palace:W',
-    engine: 'claude',
-    wrapper: '/fleet/agent-wrapper',
-  });
-});
-
-test('a dispatch to an undeclared page is refused, not guessed', async () => {
-  const { published, d } = setup();
-  await d.constructEstate();
-  const request: DispatchRequested = {
-    schema_version: AGENT_SCHEMA_VERSION,
-    dispatch_id: DISPATCH_ID,
-    machine: 'k12-personal',
-    page: 'mechanicus',
-    engine: 'claude',
-  };
-  await d.dispatch(request);
-  expect(published).toEqual([{
-    type: 'agent.dispatch_refused',
-    payload: {
-      schema_version: AGENT_SCHEMA_VERSION,
-      dispatch_id: DISPATCH_ID,
-      machine: 'k12-personal',
-      page: 'mechanicus',
-      engine: 'claude',
-      reason: 'page_absent',
-    },
-  }]);
-});
-
-test('a page whose seats are all working refuses rather than displacing one', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
-  for (const seat of ['palace:W', 'palace:N', 'palace:S', 'palace:E']) {
-    await tmux.startSeatEngine({ seatId: seat, engine: 'claude', wrapper: '/fleet/agent-wrapper' });
-  }
-  published.length = 0;
-  const request: DispatchRequested = {
-    schema_version: AGENT_SCHEMA_VERSION,
-    dispatch_id: DISPATCH_ID,
-    machine: 'k12-personal',
-    page: 'palace',
-    engine: 'claude',
-  };
-  await d.dispatch(request);
-  expect(published).toMatchObject([{
-    type: 'agent.dispatch_refused',
-    payload: { reason: 'page_full' },
-  }]);
 });

@@ -26,6 +26,7 @@ import {
   DispatchRefusedSchema,
   type DispatchRefused,
   type DispatchRequested,
+  type SeatDisqualifier,
   type EventInput,
   type Health,
   type EstateRotateRequest,
@@ -152,44 +153,89 @@ export class Daemon {
 
   /**
    * Seat resolution for a dispatch. registrationd owns who an agent becomes;
-   * txd owns where it sits, so a dispatch names a page and gets back whichever
-   * seat on it was free. The seat is started with the sanctioned wrapper and
-   * the birth proceeds from the wrapper's own hook.
+   * txd owns where it sits. A page target gets whichever seat on the page is
+   * free; a seat target gets exactly that seat or a seat-level refusal. The
+   * seat is started with the sanctioned wrapper and the birth proceeds from
+   * the wrapper's own hook.
    */
   dispatch(request: DispatchRequested): Promise<void> {
     return this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const publish = this.physicalRegistration.publish;
       const machine = this.physicalRegistration.machine;
-      const refuse = (reason: DispatchRefused['reason']) => publish(
+      const refuse = (reason: DispatchRefused['reason'], seats: DispatchRefused['seats'] = []) => publish(
         'agent.dispatch_refused',
         DispatchRefusedSchema.parse({
           schema_version: request.schema_version,
           dispatch_id: request.dispatch_id,
           machine,
-          page: request.page,
+          target: request.target,
           engine: request.engine,
           reason,
+          seats,
         }),
       );
-      if (!isTxdPage(request.page)) {
-        await refuse('page_absent');
-        return;
-      }
       const events = await this.store.readAll();
       const pendingResetSeats = this.pendingScopedResetSeats(events);
       const projections = buildProjections(events);
-      const free = new Set(projections.freelist.map((entry) => entry.seat_id));
+      const bound = new Set(projections.currentBindings.map((binding) => binding.seat_id));
+      const paneBySeat = new Map(projections.activityBoard.map((row) => [row.seat_id, row.pane]));
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
-      // Declared page order, so which seat a dispatch takes is reproducible.
-      const seatId = TXD_WINDOWS[request.page].find((candidate) =>
-        free.has(candidate)
-        && !projections.decommissionedSeats.has(candidate)
-        && !pendingResetSeats.has(candidate)
-        && (workloads.get(candidate)?.idle ?? false));
-      if (!seatId) {
-        await refuse(pendingResetSeats.size > 0 ? 'estate_reset_pending' : 'page_full');
-        return;
+      // One candidate's seat-level truth, first disqualifier in a fixed order.
+      const disqualify = (candidate: string): Exclude<SeatDisqualifier, 'foreign_process'> | null => {
+        if (projections.decommissionedSeats.has(candidate)) return 'decommissioned';
+        if (pendingResetSeats.has(candidate)) return 'reset_pending';
+        if (bound.has(candidate)) return 'bound';
+        const pane = paneBySeat.get(candidate);
+        if (pane !== 'live' && pane !== 'empty') return 'dead';
+        return null;
+      };
+      const idle = (candidate: string) => workloads.get(candidate)?.idle ?? false;
+      let seatId: string;
+      if (request.target.kind === 'page') {
+        const page = request.target.page;
+        if (!isTxdPage(page)) {
+          await refuse('page_absent');
+          return;
+        }
+        // Declared page order, so which seat an autofill takes is
+        // reproducible. Autofill never displaces a foreign foreground
+        // process: when txd itself is choosing, only an idle shell is free.
+        const states = TXD_WINDOWS[page].map((candidate) => ({
+          seat_id: candidate,
+          state: disqualify(candidate) ?? (idle(candidate) ? null : 'foreign_process' as const),
+        }));
+        const chosen = states.find((candidate) => candidate.state === null);
+        if (!chosen) {
+          await refuse('no_free_seat', states.map((candidate) => ({
+            seat_id: candidate.seat_id,
+            state: candidate.state!,
+          })));
+          return;
+        }
+        seatId = chosen.seat_id;
+      } else {
+        // An explicitly named seat replaces whatever its pane is running —
+        // naming the seat is the authorization, and the CLI's in-place
+        // default resolves to the invoking pane, whose foreground is the
+        // invoker itself. Only a live agent binding or estate-level state
+        // refuses.
+        seatId = request.target.seat_id;
+        if (!TXD_ESTATE.includes(seatId)) {
+          await refuse('seat_absent');
+          return;
+        }
+        const state = disqualify(seatId);
+        if (state !== null) {
+          const reason = ({
+            bound: 'seat_bound',
+            decommissioned: 'seat_decommissioned',
+            reset_pending: 'seat_reset_pending',
+            dead: 'pane_dead',
+          } as const)[state];
+          await refuse(reason, [{ seat_id: seatId, state }]);
+          return;
+        }
       }
       const paneGeneration = await this.tmux.seatGeneration(seatId);
       if (!paneGeneration) {
