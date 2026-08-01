@@ -94,11 +94,11 @@ curl --fail-with-body http://127.0.0.1:7782/ctl/cursors/advance \
   --header 'content-type: application/json' \
   --data '{
     "schema_version": 1,
-    "subscription": "registrationd-k12-personal-agent-lifecycle",
-    "expected_acked_seq": 88686,
-    "through_seq": 109053,
-    "expected_matching_seqs": [108827,108917,108930,108944,109018,109053],
-    "reason": "schema-1 lifecycle generation retired by Emperor ruling"
+    "subscription": "example-consumer",
+    "expected_acked_seq": 42,
+    "through_seq": 57,
+    "expected_matching_seqs": [47,57],
+    "reason": "retire the approved dead event generation"
   }'
 ```
 
