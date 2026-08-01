@@ -234,4 +234,25 @@ export const DispatchRefusedSchema = z.object({
   ]),
 }).strict();
 export type DispatchRefused = z.infer<typeof DispatchRefusedSchema>;
+
+// Post-birth, registrationd never initiates retirement. txd publishes this at
+// the point it writes reg.retired — the reactive leg of the retirement
+// authority split; lifecycled owns the proactive leg. Consumers terminalize
+// the agent row this identifies; birth_generation and pane_generation are
+// nullable because txd attests what the binding actually carried.
+export const RETIREMENT_CAUSES = ["close", "estate_reset", "topology_migration"] as const;
+export const RetirementCauseSchema = z.enum(RETIREMENT_CAUSES);
+export type RetirementCause = z.infer<typeof RetirementCauseSchema>;
+
+export const AgentRetiredSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema.nullable(),
+  seat_id: z.string().min(1),
+  pane_generation: PaneGenerationSchema.nullable(),
+  machine: z.string().min(1),
+  cause: RetirementCauseSchema,
+  retired_at: z.string().datetime({ offset: true }),
+}).strict();
+export type AgentRetired = z.infer<typeof AgentRetiredSchema>;
 // AGENT_CONTRACT_MIRROR_END
