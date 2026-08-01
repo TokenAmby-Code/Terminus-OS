@@ -263,3 +263,32 @@ test("graceful stop awaits an admitted replay delivery before closing its store 
   expect(stopped).toBe(true);
   expect((await store.projection(admission.replay_id))?.deliveries[0]?.status).toBe("delivered");
 });
+
+test("a settled 2xx cannot park its delivery lane or graceful shutdown in body disposal", async () => {
+  const store = new MemoryBusStore();
+  store.setSubscription({ name: "consumer", delivery_url: DELIVERY_URL, event_pattern: "hook.%", active: true });
+  store.seedCursor("consumer", 0);
+  await store.append(busEvent());
+
+  let disposalObserved!: () => void;
+  const observed = new Promise<void>((resolve) => { disposalObserved = resolve; });
+  const fetchImpl = (async () => ({
+    ok: true,
+    status: 200,
+    body: {
+      cancel: () => {
+        disposalObserved();
+        return new Promise<void>(() => {});
+      },
+    },
+  })) as unknown as typeof fetch;
+  const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
+  dispatcher.start();
+
+  await observed;
+  await Promise.resolve();
+  await Promise.resolve();
+
+  expect(await store.cursor("consumer")).toBe(1);
+  await dispatcher.stop();
+});
