@@ -1458,8 +1458,11 @@ export class FakeTmux implements TmuxControlPlane {
     return true;
   }
   async resetSeat(seatId: string): Promise<boolean> {
+    // `respawn-pane -k` replaces the pane's process in place: a live process
+    // is killed, a remain-on-exit corpse is revived. Only a missing pane has
+    // nothing to respawn.
     const s = this.seats.get(seatId);
-    if (!s || s.pane === 'dead') return false;
+    if (!s) return false;
     s.pane = 'live';
     this.commands.delete(seatId);
     this.tints.delete(seatId);
