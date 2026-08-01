@@ -54,7 +54,7 @@ final immutable registration snapshot contains:
 - schema version, `agent_id`, birth generation, and terminal registration time;
 - engine and normalized launch metadata;
 - attested pane ID, pane generation, machine, placement kind, wrapper PID,
-  engine PID, cwd, and transport witnesses;
+  and transport witnesses;
 - the configuration generation and digest used by both registrationd and txd;
 - optional persona, rank, commander, tint, workspace, continuity references,
   and the instruction-package digest and sources;
@@ -133,17 +133,17 @@ The wrapper is the sole caller of raw Claude and Codex binaries:
 6. The wrapper exports `AGENT_ID`, removes all registration-only inputs, and
    starts the raw engine.
 7. registrationd emits `agent.placement_declared`. txd verifies the current
-   generation, applies and reads back tint, updates physical occupancy, and
-   emits `agent.placement_attested` or `agent.placement_refused`.
-8. The engine's literal `hook.session_start` carries `AGENT_ID`.
-9. lifecycled durably joins registration preparation, txd placement, and
-   SessionStart, then emits `agent.lifecycle_ready`.
-10. registrationd verifies the same generation, commits the final row, and
-    emits the sole authoritative `agent.registered` snapshot.
+   generation, binds the seat, applies and reads back tint, updates physical
+   occupancy, and emits `agent.placement_attested` or
+   `agent.placement_refused` — all at wrapper placement, before the engine
+   takes a first turn.
+8. lifecycled durably joins registration preparation and txd placement, then
+   emits `agent.lifecycle_ready`.
+9. registrationd verifies the same generation, commits the final row, and
+   emits the sole authoritative `agent.registered` snapshot.
 
-Prepared registration, a pane claim, a tint, physical signoff, or SessionStart
-alone never makes an agent routable. Consumers activate only from
-`agent.registered`.
+Prepared registration, a pane claim, a tint, or physical signoff alone never
+makes an agent routable. Consumers activate only from `agent.registered`.
 
 `hook.wrapper_stop`, literal engine stop hooks, pane death, transport loss,
 replacement generations, and retirement use the same event discipline.
@@ -206,7 +206,7 @@ the implicitly supplied caller agent.
 The locked event vocabulary is:
 
 - ingress: `hook.wrapper_start`, `hook.wrapper_stop`, and literal
-  `hook.session_start`, `hook.stop`, and related vendor hooks;
+  `hook.stop` and related vendor hooks;
 - registrationd: `agent.registration_prepared`,
   `agent.placement_declared`, `agent.registration_compensated`,
   `agent.registration_failed`, and `agent.registered`;

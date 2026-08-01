@@ -215,7 +215,14 @@ export class Daemon {
     });
   }
 
-  recordPhysicalDeclaration(input: PhysicalDeclaration): Promise<void> {
+  /**
+   * The whole wrapper-placement phase in one serialized op: record the
+   * declaration, bind the seat, paint the tint, and attest placement. The
+   * declaration is the earliest moment placement is attested and the persona
+   * assertion (including tint) is in hand, so the agent is bound and visible
+   * before its engine takes a first turn.
+   */
+  recordPhysicalDeclaration(input: PhysicalDeclaration, receipt: string | null = null): Promise<void> {
     return this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const declaration = PhysicalDeclarationSchema.parse(input);
@@ -240,53 +247,34 @@ export class Daemon {
           && COUNCIL_SEAT_PERSONAS.get(observed.pane_id) !== declaration.persona) {
         throw new Error('persona_seat_incoherent');
       }
-      const projections = await this.projections();
-      const existing = projections.physicalDeclarations.get(declaration.agent_id);
-      if (existing) {
-        if (JSON.stringify(existing) !== JSON.stringify(declaration)) {
-          throw new Error('physical_declaration_conflict');
-        }
-        return;
-      }
-      if (projections.currentBindings.some((binding) =>
-        binding.agent_id === declaration.agent_id || binding.seat_id === declaration.pane_id)) {
-        throw new Error('physical_binding_conflict');
-      }
-      await this.store.append({
-        entity_type: 'agent',
-        entity_id: declaration.agent_id,
-        event_type: 'reg.physical_declared',
-        payload: declaration,
-        provenance: this.prov('observer', null),
-        occurred_at: this.now(),
-      });
-    });
-  }
-
-  attestEngineSession(agentId: string, receipt: string | null): Promise<void> {
-    return this.locked(async () => {
-      if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       let projections = await this.projections();
-      const declaration = projections.physicalDeclarations.get(agentId);
-      if (!declaration) {
-        const already = projections.currentBindings.find((binding) => binding.agent_id === agentId);
-        if (already?.registered) return;
-        throw new Error('physical_declaration_missing');
+      const existing = projections.physicalDeclarations.get(declaration.agent_id);
+      if (existing && JSON.stringify(existing) !== JSON.stringify(declaration)) {
+        throw new Error('physical_declaration_conflict');
       }
-      let binding = projections.currentBindings.find((candidate) => candidate.agent_id === agentId);
+      if (!existing) {
+        if (projections.currentBindings.some((binding) =>
+          binding.agent_id === declaration.agent_id || binding.seat_id === declaration.pane_id)) {
+          throw new Error('physical_binding_conflict');
+        }
+        await this.store.append({
+          entity_type: 'agent',
+          entity_id: declaration.agent_id,
+          event_type: 'reg.physical_declared',
+          payload: declaration,
+          provenance: this.prov('observer', receipt),
+          occurred_at: this.now(),
+        });
+        projections = await this.projections();
+      }
+      let binding = projections.currentBindings.find(
+        (candidate) => candidate.agent_id === declaration.agent_id,
+      );
       if (binding?.birth_generation === declaration.birth_generation
-          && projections.placementAttestedAgents.has(agentId)) {
+          && projections.placementAttestedAgents.has(declaration.agent_id)) {
         return;
       }
       if (!binding) {
-        const wrapper = await this.tmux.attestWrapperPlacement(declaration.wrapper_pid);
-        if (!wrapper.ok
-            || wrapper.pane_id !== declaration.pane_id
-            || wrapper.pane_generation !== declaration.pane_generation) {
-          throw new Error('wrapper_placement_changed');
-        }
-        const engine = await this.tmux.attestEnginePlacement(declaration.wrapper_pid);
-        if (!engine.ok) throw new Error(engine.reason);
         const occupied = projections.currentBindings.some((candidate) =>
           candidate.seat_id === declaration.pane_id || candidate.agent_id === declaration.agent_id,
         );
@@ -301,9 +289,6 @@ export class Daemon {
             birth_generation: declaration.birth_generation,
             engine: declaration.engine,
             wrapper_pid: declaration.wrapper_pid,
-            engine_pid: engine.engine_pid,
-            engine_executable: engine.engine_binary,
-            cwd: engine.cwd,
             configuration_generation: declaration.configuration.generation,
             configuration_digest: declaration.configuration.digest,
             tint: declaration.tint,
@@ -337,9 +322,6 @@ export class Daemon {
             pane_generation: declaration.pane_generation,
             engine: declaration.engine,
             wrapper_pid: declaration.wrapper_pid,
-            engine_pid: engine.engine_pid,
-            engine_executable: engine.engine_binary,
-            cwd: engine.cwd,
             configuration_generation: declaration.configuration.generation,
             configuration_digest: declaration.configuration.digest,
             binding_prepare_id: prepareId,
@@ -348,13 +330,12 @@ export class Daemon {
           occurred_at: occurredAt,
         });
         projections = await this.projections();
-        binding = projections.currentBindings.find((candidate) => candidate.agent_id === agentId);
+        binding = projections.currentBindings.find(
+          (candidate) => candidate.agent_id === declaration.agent_id,
+        );
       }
       if (!binding?.agent_id
           || !binding.wrapper_pid
-          || !binding.engine_pid
-          || !binding.engine_executable
-          || !binding.cwd
           || !binding.configuration_generation
           || !binding.configuration_digest) {
         throw new Error('physical_binding_incomplete');
@@ -372,10 +353,7 @@ export class Daemon {
         machine: this.physicalRegistration.machine,
         kind: 'local',
         wrapper_pid: binding.wrapper_pid,
-        engine_pid: binding.engine_pid,
-        engine_binary: binding.engine_executable,
-        cwd: binding.cwd,
-        transport_witnesses: { session_start_receipt: receipt },
+        transport_witnesses: { physical_declared_receipt: receipt },
       });
       await this.physicalRegistration.publish('agent.placement_attested', placement);
       await this.store.append({
@@ -402,10 +380,7 @@ export class Daemon {
           || binding.seat_id !== agent.placement.pane_id
           || binding.pane_generation !== agent.placement.pane_generation
           || binding.wrapper_pid !== agent.placement.wrapper_pid
-          || binding.engine_pid !== agent.placement.engine_pid
           || binding.engine !== agent.engine
-          || binding.engine_executable !== agent.launch.engine_binary
-          || binding.cwd !== agent.placement.cwd
           || binding.configuration_generation !== agent.configuration.generation
           || binding.configuration_digest !== agent.configuration.digest
           || agent.placement.machine !== this.physicalRegistration.machine

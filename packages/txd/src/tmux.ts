@@ -11,7 +11,7 @@
 // tmux dependency; on-box acceptance exercises the real plane.
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
-import { open, readFile, readlink, readdir } from 'node:fs/promises';
+import { open, readFile } from 'node:fs/promises';
 import {
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
@@ -52,18 +52,6 @@ export type WrapperPlacementAttestation =
         | 'pane_generation_missing'
         | 'ambiguous_placement'
         | 'process_changed';
-    };
-export type EnginePlacementAttestation =
-  | {
-      ok: true;
-      engine_pid: number;
-      engine_binary: string;
-      cwd: string;
-      process_start_ticks: string;
-    }
-  | {
-      ok: false;
-      reason: 'engine_process_missing' | 'engine_process_ambiguous' | 'engine_process_changed';
     };
 
 // Below-membrane delivery outcome (discriminated by verdict). `partial_delivered`
@@ -123,8 +111,6 @@ export interface TmuxControlPlane {
   seatGeneration(seatId: string): Promise<string | undefined>;
   /** Resolve a wrapper PID to canonical pane truth through /proc ancestry and tmux witnesses. */
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
-  /** Resolve the wrapper's sole direct engine child and return kernel witnesses. */
-  attestEnginePlacement(wrapperPid: number): Promise<EnginePlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   /** Apply one semantic plan-mode intent with engine-specific input and screen read-back. */
@@ -1131,44 +1117,6 @@ export class RealTmux implements TmuxControlPlane {
     };
   }
 
-  async attestEnginePlacement(wrapperPid: number): Promise<EnginePlacementAttestation> {
-    const children: ProcessWitness[] = [];
-    const pids = (await readdir('/proc'))
-      .filter((entry) => /^[1-9][0-9]*$/.test(entry))
-      .map(Number);
-    for (let offset = 0; offset < pids.length && children.length < 2; offset += 64) {
-      const witnesses = await Promise.all(
-        pids.slice(offset, offset + 64).map((pid) => processWitness(pid)),
-      );
-      for (const witness of witnesses) {
-        if (witness?.parent_pid === wrapperPid) children.push(witness);
-        if (children.length === 2) break;
-      }
-    }
-    if (children.length === 0) return { ok: false, reason: 'engine_process_missing' };
-    if (children.length !== 1) return { ok: false, reason: 'engine_process_ambiguous' };
-    const child = children[0]!;
-    try {
-      const [engine_binary, cwd, after] = await Promise.all([
-        readlink(`/proc/${child.pid}/exe`),
-        readlink(`/proc/${child.pid}/cwd`),
-        processWitness(child.pid),
-      ]);
-      if (!after || after.parent_pid !== wrapperPid || after.start_ticks !== child.start_ticks) {
-        return { ok: false, reason: 'engine_process_changed' };
-      }
-      return {
-        ok: true,
-        engine_pid: child.pid,
-        engine_binary,
-        cwd,
-        process_start_ticks: child.start_ticks,
-      };
-    } catch {
-      return { ok: false, reason: 'engine_process_changed' };
-    }
-  }
-
   async setSeatTint(seatId: string, tint: string | null): Promise<boolean> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return false;
@@ -1328,12 +1276,6 @@ export class FakeTmux implements TmuxControlPlane {
   private attachedClients = new Set<string>();
   private deliveredSelections: string[] = [];
   private wrapperPlacements = new Map<number, string>();
-  private enginePlacements = new Map<number, {
-    engine_pid: number;
-    engine_binary: string;
-    cwd: string;
-    process_start_ticks: string;
-  }>();
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
@@ -1576,19 +1518,6 @@ export class FakeTmux implements TmuxControlPlane {
   bindWrapper(wrapperPid: number, seatId: string): void {
     this.wrapperPlacements.set(wrapperPid, seatId);
   }
-  bindEngine(
-    wrapperPid: number,
-    enginePid: number,
-    engineBinary = '/sanctioned/claude',
-    cwd = '/workspace',
-  ): void {
-    this.enginePlacements.set(wrapperPid, {
-      engine_pid: enginePid,
-      engine_binary: engineBinary,
-      cwd,
-      process_start_ticks: '300',
-    });
-  }
   async attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation> {
     const pane_id = this.wrapperPlacements.get(wrapperPid);
     if (!pane_id) return { ok: false, reason: 'wrapper_not_in_managed_pane' };
@@ -1607,12 +1536,6 @@ export class FakeTmux implements TmuxControlPlane {
         [String(wrapperPid - 1)]: '100',
       },
     };
-  }
-  async attestEnginePlacement(wrapperPid: number): Promise<EnginePlacementAttestation> {
-    const observed = this.enginePlacements.get(wrapperPid);
-    return observed
-      ? { ok: true, ...observed }
-      : { ok: false, reason: 'engine_process_missing' };
   }
   failTintSeat(seatId: string): void { this.tintFailures.add(seatId); }
   failTintClearSeat(seatId: string): void { this.tintClearFailures.add(seatId); }

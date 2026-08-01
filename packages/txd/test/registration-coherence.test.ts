@@ -44,7 +44,6 @@ async function declare(
   await tmux.createSeat(seatId);
   const paneGeneration = (await tmux.seatGeneration(seatId))!;
   tmux.bindWrapper(4101, seatId);
-  tmux.bindEngine(4101, 5101, '/sanctioned/claude', '/workspace');
   return {
     schema_version: AGENT_SCHEMA_VERSION,
     agent_id: AGENT_ID,
@@ -84,7 +83,6 @@ test('a Black Shield is admitted in a worker seat and binds under its own person
   const { store, tmux, d } = setup();
   const declaration = await declare(tmux, 'palace:W', 'black-shields', 'astartes', '#111111');
   await d.recordPhysicalDeclaration(declaration);
-  await d.attestEngineSession(AGENT_ID, null);
   const binding = buildProjections(await store.readAll())
     .currentBindings.find((candidate) => candidate.agent_id === AGENT_ID)!;
   expect(binding).toMatchObject({
@@ -99,12 +97,10 @@ test('a Black Shield is admitted in a worker seat and binds under its own person
 test('Black Shields take no lock — a second one binds a second worker seat', async () => {
   const { store, tmux, d } = setup();
   await d.recordPhysicalDeclaration(await declare(tmux, 'palace:W', 'black-shields', 'astartes', '#111111'));
-  await d.attestEngineSession(AGENT_ID, null);
 
   const second = '7b1a6c22-3b0e-4a52-9d1f-2c8e5f4a1b93';
   await tmux.createSeat('palace:N');
   tmux.bindWrapper(4102, 'palace:N');
-  tmux.bindEngine(4102, 5102, '/sanctioned/claude', '/workspace');
   const secondDeclaration: PhysicalDeclaration = {
     schema_version: AGENT_SCHEMA_VERSION,
     agent_id: second,
@@ -119,7 +115,6 @@ test('Black Shields take no lock — a second one binds a second worker seat', a
     tint: '#111111',
   };
   await d.recordPhysicalDeclaration(secondDeclaration);
-  await d.attestEngineSession(second, null);
   const shields = buildProjections(await store.readAll())
     .currentBindings.filter((binding) => binding.persona === 'black-shields');
   expect(shields.map((binding) => binding.seat_id).sort()).toEqual(['palace:N', 'palace:W']);

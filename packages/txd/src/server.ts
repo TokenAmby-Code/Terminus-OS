@@ -71,7 +71,6 @@ export type Route = {
 // else delivered on the lane is acked untouched (ack ≠ consume).
 export const CONSUMED_BUS_EVENT_TYPES = [
   'hook.wrapper_start',
-  'hook.session_start',
   'agent.dispatch_requested',
   'agent.physical_declared',
   'agent.registered',
@@ -86,11 +85,6 @@ const PHYSICAL_REFUSALS = new Set([
   'persona_seat_incoherent',
   'physical_declaration_conflict',
   'physical_binding_conflict',
-  'physical_declaration_missing',
-  'wrapper_placement_changed',
-  'engine_process_missing',
-  'engine_process_ambiguous',
-  'engine_process_changed',
   'tint_attestation_failed',
   'physical_binding_incomplete',
   'registered_agent_physical_conflict',
@@ -465,13 +459,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const declaration = PhysicalDeclarationSchema.safeParse(event.payload);
           if (!declaration.success) return ack(false, 'invalid_physical_declaration');
-          return physicalAck(() => daemon.recordPhysicalDeclaration(declaration.data));
-        }
-        if (event.event_type === 'hook.session_start') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
-          const agentId = stringField(event.payload, 'agent_id');
-          if (!agentId) return ack(false, 'invalid_session_start_payload');
-          return physicalAck(() => daemon.attestEngineSession(agentId, busReceipt));
+          return physicalAck(() => daemon.recordPhysicalDeclaration(declaration.data, busReceipt));
         }
         if (event.event_type === 'agent.registered') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');

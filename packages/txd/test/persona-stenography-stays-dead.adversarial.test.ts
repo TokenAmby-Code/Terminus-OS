@@ -51,7 +51,6 @@ test('adversarial: a bound seat never carries a blank persona waiting to be fill
   const { store, tmux, d } = setup();
   await tmux.createSeat('palace:W');
   tmux.bindWrapper(4101, 'palace:W');
-  tmux.bindEngine(4101, 5101, '/sanctioned/claude', '/workspace');
   const bound_declaration: PhysicalDeclaration = {
     schema_version: AGENT_SCHEMA_VERSION,
     agent_id: AGENT_ID,
@@ -66,7 +65,6 @@ test('adversarial: a bound seat never carries a blank persona waiting to be fill
     tint: '#111111',
   };
   await d.recordPhysicalDeclaration(bound_declaration);
-  await d.attestEngineSession(AGENT_ID, null);
   const bound = (await store.readAll()).find((event) => event.event_type === 'reg.bound')!;
   expect(bound.payload.persona).toBe('black-shields');
   expect(bound.payload.rank).toBe('astartes');
@@ -76,9 +74,8 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
   const { store, tmux, d } = setup();
   await tmux.createSeat('palace:W');
   await tmux.createSeat('palace:N');
-  const bind = async (seatId: string, agentId: string, wrapperPid: number, enginePid: number) => {
+  const bind = async (seatId: string, agentId: string, wrapperPid: number) => {
     tmux.bindWrapper(wrapperPid, seatId);
-    tmux.bindEngine(wrapperPid, enginePid, '/sanctioned/claude', '/workspace');
     const seatDeclaration: PhysicalDeclaration = {
       schema_version: AGENT_SCHEMA_VERSION,
       agent_id: agentId,
@@ -93,7 +90,6 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
       tint: '#111111',
     };
     await d.recordPhysicalDeclaration(seatDeclaration);
-    await d.attestEngineSession(agentId, null);
     const agent: Agent = {
       schema_version: AGENT_SCHEMA_VERSION,
       agent_id: agentId,
@@ -102,15 +98,13 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
         .payload.birth_generation as string,
       registered_at: '2026-07-31T00:00:00.000Z',
       engine: 'claude',
-      launch: { argv: [], requested_cwd: '/workspace', engine_binary: '/sanctioned/claude' },
+      launch: { argv: [], requested_cwd: '/workspace' },
       placement: {
         pane_id: seatId,
         pane_generation: (await tmux.seatGeneration(seatId))!,
         machine: 'k12-personal',
         kind: 'local',
         wrapper_pid: wrapperPid,
-        engine_pid: enginePid,
-        cwd: '/workspace',
         transport_witnesses: {},
       },
       configuration: CONFIGURATION,
@@ -133,8 +127,8 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
   };
   const first = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
   const second = '7b1a6c22-3b0e-4a52-9d1f-2c8e5f4a1b93';
-  await bind('palace:W', first, 4101, 5101);
-  await bind('palace:N', second, 4102, 5102);
+  await bind('palace:W', first, 4101);
+  await bind('palace:N', second, 4102);
 
   await expect(d.transitionMode({
     schema_version: 10,
