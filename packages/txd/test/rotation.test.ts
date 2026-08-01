@@ -108,6 +108,64 @@ test('tmux pane lifecycle event immediately reconstructs only a damaged page and
   expect(tmux.rebuiltPages()).toEqual(['palace']);
 });
 
+test('a dead pane retires alone: pane-died resets only the faulted pane and bound siblings survive', async () => {
+  const { store, tmux, daemon } = await setup();
+  await daemon.launch({ seat_id: 'palace:W', schema_version: SCHEMA_VERSION, identity: 'west', persona: 'astartes', tint: '#1' });
+  await daemon.launch({ seat_id: 'palace:S', schema_version: SCHEMA_VERSION, identity: 'south', persona: 'astartes', tint: '#2' });
+  await tmux.killSeat('palace:S');
+  const result = await daemon.handleTmuxLifecycleEvent({ schema_version: SCHEMA_VERSION, event: 'pane-died', page: 'palace' });
+  expect(result).toMatchObject({ ok: true, reconstructed: true, reset_seats: ['palace:S'] });
+  expect(result.rotation_ids).toHaveLength(1);
+  expect(tmux.rebuiltPages()).toEqual([]);
+  expect(tmux.resetSeats()).toEqual(['palace:S']);
+  const rows = await daemon.estateRows();
+  expect(rows.find((row) => row.seat_id === 'palace:W')).toMatchObject({ binding: 'bound', pane: 'live' });
+  expect(rows.find((row) => row.seat_id === 'palace:S')).toMatchObject({ binding: 'unbound', pane: 'live' });
+  const events = await store.readAll();
+  const requested = events.findLast((event) => event.event_type === 'estate.scoped_reset_requested')!;
+  expect(requested.payload).toMatchObject({ scope: 'pane', seats: ['palace:S'], trigger: 'pane-died' });
+  expect(events.filter((event) => event.event_type === 'reg.retired').map((event) => event.entity_id)).toEqual(['south']);
+});
+
+test('two dead panes earn two loud pane-scoped resets, never a page rebuild', async () => {
+  const { store, tmux, daemon } = await setup();
+  await daemon.launch({ seat_id: 'palace:N', schema_version: SCHEMA_VERSION, identity: 'north', persona: 'astartes', tint: '#1' });
+  await tmux.killSeat('palace:S');
+  await tmux.killSeat('palace:E');
+  const result = await daemon.handleTmuxLifecycleEvent({ schema_version: SCHEMA_VERSION, event: 'pane-died', page: 'palace' });
+  expect(result).toMatchObject({ ok: true, reconstructed: true, reset_seats: ['palace:S', 'palace:E'] });
+  expect(result.rotation_ids).toHaveLength(2);
+  expect(tmux.rebuiltPages()).toEqual([]);
+  expect(tmux.resetSeats()).toEqual(['palace:S', 'palace:E']);
+  expect((await daemon.estateRows()).find((row) => row.seat_id === 'palace:N')).toMatchObject({ binding: 'bound', pane: 'live' });
+  const requests = (await store.readAll()).filter((event) => event.event_type === 'estate.scoped_reset_requested');
+  expect(requests.map((event) => event.payload.scope)).toEqual(['pane', 'pane']);
+});
+
+test('one seat\'s physical reset failure stays open and loud without blocking the sibling corpse\'s repair', async () => {
+  class OneSeatDownTmux extends FakeTmux {
+    override async resetSeat(seatId: string): Promise<boolean> {
+      if (seatId === 'palace:S') return false;
+      return super.resetSeat(seatId);
+    }
+  }
+  const store = new MemoryEventStore();
+  const tmux = new OneSeatDownTmux();
+  const daemon = new Daemon(store, tmux);
+  await daemon.constructEstate();
+  await tmux.killSeat('palace:S');
+  await tmux.killSeat('palace:E');
+  const result = await daemon.handleTmuxLifecycleEvent({ schema_version: SCHEMA_VERSION, event: 'pane-died', page: 'palace' });
+  expect(result).toMatchObject({ ok: false, reason: 'reset_failed', reset_seats: ['palace:E'] });
+  expect(result.rotation_ids).toHaveLength(2);
+  expect(tmux.rebuiltPages()).toEqual([]);
+  const events = await store.readAll();
+  const open = events.filter((event) => event.event_type === 'estate.scoped_reset_requested');
+  const completed = new Set(events.filter((event) => event.event_type === 'estate.scoped_reset_completed').map((event) => event.entity_id));
+  expect(open).toHaveLength(2);
+  expect(open.filter((event) => !completed.has(event.entity_id)).map((event) => event.payload.seats)).toEqual([['palace:S']]);
+});
+
 test('scoped reset refuses busy targets until force is explicit and never widens to another pane', async () => {
   const { tmux, daemon } = await setup();
   await daemon.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'ne', persona: 'ne', tint: '#1' });

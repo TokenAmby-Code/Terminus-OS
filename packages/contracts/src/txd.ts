@@ -514,7 +514,11 @@ export const TmuxLifecycleEventResponseSchema = z.object({
   event: z.enum(['pane-died', 'pane-exited']),
   page: z.string(),
   reconstructed: z.boolean(),
-  rotation_id: z.string().nullable(),
+  // The exact seats whose processes were replaced. A dead pane earns a
+  // pane-scoped respawn of that pane alone; siblings are never in this list
+  // unless the window itself lost a split and the whole border was rebuilt.
+  reset_seats: z.array(z.string()),
+  rotation_ids: z.array(z.string()),
   reason: z.string().nullable(),
 });
 export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventResponseSchema>;

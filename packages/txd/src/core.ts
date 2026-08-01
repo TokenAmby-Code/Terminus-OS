@@ -1837,32 +1837,63 @@ export class Daemon {
     transportReceipt: string | null = null,
   ): Promise<TmuxLifecycleEventResponse> {
     const result = await this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) {
-        return { ok: false, event: req.event, page: req.page, reconstructed: false, rotation_id: null, reason: 'schema_version_mismatch' };
-      }
-      if (!isTxdPage(req.page)) {
-        return { ok: false, event: req.event, page: req.page, reconstructed: false, rotation_id: null, reason: 'page_absent' };
-      }
-      const expected = [...TXD_WINDOWS[req.page]].sort();
+      const refused = (reason: string): TmuxLifecycleEventResponse => ({
+        ok: false, event: req.event, page: req.page, reconstructed: false, reset_seats: [], rotation_ids: [], reason,
+      });
+      if (req.schema_version !== SCHEMA_VERSION) return refused('schema_version_mismatch');
+      if (!isTxdPage(req.page)) return refused('page_absent');
+      const expected = [...TXD_WINDOWS[req.page]];
       const observed = (await this.tmux.listSeats()).filter((seat) => seat.seat_id.startsWith(`${req.page}:`));
-      const live = observed.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id).sort();
-      const canonical = live.length === expected.length && live.every((seat, index) => seat === expected[index]);
-      if (canonical) {
-        return { ok: true, event: req.event, page: req.page, reconstructed: false, rotation_id: null, reason: 'page_already_canonical' };
+      const dead = expected.filter((seat) => observed.some((o) => o.seat_id === seat && o.pane === 'dead'));
+      const missing = expected.filter((seat) => !observed.some((o) => o.seat_id === seat));
+      if (dead.length === 0 && missing.length === 0) {
+        return { ok: true, event: req.event, page: req.page, reconstructed: false, reset_seats: [], rotation_ids: [], reason: 'page_already_canonical' };
       }
-      const reset = await this.resetEstateScopeUnlocked(
-        { schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: req.page },
-        transportReceipt,
-        req.event,
-      );
-      return {
-        ok: reset.ok,
-        event: req.event,
-        page: req.page,
-        reconstructed: reset.accepted,
-        rotation_id: reset.rotation_id,
-        reason: reset.reason,
-      };
+      // Fault scope is the pane. A dead pane is one faulted PROCESS whose
+      // remain-on-exit corpse is the respawn target: it is retired loudly and
+      // alone, and siblings — which carry no fault — are never touched. Only a
+      // MISSING pane is damage to the window structure itself; with no pane
+      // left to scope a repair to, that class alone earns the border-total
+      // page rebuild.
+      if (missing.length > 0) {
+        const reset = await this.resetEstateScopeUnlocked(
+          { schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: req.page },
+          transportReceipt,
+          req.event,
+        );
+        return {
+          ok: reset.ok,
+          event: req.event,
+          page: req.page,
+          reconstructed: reset.accepted,
+          reset_seats: reset.ok ? [...reset.seats] : [],
+          rotation_ids: reset.rotation_id === null ? [] : [reset.rotation_id],
+          reason: reset.reason,
+        };
+      }
+      const reset_seats: string[] = [];
+      const rotation_ids: string[] = [];
+      let ok = true;
+      let reconstructed = false;
+      let reason: string | null = null;
+      for (const seat of dead) {
+        const reset = await this.resetEstateScopeUnlocked(
+          { schema_version: SCHEMA_VERSION, force: true, scope: 'pane', pane: seat },
+          transportReceipt,
+          req.event,
+        );
+        if (reset.rotation_id !== null) rotation_ids.push(reset.rotation_id);
+        if (reset.accepted) reconstructed = true;
+        if (reset.ok) {
+          reset_seats.push(seat);
+        } else {
+          // The durable request stays open; reconstruction recovery resumes
+          // it. One seat's physical failure never blocks a sibling's repair.
+          ok = false;
+          reason = reset.reason;
+        }
+      }
+      return { ok, event: req.event, page: req.page, reconstructed, reset_seats, rotation_ids, reason };
     });
     if (result.ok && result.reconstructed) await this.provisionPerpetualAgents();
     return result;
