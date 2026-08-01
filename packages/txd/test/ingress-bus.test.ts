@@ -153,7 +153,6 @@ test('physical signoff precedes registration and routing activation', async () =
     await tmux.createSeat('palace:W');
     const paneGeneration = (await tmux.seatGeneration('palace:W'))!;
     tmux.bindWrapper(4101, 'palace:W');
-    tmux.bindEngine(4101, 5101, '/sanctioned/claude', '/workspace');
 
     let response = await post(delivery('agent.physical_declared', {
       schema_version: AGENT_SCHEMA_VERSION,
@@ -169,9 +168,6 @@ test('physical signoff precedes registration and routing activation', async () =
       tint: '#111111',
     }));
     expect(await response.json()).toMatchObject({ ok: true, consumed: true });
-
-    response = await post(delivery('hook.session_start', { agent_id: agentId }));
-    expect(await response.json()).toMatchObject({ ok: true, consumed: true });
     expect(await tmux.seatTint('palace:W')).toBe('#111111');
     expect(published.at(-1)).toMatchObject({
       type: 'agent.placement_attested',
@@ -182,7 +178,19 @@ test('physical signoff precedes registration and routing activation', async () =
         pane_generation: paneGeneration,
       },
     });
-    response = await post(delivery('hook.session_start', { agent_id: agentId }, 3));
+    response = await post(delivery('agent.physical_declared', {
+      schema_version: AGENT_SCHEMA_VERSION,
+      agent_id: agentId,
+      birth_generation: birthGeneration,
+      pane_id: 'palace:W',
+      pane_generation: paneGeneration,
+      configuration: runtime.configuration,
+      engine: 'claude',
+      wrapper_pid: 4101,
+      persona: 'black-shields',
+      rank: 'astartes',
+      tint: '#111111',
+    }));
     expect(await response.json()).toMatchObject({ ok: true, consumed: true });
     expect(published.filter(({ type }) => type === 'agent.placement_attested')).toHaveLength(1);
     await expect(d.comm({
@@ -203,7 +211,6 @@ test('physical signoff precedes registration and routing activation', async () =
       launch: {
         argv: [],
         requested_cwd: '/workspace',
-        engine_binary: '/sanctioned/claude',
       },
       placement: {
         pane_id: 'palace:W',
@@ -211,8 +218,6 @@ test('physical signoff precedes registration and routing activation', async () =
         machine: 'k12-personal',
         kind: 'local',
         wrapper_pid: 4101,
-        engine_pid: 5101,
-        cwd: '/workspace',
         transport_witnesses: {},
       },
       configuration: runtime.configuration,

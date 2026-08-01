@@ -40,8 +40,6 @@ export const PlacementSchema = z.object({
   machine: z.string().min(1),
   kind: z.enum(["local", "ssh"]),
   wrapper_pid: z.number().int().positive(),
-  engine_pid: z.number().int().positive(),
-  cwd: z.string().startsWith("/"),
   transport_witnesses: z.record(z.string(), z.unknown()),
 }).strict();
 
@@ -61,7 +59,6 @@ export const AgentSchema = z.object({
   launch: z.object({
     argv: z.array(z.string()),
     requested_cwd: z.string().startsWith("/"),
-    engine_binary: z.string().startsWith("/"),
   }).strict(),
   placement: PlacementSchema,
   configuration: z.object({
@@ -182,9 +179,6 @@ export const PlacementAttestedSchema = z.object({
   machine: z.string().min(1),
   kind: z.enum(["local", "ssh"]),
   wrapper_pid: z.number().int().positive(),
-  engine_pid: z.number().int().positive(),
-  engine_binary: z.string().startsWith("/"),
-  cwd: z.string().startsWith("/"),
   transport_witnesses: z.record(z.string(), z.unknown()),
 }).strict();
 export type PlacementAttested = z.infer<typeof PlacementAttestedSchema>;
@@ -199,7 +193,6 @@ export const LifecycleReadySchema = z.object({
   evidence: z.object({
     registration_prepared: z.number().int().positive(),
     placement_attested: z.number().int().positive(),
-    session_started: z.number().int().positive(),
   }).strict(),
 }).strict();
 export type LifecycleReady = z.infer<typeof LifecycleReadySchema>;
