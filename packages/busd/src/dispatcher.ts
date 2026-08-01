@@ -256,7 +256,7 @@ async function deliver(
       ...(unix ? { unix } : {}),
     };
     const response = await fetchImpl(requestUrl, init as RequestInit);
-    if (response.body) await response.body.cancel();
+    disposeResponseBody(response);
     return response.ok ? { ok: true } : { ok: false, detail: `status_${response.status}` };
   } catch (error) {
     return {
@@ -265,5 +265,24 @@ async function deliver(
         ? "transport_timeout"
         : "transport_unavailable",
     };
+  }
+}
+
+function disposeResponseBody(response: Response): void {
+  if (!response.body) return;
+  try {
+    void response.body.cancel().catch(() => {
+      console.error(JSON.stringify({
+        level: "error",
+        event: "response_body_disposal_failed",
+        error_code: "transport_cleanup_failed",
+      }));
+    });
+  } catch {
+    console.error(JSON.stringify({
+      level: "error",
+      event: "response_body_disposal_failed",
+      error_code: "transport_cleanup_failed",
+    }));
   }
 }
