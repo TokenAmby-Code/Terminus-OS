@@ -16,16 +16,43 @@ import { connectDb, runMigrations, MIGRATIONS_DIR, typedRows, type DbEndpointT }
 import {
   BusEventInputSchema,
   BusEventRecordSchema,
+  BusCursorAdvanceRequestSchema,
   BusLagRowSchema,
   BusSubscriptionRowSchema,
   type BusEventInput,
   type BusEventRecord,
+  type BusCursorAdvanceRequest,
   type BusLagRow,
   type BusSubscriptionRow,
 } from '@terminus-os/contracts';
 
 export type Clock = () => string;
 const systemClock: Clock = () => new Date().toISOString();
+
+export type CursorAdvanceResult = {
+  previous_acked_seq: number;
+  acked_seq: number;
+  skipped_matching_seqs: number[];
+  audit_seq: number;
+};
+
+export class CursorSubscriptionNotFound extends Error {
+  override name = 'CursorSubscriptionNotFound';
+}
+
+export class CursorConflict extends Error {
+  override name = 'CursorConflict';
+  constructor(public actualAckedSeq: number | null) {
+    super('cursor does not match expected_acked_seq');
+  }
+}
+
+export class CursorMatchingSetConflict extends Error {
+  override name = 'CursorMatchingSetConflict';
+  constructor(public actualMatchingSeqs: number[]) {
+    super('matching journal sequences do not equal expected_matching_seqs');
+  }
+}
 
 export interface BusStore {
   /** Append one event. The store assigns seq (monotonic) and recorded_at. */
@@ -37,6 +64,8 @@ export interface BusStore {
   cursor(subscription: string): Promise<number | null>;
   /** Monotonic upsert — an existing cursor never regresses. */
   advanceCursor(subscription: string, seq: number): Promise<void>;
+  /** Exact, audited compare-and-swap for sanctioned administrative retirement. */
+  advanceCursorAdministratively(request: BusCursorAdvanceRequest, machine: string): Promise<CursorAdvanceResult>;
   /** Per-subscription lag (the bus.lag view; Memory computes the same shape). */
   lag(): Promise<BusLagRow[]>;
   count(): Promise<number>;
@@ -146,6 +175,63 @@ export class PostgresBusStore implements BusStore {
         WHERE bus.cursors.acked_seq < excluded.acked_seq`;
   }
 
+  async advanceCursorAdministratively(input: BusCursorAdvanceRequest, machine: string): Promise<CursorAdvanceResult> {
+    const request = BusCursorAdvanceRequestSchema.parse(input);
+    return this.sql.begin(async (transaction) => {
+      const subscriptions = (await transaction`
+        SELECT event_pattern
+        FROM bus.subscriptions
+        WHERE name = ${request.subscription}
+        FOR SHARE`) as { event_pattern: string }[];
+      if (!subscriptions.length) throw new CursorSubscriptionNotFound(request.subscription);
+
+      const cursors = (await transaction`
+        SELECT acked_seq
+        FROM bus.cursors
+        WHERE subscription_name = ${request.subscription}
+        FOR UPDATE`) as { acked_seq: number | bigint | string }[];
+      const actualAckedSeq = cursors.length ? Number(cursors[0]!.acked_seq) : null;
+      if (actualAckedSeq !== request.expected_acked_seq) throw new CursorConflict(actualAckedSeq);
+
+      const matches = (await transaction`
+        SELECT seq
+        FROM bus.events
+        WHERE seq > ${request.expected_acked_seq}
+          AND seq <= ${request.through_seq}
+          AND event_type LIKE ${subscriptions[0]!.event_pattern}
+        ORDER BY seq`) as { seq: number | bigint | string }[];
+      const actualMatchingSeqs = matches.map((row) => Number(row.seq));
+      if (JSON.stringify(actualMatchingSeqs) !== JSON.stringify(request.expected_matching_seqs)) {
+        throw new CursorMatchingSetConflict(actualMatchingSeqs);
+      }
+
+      await transaction`
+        UPDATE bus.cursors
+        SET acked_seq = ${request.through_seq}, advanced_at = now()
+        WHERE subscription_name = ${request.subscription}`;
+      const recordedAt = this.now();
+      const auditRows = (await transaction`
+        INSERT INTO bus.events (event_type, source, payload, provenance, occurred_at, recorded_at)
+        VALUES ('bus.cursor_advanced', 'busd',
+                ${{
+                  subscription: request.subscription,
+                  previous_acked_seq: request.expected_acked_seq,
+                  acked_seq: request.through_seq,
+                  skipped_matching_seqs: request.expected_matching_seqs,
+                  reason: request.reason,
+                }},
+                ${{ ingress: 'events', transport_receipt: null, machine }},
+                ${recordedAt}, ${recordedAt})
+        RETURNING seq`) as { seq: number | bigint | string }[];
+      return {
+        previous_acked_seq: request.expected_acked_seq,
+        acked_seq: request.through_seq,
+        skipped_matching_seqs: request.expected_matching_seqs,
+        audit_seq: Number(auditRows[0]!.seq),
+      };
+    });
+  }
+
   async lag(): Promise<BusLagRow[]> {
     const rows = (await this.sql`
       SELECT name, active, event_pattern, acked_seq, lag FROM bus.lag ORDER BY name`) as {
@@ -214,6 +300,41 @@ export class MemoryBusStore implements BusStore {
   async advanceCursor(subscription: string, seq: number): Promise<void> {
     const current = this.cursors.get(subscription);
     if (current === undefined || current < seq) this.cursors.set(subscription, seq);
+  }
+
+  async advanceCursorAdministratively(input: BusCursorAdvanceRequest, machine: string): Promise<CursorAdvanceResult> {
+    const request = BusCursorAdvanceRequestSchema.parse(input);
+    const subscription = this.subscriptions.get(request.subscription);
+    if (!subscription) throw new CursorSubscriptionNotFound(request.subscription);
+    const actualAckedSeq = this.cursors.get(request.subscription) ?? null;
+    if (actualAckedSeq !== request.expected_acked_seq) throw new CursorConflict(actualAckedSeq);
+    const match = likeToRegExp(subscription.event_pattern);
+    const actualMatchingSeqs = this.events
+      .filter((event) => event.seq > request.expected_acked_seq && event.seq <= request.through_seq && match.test(event.event_type))
+      .map((event) => event.seq);
+    if (JSON.stringify(actualMatchingSeqs) !== JSON.stringify(request.expected_matching_seqs)) {
+      throw new CursorMatchingSetConflict(actualMatchingSeqs);
+    }
+    const audit = await this.append({
+      event_type: 'bus.cursor_advanced',
+      source: 'busd',
+      payload: {
+        subscription: request.subscription,
+        previous_acked_seq: request.expected_acked_seq,
+        acked_seq: request.through_seq,
+        skipped_matching_seqs: request.expected_matching_seqs,
+        reason: request.reason,
+      },
+      provenance: { ingress: 'events', transport_receipt: null, machine },
+      occurred_at: this.now(),
+    });
+    this.cursors.set(request.subscription, request.through_seq);
+    return {
+      previous_acked_seq: request.expected_acked_seq,
+      acked_seq: request.through_seq,
+      skipped_matching_seqs: request.expected_matching_seqs,
+      audit_seq: audit.seq,
+    };
   }
 
   async lag(): Promise<BusLagRow[]> {

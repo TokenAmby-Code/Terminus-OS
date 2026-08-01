@@ -104,6 +104,41 @@ export const BusDeliverySchema = z.object({
 });
 export type BusDelivery = z.infer<typeof BusDeliverySchema>;
 
+// Administrative cursor movement is an exact compare-and-swap over the
+// subscription's matching journal rows. The caller names every matching seq
+// being retired; busd derives that set again under the cursor lock and refuses
+// any discrepancy. This is the sanctioned alternative to direct cursor SQL.
+export const BusCursorAdvanceRequestSchema = z.object({
+  schema_version: z.literal(BUS_SCHEMA_VERSION),
+  subscription: z.string().min(1),
+  expected_acked_seq: z.number().int().nonnegative(),
+  through_seq: z.number().int().positive(),
+  expected_matching_seqs: z.array(z.number().int().positive()).min(1),
+  reason: z.string().trim().min(1).max(500),
+}).strict().superRefine((request, context) => {
+  let previous = request.expected_acked_seq;
+  for (const [index, seq] of request.expected_matching_seqs.entries()) {
+    if (seq <= previous) {
+      context.addIssue({ code: "custom", path: ["expected_matching_seqs", index], message: "sequences must be strictly increasing after the expected cursor" });
+    }
+    previous = seq;
+  }
+  if (request.expected_matching_seqs.at(-1) !== request.through_seq) {
+    context.addIssue({ code: "custom", path: ["through_seq"], message: "through_seq must equal the final expected matching sequence" });
+  }
+});
+export type BusCursorAdvanceRequest = z.infer<typeof BusCursorAdvanceRequestSchema>;
+
+export const BusCursorAdvanceResponseSchema = z.object({
+  ok: z.literal(true),
+  subscription: z.string().min(1),
+  previous_acked_seq: z.number().int().nonnegative(),
+  acked_seq: z.number().int().positive(),
+  skipped_matching_seqs: z.array(z.number().int().positive()).min(1),
+  audit_seq: z.number().int().positive(),
+}).strict();
+export type BusCursorAdvanceResponse = z.infer<typeof BusCursorAdvanceResponseSchema>;
+
 // ── Config + operational rows (Zod boundary for busd's typed reads) ─────────
 export const BusSubscriptionRowSchema = z.object({
   name: z.string().min(1),

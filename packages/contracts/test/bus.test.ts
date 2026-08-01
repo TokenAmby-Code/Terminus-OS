@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   BUS_SCHEMA_VERSION,
+  BusCursorAdvanceRequestSchema,
+  BusCursorAdvanceResponseSchema,
   BusDeliverySchema,
   BusEventRecordSchema,
   BusEventTypeSchema,
@@ -20,6 +22,29 @@ const record = {
 } as const;
 
 describe("bus event vocabulary", () => {
+  test("administrative cursor advance names the exact current cursor, cutoff, and matching dead set", () => {
+    const request = {
+      schema_version: BUS_SCHEMA_VERSION as 1,
+      subscription: "registrationd-k12-personal-agent-lifecycle",
+      expected_acked_seq: 88686,
+      through_seq: 109053,
+      expected_matching_seqs: [108827, 108917, 108930, 108944, 109018, 109053],
+      reason: "schema-1 lifecycle generation retired by Emperor ruling",
+    };
+    expect(BusCursorAdvanceRequestSchema.parse(request)).toEqual(request);
+    expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, expected_matching_seqs: [108917, 108827] })).toThrow();
+    expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, through_seq: 109054 })).toThrow();
+    expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, reason: "" })).toThrow();
+    expect(BusCursorAdvanceResponseSchema.parse({
+      ok: true,
+      subscription: request.subscription,
+      previous_acked_seq: request.expected_acked_seq,
+      acked_seq: request.through_seq,
+      skipped_matching_seqs: request.expected_matching_seqs,
+      audit_seq: 111908,
+    }).audit_seq).toBe(111908);
+  });
+
   test("event_type is dotted lowercase — an unqualified name carries no tenant", () => {
     expect(BusEventTypeSchema.parse("hook.stop")).toBe("hook.stop");
     expect(BusEventTypeSchema.parse("txd.act.stop_reported")).toBe("txd.act.stop_reported");

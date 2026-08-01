@@ -20,6 +20,8 @@
 import {
   BUS_SCHEMA_VERSION,
   BusPublishRequestSchema,
+  BusCursorAdvanceRequestSchema,
+  BusCursorAdvanceResponseSchema,
   HOOK_TYPES,
   ReplayIdSchema,
   ReplayAdmissionSchema,
@@ -27,6 +29,7 @@ import {
   type BusHealth,
 } from '@terminus-os/contracts';
 import type { BusStore, Clock } from './store.ts';
+import { CursorConflict, CursorMatchingSetConflict, CursorSubscriptionNotFound } from './store.ts';
 import {
   EventIdentityConflict,
   IdempotencyConflict,
@@ -117,6 +120,35 @@ export function buildRoutes(deps: ServerDeps): Route[] {
       handler: async () => {
         deps.onAppend();
         return json({ ok: true, reconciliation: 'requested' }, 202);
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ctl/cursors/advance'),
+      label: 'POST /ctl/cursors/advance',
+      handler: async (req) => {
+        const parsed = BusCursorAdvanceRequestSchema.safeParse(await readJson(req));
+        if (!parsed.success) {
+          return json({ ok: false, error: 'invalid_cursor_advance', field: issuePath(parsed.error.issues[0]?.path ?? []) }, 422);
+        }
+        try {
+          const result = await deps.store.advanceCursorAdministratively(parsed.data, deps.machine);
+          deps.onAppend();
+          return json(BusCursorAdvanceResponseSchema.parse({
+            ok: true,
+            subscription: parsed.data.subscription,
+            ...result,
+          }));
+        } catch (error) {
+          if (error instanceof CursorSubscriptionNotFound) return json({ ok: false, error: 'unknown_subscription' }, 404);
+          if (error instanceof CursorConflict) {
+            return json({ ok: false, error: 'cursor_conflict', actual_acked_seq: error.actualAckedSeq }, 409);
+          }
+          if (error instanceof CursorMatchingSetConflict) {
+            return json({ ok: false, error: 'matching_event_set_conflict', actual_matching_seqs: error.actualMatchingSeqs }, 409);
+          }
+          throw error;
+        }
       },
     },
     {

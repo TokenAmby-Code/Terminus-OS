@@ -38,6 +38,34 @@ describe('likeToRegExp — the MemoryBusStore matching mirror', () => {
 });
 
 describe('MemoryBusStore', () => {
+  test('administrative cursor advance compares the cursor and exact matching set, then audits atomically', async () => {
+    const store = new MemoryBusStore(() => '2026-07-31T18:00:00.000Z');
+    store.setSubscription({ name: 'consumer', delivery_url: 'http://127.0.0.1:1/event', event_pattern: 'agent.%', active: true });
+    store.seedCursor('consumer', 0);
+    await store.append(ev({ event_type: 'agent.one' }));
+    await store.append(ev({ event_type: 'other.fact' }));
+    await store.append(ev({ event_type: 'agent.two' }));
+
+    await expect(store.advanceCursorAdministratively({
+      schema_version: 1, subscription: 'consumer', expected_acked_seq: 0, through_seq: 3,
+      expected_matching_seqs: [3], reason: 'inexact',
+    }, 'test')).rejects.toMatchObject({ name: 'CursorMatchingSetConflict', actualMatchingSeqs: [1, 3] });
+    expect(await store.cursor('consumer')).toBe(0);
+    expect(await store.count()).toBe(3);
+
+    const result = await store.advanceCursorAdministratively({
+      schema_version: 1, subscription: 'consumer', expected_acked_seq: 0, through_seq: 3,
+      expected_matching_seqs: [1, 3], reason: 'retire dead generation',
+    }, 'test');
+    expect(result).toEqual({ previous_acked_seq: 0, acked_seq: 3, skipped_matching_seqs: [1, 3], audit_seq: 4 });
+    expect(await store.cursor('consumer')).toBe(3);
+    expect((await store.readSince(3, '%', 10))[0]).toMatchObject({
+      seq: 4, event_type: 'bus.cursor_advanced', source: 'busd',
+      payload: { subscription: 'consumer', previous_acked_seq: 0, acked_seq: 3, skipped_matching_seqs: [1, 3], reason: 'retire dead generation' },
+      provenance: { ingress: 'events', transport_receipt: null, machine: 'test' },
+    });
+  });
+
   test('append assigns monotonic seq and recorded_at; readSince filters by seq and LIKE pattern', async () => {
     let tick = 0;
     const store = new MemoryBusStore(() => `2026-07-22T00:00:0${tick++}.000Z`);
@@ -206,5 +234,40 @@ describe.skipIf(!endpoint)('PostgresBusStore (live postgres 18)', () => {
       { name: 'txd', active: true, event_pattern: 'hook.%', acked_seq: 3, lag: 0 },
     ]);
     expect((await store.activeSubscriptions()).map((s) => s.name)).toEqual(['probe', 'txd']);
+  });
+
+  test('administrative cursor advance locks, compares the exact Postgres journal set, and appends its audit fact atomically', async () => {
+    await raw`insert into bus.subscriptions (name, delivery_url, event_pattern, active)
+              values ('admin-test', 'http://127.0.0.1:7998/', 'agent.%', false)`;
+    await store.advanceCursor('admin-test', 3);
+    const first = await store.append(ev({ event_type: 'agent.one' }));
+    await store.append(ev({ event_type: 'other.fact' }));
+    const last = await store.append(ev({ event_type: 'agent.two' }));
+
+    await expect(store.advanceCursorAdministratively({
+      schema_version: 1, subscription: 'admin-test', expected_acked_seq: 3, through_seq: last.seq,
+      expected_matching_seqs: [last.seq], reason: 'inexact',
+    }, 'test')).rejects.toMatchObject({
+      name: 'CursorMatchingSetConflict', actualMatchingSeqs: [first.seq, last.seq],
+    });
+    expect(await store.cursor('admin-test')).toBe(3);
+
+    const result = await store.advanceCursorAdministratively({
+      schema_version: 1, subscription: 'admin-test', expected_acked_seq: 3, through_seq: last.seq,
+      expected_matching_seqs: [first.seq, last.seq], reason: 'retire dead generation',
+    }, 'test');
+    expect(result).toEqual({
+      previous_acked_seq: 3, acked_seq: last.seq,
+      skipped_matching_seqs: [first.seq, last.seq], audit_seq: last.seq + 1,
+    });
+    expect(await store.cursor('admin-test')).toBe(last.seq);
+    expect((await store.readSince(last.seq, '%', 1))[0]).toMatchObject({
+      seq: result.audit_seq, event_type: 'bus.cursor_advanced', source: 'busd',
+      payload: {
+        subscription: 'admin-test', previous_acked_seq: 3, acked_seq: last.seq,
+        skipped_matching_seqs: [first.seq, last.seq], reason: 'retire dead generation',
+      },
+      provenance: { ingress: 'events', transport_receipt: null, machine: 'test' },
+    });
   });
 });
