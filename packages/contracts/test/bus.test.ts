@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BUS_SCHEMA_VERSION,
   BusCursorAdvanceRequestSchema,
+  BusCursorAdvanceResponseSchema,
   BusDeliverySchema,
   BusEventRecordSchema,
   BusEventTypeSchema,
@@ -34,6 +35,14 @@ describe("bus event vocabulary", () => {
     expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, expected_matching_seqs: [108917, 108827] })).toThrow();
     expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, through_seq: 109054 })).toThrow();
     expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, reason: "" })).toThrow();
+    expect(BusCursorAdvanceResponseSchema.parse({
+      ok: true,
+      subscription: request.subscription,
+      previous_acked_seq: request.expected_acked_seq,
+      acked_seq: request.through_seq,
+      skipped_matching_seqs: request.expected_matching_seqs,
+      audit_seq: 111908,
+    }).audit_seq).toBe(111908);
   });
 
   test("event_type is dotted lowercase — an unqualified name carries no tenant", () => {

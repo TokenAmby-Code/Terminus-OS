@@ -21,6 +21,7 @@ import {
   BUS_SCHEMA_VERSION,
   BusPublishRequestSchema,
   BusCursorAdvanceRequestSchema,
+  BusCursorAdvanceResponseSchema,
   HOOK_TYPES,
   ReplayIdSchema,
   ReplayAdmissionSchema,
@@ -133,7 +134,11 @@ export function buildRoutes(deps: ServerDeps): Route[] {
         try {
           const result = await deps.store.advanceCursorAdministratively(parsed.data, deps.machine);
           deps.onAppend();
-          return json({ ok: true, subscription: parsed.data.subscription, ...result });
+          return json(BusCursorAdvanceResponseSchema.parse({
+            ok: true,
+            subscription: parsed.data.subscription,
+            ...result,
+          }));
         } catch (error) {
           if (error instanceof CursorSubscriptionNotFound) return json({ ok: false, error: 'unknown_subscription' }, 404);
           if (error instanceof CursorConflict) {
