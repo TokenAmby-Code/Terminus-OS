@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   BUS_SCHEMA_VERSION,
+  BusCursorAdvanceRequestSchema,
   BusDeliverySchema,
   BusEventRecordSchema,
   BusEventTypeSchema,
@@ -20,6 +21,21 @@ const record = {
 } as const;
 
 describe("bus event vocabulary", () => {
+  test("administrative cursor advance names the exact current cursor, cutoff, and matching dead set", () => {
+    const request = {
+      schema_version: BUS_SCHEMA_VERSION as 1,
+      subscription: "registrationd-k12-personal-agent-lifecycle",
+      expected_acked_seq: 88686,
+      through_seq: 109053,
+      expected_matching_seqs: [108827, 108917, 108930, 108944, 109018, 109053],
+      reason: "schema-1 lifecycle generation retired by Emperor ruling",
+    };
+    expect(BusCursorAdvanceRequestSchema.parse(request)).toEqual(request);
+    expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, expected_matching_seqs: [108917, 108827] })).toThrow();
+    expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, through_seq: 109054 })).toThrow();
+    expect(() => BusCursorAdvanceRequestSchema.parse({ ...request, reason: "" })).toThrow();
+  });
+
   test("event_type is dotted lowercase — an unqualified name carries no tenant", () => {
     expect(BusEventTypeSchema.parse("hook.stop")).toBe("hook.stop");
     expect(BusEventTypeSchema.parse("txd.act.stop_reported")).toBe("txd.act.stop_reported");

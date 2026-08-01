@@ -22,6 +22,7 @@ restart.
 | --- | --- |
 | `GET /ctl/health` | ok + build + per-subscription lag (the `bus.lag` view) |
 | `POST /ctl/reconcile` | explicit bounded wake for durable pending delivery |
+| `POST /ctl/cursors/advance` | exact, audited compare-and-swap for sanctioned retirement of a known matching event set |
 | `POST /v1/replays/admit` | bind a replay to its request hash and atomically append its first event |
 | `POST /v1/replays/<replay_id>/events` | append an immutable event and publication intent |
 | `GET /v1/replays/<replay_id>` | fold event and delivery state |
@@ -84,6 +85,27 @@ VALUES ('txd', 'http://127.0.0.1:7781/ingress/bus', 'hook.%', true);
 INSERT INTO bus.cursors (subscription_name, acked_seq)
 SELECT 'txd', coalesce(max(seq), 0) FROM bus.events;
 ```
+
+That SQL seeds a new subscription only. Never use SQL to move an existing
+cursor. A sanctioned administrative retirement uses the typed loopback door:
+
+```bash
+curl --fail-with-body http://127.0.0.1:7782/ctl/cursors/advance \
+  --header 'content-type: application/json' \
+  --data '{
+    "schema_version": 1,
+    "subscription": "registrationd-k12-personal-agent-lifecycle",
+    "expected_acked_seq": 88686,
+    "through_seq": 109053,
+    "expected_matching_seqs": [108827,108917,108930,108944,109018,109053],
+    "reason": "schema-1 lifecycle generation retired by Emperor ruling"
+  }'
+```
+
+Busd locks and compares the durable cursor, derives every event matching the
+subscription pattern through the cutoff, and refuses on either mismatch. A
+successful transaction advances the cursor and appends a
+`bus.cursor_advanced` audit event; its response includes that audit sequence.
 
 `event_pattern` is a SQL `LIKE` pattern over `event_type`; matching lives in
 the delivery query, so psql answers exactly what busd will deliver. Deactivate

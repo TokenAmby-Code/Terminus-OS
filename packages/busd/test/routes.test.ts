@@ -17,6 +17,7 @@ test('the route table includes replay authority, health, generic ingress, and pi
   const labels = buildRoutes(deps()).map((r) => r.label);
   expect(labels).toContain('GET /ctl/health');
   expect(labels).toContain('POST /ctl/reconcile');
+  expect(labels).toContain('POST /ctl/cursors/advance');
   expect(labels).toContain('POST /ingress/events');
   expect(labels).toContain('GET /v1/replays');
   expect(labels).toContain('GET /v1/events');
@@ -24,7 +25,86 @@ test('the route table includes replay authority, health, generic ingress, and pi
   expect(labels).toContain('GET /v1/replays/:replay_id');
   expect(labels).toContain('POST /v1/replays/:replay_id/events');
   for (const hook of HOOK_TYPES) expect(labels).toContain(`POST /ingress/hooks/${hook}`);
-  expect(labels).toHaveLength(8 + HOOK_TYPES.length);
+  expect(labels).toHaveLength(9 + HOOK_TYPES.length);
+});
+
+test('POST /ctl/cursors/advance advances only an exact matching journal set and wakes delivery', async () => {
+  const store = new MemoryBusStore(() => '2026-07-31T18:00:00.000Z');
+  store.setSubscription({
+    name: 'registrationd-k12-personal-agent-lifecycle',
+    delivery_url: 'http://127.0.0.1:7791/event',
+    event_pattern: 'agent.lifecycle_ready',
+    active: true,
+  });
+  store.seedCursor('registrationd-k12-personal-agent-lifecycle', 0);
+  await store.append({
+    event_type: 'agent.lifecycle_ready', source: 'lifecycled', payload: { schema_version: 1 },
+    provenance: { ingress: 'events', transport_receipt: null, machine: 'test' }, occurred_at: '2026-07-31T17:00:00.000Z',
+  });
+  await store.append({
+    event_type: 'unrelated.fact', source: 'other', payload: {},
+    provenance: { ingress: 'events', transport_receipt: null, machine: 'test' }, occurred_at: '2026-07-31T17:00:01.000Z',
+  });
+  await store.append({
+    event_type: 'agent.lifecycle_ready', source: 'lifecycled', payload: { schema_version: 1 },
+    provenance: { ingress: 'events', transport_receipt: null, machine: 'test' }, occurred_at: '2026-07-31T17:00:02.000Z',
+  });
+  let wakes = 0;
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, ...deps(store), onAppend: () => { wakes += 1; } });
+  try {
+    const request = {
+      schema_version: 1,
+      subscription: 'registrationd-k12-personal-agent-lifecycle',
+      expected_acked_seq: 0,
+      through_seq: 3,
+      expected_matching_seqs: [1, 3],
+      reason: 'retire dead schema generation',
+    };
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/cursors/advance`, {
+      method: 'POST', body: JSON.stringify(request),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      subscription: request.subscription,
+      previous_acked_seq: 0,
+      acked_seq: 3,
+      skipped_matching_seqs: [1, 3],
+      audit_seq: 4,
+    });
+    expect(await store.cursor(request.subscription)).toBe(3);
+    expect(wakes).toBe(1);
+
+    const replay = await fetch(`http://127.0.0.1:${srv.port}/ctl/cursors/advance`, {
+      method: 'POST', body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toEqual({ ok: false, error: 'cursor_conflict', actual_acked_seq: 3 });
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('POST /ctl/cursors/advance refuses an inexact dead set without mutation', async () => {
+  const store = new MemoryBusStore();
+  store.setSubscription({ name: 'consumer', delivery_url: 'http://127.0.0.1:7791/event', event_pattern: 'agent.%', active: true });
+  store.seedCursor('consumer', 0);
+  for (const event_type of ['agent.one', 'agent.two']) {
+    await store.append({ event_type, source: 'test', payload: {}, provenance: { ingress: 'events', transport_receipt: null, machine: 'test' }, occurred_at: 'now' });
+  }
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, ...deps(store) });
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/cursors/advance`, {
+      method: 'POST',
+      body: JSON.stringify({ schema_version: 1, subscription: 'consumer', expected_acked_seq: 0, through_seq: 2, expected_matching_seqs: [2], reason: 'incomplete set' }),
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ ok: false, error: 'matching_event_set_conflict', actual_matching_seqs: [1, 2] });
+    expect(await store.cursor('consumer')).toBe(0);
+    expect(await store.count()).toBe(2);
+  } finally {
+    srv.stop(true);
+  }
 });
 
 test('ALL 30 hook doors consume and journal — the 410 tail does not exist on the bus', async () => {
