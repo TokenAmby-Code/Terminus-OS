@@ -40,7 +40,7 @@ test('raw tmux identifiers are rejected before CLI output', async () => {
 });
 
 test('mode enter sends the semantic preplan transition contract', async () => {
-  const h = harness({ schema_version: 10, verified: true });
+  const h = harness({ schema_version: 11, verified: true });
   expect(await runCli([
     'mode', 'enter', '--target', 'council:custodes', '--trigger', 'preplan',
   ], h.deps)).toBe(0);
@@ -48,7 +48,7 @@ test('mode enter sends the semantic preplan transition contract', async () => {
     method: 'POST',
     path: '/agents/mode',
     body: {
-      schema_version: 10,
+      schema_version: 11,
       target: 'council:custodes',
       intent: 'enter_plan',
       trigger: 'preplan',
@@ -57,13 +57,13 @@ test('mode enter sends the semantic preplan transition contract', async () => {
 });
 
 test('mode toggle defaults to an operator transition', async () => {
-  const h = harness({ schema_version: 10, verified: true });
+  const h = harness({ schema_version: 11, verified: true });
   expect(await runCli(['mode', 'toggle', '--target', 'council:custodes'], h.deps)).toBe(0);
   expect(h.calls[0]).toEqual({
     method: 'POST',
     path: '/agents/mode',
     body: {
-      schema_version: 10,
+      schema_version: 11,
       target: 'council:custodes',
       intent: 'toggle_plan',
       trigger: 'operator',

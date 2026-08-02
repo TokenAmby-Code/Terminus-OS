@@ -50,7 +50,6 @@ import {
   AgentSchema,
   RegistrationAbortedSchema,
   StopRequestSchema,
-  SubscribeRequestSchema,
   TmuxLifecycleEventRequestSchema,
   WrapperStartHookSchema,
   type EstateReadResponse,
@@ -391,18 +390,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         // never read a no-op or a partial bulk close as full success. The body
         // carries the per-target verdicts either way.
         return json(res, res.ok ? 200 : 409);
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/agents/subscribe'),
-      label: 'POST /agents/subscribe',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, SubscribeRequestSchema, 'invalid_subscribe_request');
-        if (parsed instanceof Response) return parsed;
-        const res = await daemon.subscribe(parsed, receipt(req));
-        // A refused subscribe (not bound / schema mismatch) is loud: non-2xx.
-        return json(res, res.subscribed ? 200 : 409);
       },
     },
     // ── /ingress/bus — the central-bus delivery door ────────────────────────

@@ -60,11 +60,10 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` / page-less `pane-killed` ingress; repairs each faulted seat alone, rebuilding a page only when no tagged pane survives on it |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Remote close (`tx close`, overseer-gated): reap N processes individually, keep estate panes, seats → freelist; graceful by default (mid-turn refuses absent force), palace:N hard-refused |
-| POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
 | POST   | `/agents/comm`          | Typed one-way/ask/reply communication admission |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
-| POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition |
-| POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost; fires auto-close) and `hook.user_prompt_submit`; acks everything else |
+| POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
+| POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost) and `hook.user_prompt_submit`; acks everything else |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
@@ -101,7 +100,7 @@ each route is the ruled daemon behavior, unchanged.
 ## Contracts
 
 The lifecycle vocabulary (`schema_version`, the seed event types, axes,
-comm/stop/close/subscribe/mode shapes) lives in `@terminus-os/contracts`
+comm/stop/close/mode shapes) lives in `@terminus-os/contracts`
 (`./txd` module) — the daemon pins `SCHEMA_VERSION` exactly. No `file:` links,
 no external registry dependency and no compatibility layer.
 

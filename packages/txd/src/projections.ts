@@ -36,10 +36,6 @@ export type Projections = {
   // Every agent id that EVER carried a reg.bound — the "did it walk through
   // the door?" oracle. A stop for an id absent here is a ghost (never bound).
   everBoundAgents: Set<string>;
-  // Agent ids with an OPEN close-on-stop subscription: a reg.stop_subscribed
-  // whose next act.stop_reported has not yet folded (satiated-once). The stop
-  // door reads this to fire the reflexive auto-close.
-  openStopSubscriptions: Set<string>;
   physicalDeclarations: Map<string, PhysicalDeclaration>;
   placementAttestedAgents: Set<string>;
   decommissionedSeats: Set<string>;
@@ -67,8 +63,6 @@ export function buildProjections(events: EventRecord[]): Projections {
   const placementAttestedAgents = new Set<string>();
   const activityByAgent = new Map<string, ActivityState>();
   const everBoundAgents = new Set<string>();
-  const subscribeSeqByAgent = new Map<string, number>(); // last reg.stop_subscribed seq
-  const lastStopSeqByAgent = new Map<string, number>(); // last act.stop_reported seq
   // (entity_type, entity_id) -> highest seq seen, to supersede stale contradiction
   // flags. Composite so a later event on a different entity type sharing an id can
   // never suppress the wrong entity's open contradiction.
@@ -147,10 +141,6 @@ export function buildProjections(events: EventRecord[]): Projections {
         break;
       case 'act.stop_reported':
         activityByAgent.set(e.entity_id, 'stopped');
-        lastStopSeqByAgent.set(e.entity_id, e.seq);
-        break;
-      case 'reg.stop_subscribed':
-        subscribeSeqByAgent.set(e.entity_id, e.seq);
         break;
       case 'reg.retired':
         activityByAgent.set(e.entity_id, 'retired');
@@ -205,15 +195,6 @@ export function buildProjections(events: EventRecord[]): Projections {
     (c) => (lastSeqByEntity.get(entityKey(c.entity_type, c.entity_id)) ?? c.seq) <= c.seq,
   );
 
-  // A close-on-stop subscription is OPEN until the FIRST stop_reported after it —
-  // satiated-once. Derived, no fire/satiate event (the same fold pattern as every
-  // other axis; no bespoke subscription state to drift).
-  const openStopSubscriptions = new Set<string>();
-  for (const [agent, subSeq] of subscribeSeqByAgent) {
-    const stopSeq = lastStopSeqByAgent.get(agent);
-    if (stopSeq === undefined || stopSeq < subSeq) openStopSubscriptions.add(agent);
-  }
-
   return {
     currentBindings,
     freelist,
@@ -221,7 +202,6 @@ export function buildProjections(events: EventRecord[]): Projections {
     openContradictions,
     activityByAgent,
     everBoundAgents,
-    openStopSubscriptions,
     physicalDeclarations,
     placementAttestedAgents,
     decommissionedSeats,

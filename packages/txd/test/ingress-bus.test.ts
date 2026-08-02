@@ -258,7 +258,7 @@ test('physical signoff precedes registration and routing activation', async () =
 test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance from the bus row', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+    await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
     const res = await post(delivery('hook.stop', { agent_id: 'i1', hook_event_name: 'Stop' }, 41));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
@@ -266,7 +266,7 @@ test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance
       seq: 41,
       consumed: true,
       reason: null,
-      receipt: { ok: true, agent_id: 'i1', recorded: true, deduped: false, activity: 'stopped', auto_close: 'none' },
+      receipt: { ok: true, agent_id: 'i1', recorded: true, deduped: false, activity: 'stopped' },
     });
     const stops = (await store.readAll()).filter((e) => e.event_type === 'act.stop_reported');
     expect(stops).toHaveLength(1);
@@ -280,9 +280,9 @@ test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance
 test('duplicate stop deliveries dedupe (act.receipt_deduped), never a second stop_reported', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
-    await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 10 }));
-    const res = await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 10 }));
+    await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
+    await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 11 }));
+    const res = await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 11 }));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: true, receipt: { recorded: false, deduped: true } });
     const events = await store.readAll();
@@ -296,7 +296,7 @@ test('duplicate stop deliveries dedupe (act.receipt_deduped), never a second sto
 test('a GHOST stop is acked-not-consumed with zero footprint — refused at admission, lane never wedged', async () => {
   const { store, srv, post } = setup();
   try {
-    const res = await post(delivery('hook.stop', { agent_id: '77f7cfb4-orphan', schema_version: 10 }));
+    const res = await post(delivery('hook.stop', { agent_id: '77f7cfb4-orphan', schema_version: 11 }));
     // 2xx (busd must not retry a ghost forever), but honestly not consumed…
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'no_such_agent' });
@@ -310,7 +310,7 @@ test('a GHOST stop is acked-not-consumed with zero footprint — refused at admi
 test('schema-version mismatch inside the stop payload refuses consumption, acks the delivery', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+    await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
     const before = await store.count();
     const res = await post(delivery('hook.stop', { agent_id: 'i1', schema_version: 1099 }));
     expect(res.status).toBe(200);
@@ -324,9 +324,9 @@ test('schema-version mismatch inside the stop payload refuses consumption, acks 
 test('a NATURAL prompt-submit (no comm-message context) is acked-not-consumed — a daily hook can never wedge the lane', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+    await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
     const before = await store.count();
-    const res = await post(delivery('hook.user_prompt_submit', { agent_id: 'i1', schema_version: 10 }));
+    const res = await post(delivery('hook.user_prompt_submit', { agent_id: 'i1', schema_version: 11 }));
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'message_target_mismatch' });
     expect(await store.count()).toBe(before);
@@ -368,10 +368,10 @@ test('an unconsumed payload carrying raw-tmux-id-shaped text is acked — arbitr
 test('the membrane still guards what txd INGESTS: a consumed-type payload with a raw tmux id is refused, acked, zero footprint', async () => {
   const { store, d, srv, post } = setup();
   try {
-    await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+    await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
     const before = await store.count();
     const res = await post(
-      delivery('hook.stop', { agent_id: 'i1', schema_version: 10, content: 'leaked pane %7' }),
+      delivery('hook.stop', { agent_id: 'i1', schema_version: 11, content: 'leaked pane %7' }),
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'tmux_id_refused' });
@@ -388,7 +388,7 @@ test('envelope/contract skew is the ONE loud non-2xx: malformed deliveries and v
     expect(res.status).toBe(422);
     expect(((await res.json()) as { error: string }).error).toBe('invalid_bus_delivery');
 
-    const valid = delivery('hook.stop', { agent_id: 'i1', schema_version: 10 });
+    const valid = delivery('hook.stop', { agent_id: 'i1', schema_version: 11 });
     res = await post({ ...valid, schema_version: 1099 });
     expect(res.status).toBe(422);
     expect(await res.json()).toEqual({ ok: false, error: 'invalid_bus_delivery', field: '$.schema_version' });

@@ -122,7 +122,7 @@ export const COMMANDS: readonly Command[] = [
   },
   {
     path: ['mode'],
-    summary: 'Enter or toggle plan mode through txd event truth',
+    summary: 'Enter, toggle, or approve plan mode through txd event truth',
     run: async ({ args, request, write }) => {
       const action = args[0];
       let target: string | undefined;
@@ -142,16 +142,17 @@ export const COMMANDS: readonly Command[] = [
           }
           trigger = value;
         } else {
-          throw new Error('usage: tx mode <enter | toggle> --target <identity> [--trigger <preplan | context_cycle>]');
+          throw new Error('usage: tx mode <enter | toggle | approve> --target <identity> [--trigger <preplan | context_cycle>]');
         }
       }
-      if ((action !== 'enter' && action !== 'toggle') || !target) {
-        throw new Error('usage: tx mode <enter | toggle> --target <identity> [--trigger <preplan | context_cycle>]');
+      if ((action !== 'enter' && action !== 'toggle' && action !== 'approve') || !target) {
+        throw new Error('usage: tx mode <enter | toggle | approve> --target <identity> [--trigger <preplan | context_cycle>]');
       }
+      const intent = action === 'enter' ? 'enter_plan' : action === 'toggle' ? 'toggle_plan' : 'approve_plan';
       write(await request('POST', '/agents/mode', {
         schema_version: SCHEMA_VERSION,
         target,
-        intent: action === 'enter' ? 'enter_plan' : 'toggle_plan',
+        intent,
         trigger,
       }));
       return 0;

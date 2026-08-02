@@ -117,7 +117,7 @@ test('a forced pane reset over a bound seat publishes agent.retired with cause e
   const { tmux, published, d } = setup();
   await bindRegisteredAgent(tmux, d, 'palace:N');
 
-  const res = await d.resetEstateScope({ schema_version: 10, force: true, scope: 'pane', pane: 'palace:N' });
+  const res = await d.resetEstateScope({ schema_version: 11, force: true, scope: 'pane', pane: 'palace:N' });
   expect(res.ok).toBe(true);
 
   const retired = retirements(published);
@@ -135,7 +135,7 @@ test('a clean stand-down then a pane reset never double-publishes', async () => 
 
   await bindOverseerSource(d, store);
   expect((await d.close(closeRequest([AGENT_ID]))).ok).toBe(true);
-  expect((await d.resetEstateScope({ schema_version: 10, force: true, scope: 'pane', pane: 'palace:E' })).ok).toBe(true);
+  expect((await d.resetEstateScope({ schema_version: 11, force: true, scope: 'pane', pane: 'palace:E' })).ok).toBe(true);
 
   expect(retirements(published)).toHaveLength(1);
 });
@@ -165,7 +165,7 @@ test('an unregistered daemon (no bus runtime) closes without publishing', async 
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux);
-  await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'salamander', tint: '#302800' });
 
   await bindOverseerSource(d, store);
   const res = await d.close(closeRequest(['palace:W']));
@@ -174,7 +174,7 @@ test('an unregistered daemon (no bus runtime) closes without publishing', async 
 
 test('a non-registration launch identity is skipped, not published malformed', async () => {
   const { store, published, d } = setup();
-  await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'salamander', tint: '#302800' });
 
   await bindOverseerSource(d, store);
   const res = await d.close(closeRequest(['palace:W']));

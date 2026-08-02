@@ -9,9 +9,8 @@
 //   - ONE stream, typed domains within it (`reg.*` / `act.*`) — the domain is a
 //     prefix on `event_type`, NOT a second store. reg.* = registration/binding
 //     lifecycle + daemon observations; act.* = agent behavior + send activity.
-//   - The event vocabulary is CLOSED — no additions without a `schema_version`
-//     bump. The seed was 16 (v1); v2 added `reg.stop_subscribed` → 17, per this
-//     rule (rung 3, the registration close/subscribe door).
+//   - The event vocabulary is CLOSED — no additions or removals without a
+//     `schema_version` bump.
 //   - The single `status` field is DEAD. Orthogonal axes only.
 //   - `schema_version` is a single integer; the daemon pins it exactly.
 //
@@ -23,16 +22,15 @@ import { z } from 'zod';
 // conforms lazily); breaking changes land daemon+cockpit in ONE PR. Old events
 // replay under the vocabulary that wrote them via `provenance.emitter_version`.
 //
-// v2 (rung 3): additive — adds `reg.stop_subscribed` (the generic stop-hook
-// subscription that composes `final message → auto-close`). Old v1 events replay
-// unchanged; the seed set grew by one WITH this bump, per spec §3 ("no additions
-// without a schema_version bump").
 // v6: additive — explicit estate rotation request/refusal/completion lifecycle.
 // v7: additive — Council topology migration and canonical seat decommissioning.
 // v8: physical persona-tint apply/read-back, fail-dark reset, and readiness.
 // v9: typed, engine-aware plan-mode transition request/attestation lifecycle.
 // v10: registrationd-owned identity and generation-bound physical facts.
-export const SCHEMA_VERSION = 10;
+// v11: breaking — lifecycle correlation moves to lifecycled; the txd-internal
+//      close-on-stop subscription vocabulary is gone, and plan approval gains
+//      its mechanical intent (approve_plan, dialog_accept).
+export const SCHEMA_VERSION = 11;
 
 export const CLIPBOARD_BUFFER_NAME = 'tx-clipboard';
 export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
@@ -104,7 +102,6 @@ export const REG_EVENT_NAMES = [
   'binding_prepared',
   'binding_aborted',
   'bound',
-  'stop_subscribed', // v2: a close-on-next-stop subscription (bound-keyed, satiated-once)
   'comm_accepted',
   'comm_target_snapshotted',
   'contradiction_flagged',
@@ -151,7 +148,6 @@ export const EVENT_TYPES = [
   'reg.binding_prepared',
   'reg.binding_aborted',
   'reg.bound',
-  'reg.stop_subscribed',
   'reg.comm_accepted',
   'reg.comm_target_snapshotted',
   'reg.contradiction_flagged',
@@ -418,56 +414,14 @@ export const STOP_REFUSAL_REASONS = ['no_such_agent', 'schema_version_mismatch']
 export type StopRefusalReason = (typeof STOP_REFUSAL_REASONS)[number];
 export const StopRefusalReasonSchema = z.enum(STOP_REFUSAL_REASONS);
 
-// A recorded stop can reflexively fire a close-on-stop subscription (rung-3 PR-B).
-// `auto_close` reports that side effect honestly: 'fired' = the subscription ran
-// and the seat was closed; 'reap_failed' = it tried but the process wouldn't reap
-// (logged loud, agent left stopped+bound — visible, never a silent leak);
-// 'none' = no open subscription (the common case).
-export const STOP_AUTO_CLOSE_OUTCOMES = ['none', 'fired', 'reap_failed'] as const;
-export type StopAutoCloseOutcome = (typeof STOP_AUTO_CLOSE_OUTCOMES)[number];
-export const StopAutoCloseOutcomeSchema = z.enum(STOP_AUTO_CLOSE_OUTCOMES);
-
 export const StopReceiptSchema = z.object({
   ok: z.literal(true),
   agent_id: z.string(),
   recorded: z.boolean(), // true = stop_reported appended; false = deduped
   deduped: z.boolean(),
   activity: ActivityStateSchema.nullable(), // resulting activity for the agent
-  auto_close: StopAutoCloseOutcomeSchema, // reflexive close-on-stop side effect
 });
 export type StopReceipt = z.infer<typeof StopReceiptSchema>;
-
-// ── Subscribe (rung 3 PR-B) — the generic stop-hook subscription system ──────
-// One day-one action: `close`. Composing `/agents/subscribe` (mark) with the
-// bus-delivered stop hook (`/ingress/bus`, `hook.stop`) yields `final message → auto-close on next stop-hook` — no bespoke
-// latch, no special reflexive fold. BOUND-KEYED by construction: a subscription
-// can only be created for a currently-bound agent, so an orphan/never-bound id
-// can never hold one — the 77f7cfb4 re-firing-subscription class is structurally
-// dead. Satiation is DERIVED (fires on the first stop_reported after the subscribe
-// seq); no separate fire/satiate event.
-export const SUBSCRIBE_ACTIONS = ['close'] as const;
-export type SubscribeAction = (typeof SUBSCRIBE_ACTIONS)[number];
-export const SubscribeActionSchema = z.enum(SUBSCRIBE_ACTIONS);
-
-export const SubscribeRequestSchema = z.object({
-  agent_id: z.string().min(1), // canonical agent id ONLY — never a tmux %id
-  schema_version: z.number().int(),
-  action: SubscribeActionSchema.default('close'),
-});
-export type SubscribeRequest = z.infer<typeof SubscribeRequestSchema>;
-
-export const SUBSCRIBE_REFUSAL_REASONS = ['not_bound', 'schema_version_mismatch'] as const;
-export type SubscribeRefusalReason = (typeof SUBSCRIBE_REFUSAL_REASONS)[number];
-export const SubscribeRefusalReasonSchema = z.enum(SUBSCRIBE_REFUSAL_REASONS);
-
-export const SubscribeResponseSchema = z.object({
-  ok: z.boolean(),
-  agent_id: z.string(),
-  action: SubscribeActionSchema.nullable(),
-  subscribed: z.boolean(), // false = refused (never bound / schema mismatch)
-  reason: z.string().nullable(),
-});
-export type SubscribeResponse = z.infer<typeof SubscribeResponseSchema>;
 
 export const StopRefusalSchema = z.object({
   ok: z.literal(false),
@@ -615,7 +569,7 @@ export type CommWaitResponse = z.infer<typeof CommWaitResponseSchema>;
 // Plan mode is a semantic deliberate action, not a generic text/key send.
 // Callers name a logical identity and intent; txd resolves the bound engine and
 // owns the harness-specific input and read-back evidence below the tmux membrane.
-export const MODE_TRANSITION_INTENTS = ['enter_plan', 'toggle_plan'] as const;
+export const MODE_TRANSITION_INTENTS = ['enter_plan', 'toggle_plan', 'approve_plan'] as const;
 export type ModeTransitionIntent = (typeof MODE_TRANSITION_INTENTS)[number];
 export const ModeTransitionIntentSchema = z.enum(MODE_TRANSITION_INTENTS);
 
@@ -627,7 +581,7 @@ export const AGENT_MODE_STATES = ['work', 'plan', 'unknown'] as const;
 export type AgentModeState = (typeof AGENT_MODE_STATES)[number];
 export const AgentModeStateSchema = z.enum(AGENT_MODE_STATES);
 
-export const MODE_TRANSITION_MECHANISMS = ['none', 'slash_command', 'mode_cycle'] as const;
+export const MODE_TRANSITION_MECHANISMS = ['none', 'slash_command', 'mode_cycle', 'dialog_accept'] as const;
 export type ModeTransitionMechanism = (typeof MODE_TRANSITION_MECHANISMS)[number];
 export const ModeTransitionMechanismSchema = z.enum(MODE_TRANSITION_MECHANISMS);
 

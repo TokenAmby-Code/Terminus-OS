@@ -34,12 +34,12 @@ function delivery(event_type: string, payload: Record<string, unknown>, seq = 1)
 
 test('the bus door serves hook.stop deliveries with the ruled stop behavior', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/bus`, {
       method: 'POST',
-      body: JSON.stringify(delivery('hook.stop', { agent_id: 'i1', schema_version: 10 })),
+      body: JSON.stringify(delivery('hook.stop', { agent_id: 'i1', schema_version: 11 })),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
@@ -54,7 +54,7 @@ test('the bus door serves hook.stop deliveries with the ruled stop behavior', as
 
 test('GET /tmux/read/estate serves the estate view including who is bound', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 10, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 11, identity: 'i1', persona: 'salamander', tint: '#302800' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`);
@@ -267,7 +267,7 @@ test('POST /ctl/estate/rotate resets a page in-process instead of killing the es
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/rotate`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema_version: 10, force: true, scope: 'page', page: 'somnium' }),
+      body: JSON.stringify({ schema_version: 11, force: true, scope: 'page', page: 'somnium' }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ accepted: true, scope: 'page', seats: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'] });
@@ -284,7 +284,7 @@ test('POST /ingress/tmux repairs the lost canonical seat after a pane exits', as
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema_version: 10, event: 'pane-exited', page: 'palace' }),
+      body: JSON.stringify({ schema_version: 11, event: 'pane-exited', page: 'palace' }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, reconstructed: true, page: 'palace', reset_seats: ['palace:E'] });
@@ -301,7 +301,7 @@ test('POST /ingress/tmux accepts the page-less kill-time event and sweeps the es
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema_version: 10, event: 'pane-killed' }),
+      body: JSON.stringify({ schema_version: 11, event: 'pane-killed' }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, page: null, reconstructed: true, reset_seats: ['somnium:SE'] });
@@ -331,13 +331,13 @@ const LEGACY = [
 
 test('adversarial: every legacy route is dead (404) — no shim, no alias', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     for (const [method, path] of LEGACY) {
       const res = await fetch(`http://127.0.0.1:${srv.port}${encodeURI(path)}`, {
         method,
-        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 10 }) } : {}),
+        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 11 }) } : {}),
       });
       expect(res.status).toBe(404);
     }
@@ -349,7 +349,7 @@ test('adversarial: every legacy route is dead (404) — no shim, no alias', asyn
 test('adversarial: the entire direct /ingress/hooks/* surface is dead — every vendor type 404s, zero footprint', async () => {
   const store = new MemoryEventStore();
   const d = new Daemon(store, new FakeTmux());
-  await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   const before = await store.count();
   try {
@@ -357,7 +357,7 @@ test('adversarial: the entire direct /ingress/hooks/* surface is dead — every 
       const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/${hook}`, {
         method: 'POST',
         // The old consumed doors' exact valid bodies must ALSO 404 — no shim.
-        body: JSON.stringify({ agent_id: 'i1', schema_version: 10 }),
+        body: JSON.stringify({ agent_id: 'i1', schema_version: 11 }),
       });
       expect(res.status).toBe(404);
     }
