@@ -4,7 +4,7 @@
 import { z } from "zod";
 
 // AGENT_CONTRACT_MIRROR_START
-export const AGENT_SCHEMA_VERSION = 3;
+export const AGENT_SCHEMA_VERSION = 4;
 
 export const AgentIdSchema = z.string().uuid();
 export const BirthGenerationSchema = z.string().uuid();
@@ -24,6 +24,9 @@ export const PersonaPackageSchema = z.object({
   rank: z.string().min(1).nullable(),
   commander: z.string().min(1).nullable(),
   tint: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  // The persona's synth voice_identity; null for a silent persona. Voice is
+  // persona-level identity, so it lives in the package, never beside it.
+  voice: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
   workspace: z.string().startsWith("/"),
   continuity_references: z.array(z.string().min(1)),
   instruction_package: z.object({
