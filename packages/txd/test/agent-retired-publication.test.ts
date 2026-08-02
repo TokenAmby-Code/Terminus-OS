@@ -49,6 +49,39 @@ async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): P
     tint: '#111111',
   };
   await d.recordPhysicalDeclaration(declaration);
+  // Retirement is a post-birth concept: only a REGISTERED agent's close
+  // publishes agent.retired, so the fixture completes the birth.
+  await d.activateRegisteredAgent({
+    schema_version: AGENT_SCHEMA_VERSION,
+    agent_id: AGENT_ID,
+    birth_generation: BIRTH_GENERATION,
+    registered_at: '2026-08-01T12:00:00.000Z',
+    engine: 'claude',
+    launch: { argv: [], requested_cwd: '/manual/work' },
+    placement: {
+      pane_id: seatId,
+      pane_generation: declaration.pane_generation,
+      machine: 'k12-personal',
+      kind: 'local',
+      wrapper_pid: 4101,
+      transport_witnesses: {},
+    },
+    configuration: CONFIGURATION,
+    persona: {
+      persona: 'black-shields',
+      rank: 'astartes',
+      commander: 'council:custodes',
+      tint: '#111111',
+      workspace: '/personas/black-shields',
+      continuity_references: [],
+      instruction_package: {
+        digest: 'c'.repeat(64),
+        sources: [],
+        rendered_path: '/personas/black-shields/CLAUDE.md',
+      },
+    },
+    resources: [],
+  });
   return declaration;
 }
 
