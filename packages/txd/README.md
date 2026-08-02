@@ -68,12 +68,17 @@ each route is the ruled daemon behavior, unchanged.
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
-- `/agents/mode` accepts only logical identity plus `enter_plan` or
-  `toggle_plan`. It resolves the bound engine from event truth, records
-  `act.mode_transition_requested` before input, then records an attested or
-  failed read-back fact. Codex enters through `/plan` and the `Plan mode`
-  footer; Claude uses its permission-mode cycle and the `plan mode on` footer.
-  No caller sends arbitrary text, keys, raw pane ids, or harness guesses.
+- `/agents/mode` accepts only logical identity plus `enter_plan`,
+  `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
+  truth, records `act.mode_transition_requested` before input, then records an
+  attested or failed read-back fact. Codex enters through `/plan` and the
+  `Plan mode` footer; Claude uses its permission-mode cycle and the
+  `plan mode on` footer. `approve_plan` accepts a POSED plan dialog read from
+  the visible pane only — never scrollback, whose transcript holds every plan
+  already approved — and attests success only when the dialog is gone AND the
+  agent left plan mode. With no dialog posed, nothing is typed and the
+  transition fails loud. No caller sends arbitrary text, keys, raw pane ids, or
+  harness guesses.
 - `/ingress/bus` is txd's **bus subscription door** (central-bus ruling): hook
   fan-in terminates at busd (`packages/busd`), which journals every vendor hook
   type as a `hook.<type>` bus event; txd consumes its two hook types as a

@@ -56,6 +56,21 @@ test('mode enter sends the semantic preplan transition contract', async () => {
   }]);
 });
 
+test('mode approve sends the plan-approval intent and defaults to an operator trigger', async () => {
+  const h = harness({ schema_version: 11, verified: true });
+  expect(await runCli(['mode', 'approve', '--target', 'council:custodes'], h.deps)).toBe(0);
+  expect(h.calls).toEqual([{
+    method: 'POST',
+    path: '/agents/mode',
+    body: {
+      schema_version: 11,
+      target: 'council:custodes',
+      intent: 'approve_plan',
+      trigger: 'operator',
+    },
+  }]);
+});
+
 test('mode toggle defaults to an operator transition', async () => {
   const h = harness({ schema_version: 11, verified: true });
   expect(await runCli(['mode', 'toggle', '--target', 'council:custodes'], h.deps)).toBe(0);

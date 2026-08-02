@@ -1300,11 +1300,16 @@ export class RealTmux implements TmuxControlPlane {
     }
 
     if (intent === 'approve_plan') {
-      // Accept only a POSED plan dialog; with none visible nothing is typed
-      // blind — the caller sees an unverified outcome and the failure is loud.
-      const posed = await this.command('observe_plan_dialog', seatId, [
-        'capture-pane', '-p', '-J', '-t', paneId, '-S', '-30',
+      // A posed plan is a LIVE prompt, so the evidence is the visible pane
+      // ONLY — no scrollback. Transcript history keeps the text of every plan
+      // ever approved on this seat, and accepting on that stale text would
+      // send `1` into whatever prompt is live now.
+      const observeDialog = () => this.command('observe_plan_dialog', seatId, [
+        'capture-pane', '-p', '-J', '-t', paneId,
       ]);
+      // With no dialog posed nothing is typed blind — the caller sees an
+      // unverified outcome and the failure is loud.
+      const posed = await observeDialog();
       if (posed.code !== 0 || !RealTmux.detectPlanDialog(posed.stdout, engine)) {
         return { before, after: before, changed: false, verified: false, mechanism: 'none' };
       }
@@ -1312,12 +1317,14 @@ export class RealTmux implements TmuxControlPlane {
       if (accept.code !== 0) {
         return { before, after: before, changed: false, verified: false, mechanism: 'dialog_accept' };
       }
-      const readBack = await this.command('observe_plan_dialog', seatId, [
-        'capture-pane', '-p', '-J', '-t', paneId, '-S', '-30',
-      ]);
+      // Acceptance needs BOTH witnesses: the dialog is gone AND the agent left
+      // plan mode. A vanished dialog alone is equally consistent with a
+      // dismissal that proceeded with nothing.
+      const readBack = await observeDialog();
       const dismissed = readBack.code === 0 && !RealTmux.detectPlanDialog(readBack.stdout, engine);
       const after = await this.captureAgentMode(seatId, paneId, engine);
-      return { before, after, changed: dismissed, verified: dismissed, mechanism: 'dialog_accept' };
+      const accepted = dismissed && after === 'work';
+      return { before, after, changed: accepted, verified: accepted, mechanism: 'dialog_accept' };
     }
 
     if (intent === 'toggle_plan' && before === 'plan') {

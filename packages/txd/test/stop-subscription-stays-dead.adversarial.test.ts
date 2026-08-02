@@ -63,12 +63,15 @@ test('a stop never closes: activity folds to stopped, the binding stands, no ret
 
 test('a journaled reg.stop_subscribed from a dead generation is refused by the store contract', async () => {
   const { store } = setup();
-  await expect(store.append({
-    entity_type: 'agent',
+  // Everything but the event type is a VALID append, so the rejection can only
+  // be the dead event type — a malformed provenance would prove nothing.
+  const input = {
+    entity_type: 'agent' as const,
     entity_id: 'i1',
-    event_type: 'reg.stop_subscribed',
     payload: { action: 'close' },
-    provenance: { actor: 'wrapper', transport_receipt: null },
+    provenance: { source: 'wrapper' as const, transport_receipt: null, emitter_version: SCHEMA_VERSION },
     occurred_at: new Date().toISOString(),
-  } as never)).rejects.toThrow();
+  };
+  await expect(store.append({ ...input, event_type: 'reg.bound' })).resolves.toBeDefined();
+  await expect(store.append({ ...input, event_type: 'reg.stop_subscribed' } as never)).rejects.toThrow();
 });

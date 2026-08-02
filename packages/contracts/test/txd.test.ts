@@ -20,7 +20,7 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 10 (registrationd-owned identity)", () => {
+  test("schema_version pins at 11 (lifecycle correlation leaves txd; plan approval gains its intent)", () => {
     expect(SCHEMA_VERSION).toBe(11);
   });
 
