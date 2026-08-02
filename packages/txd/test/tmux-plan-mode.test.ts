@@ -136,3 +136,25 @@ test('approve_plan with no posed dialog types nothing and fails loud', async () 
   });
   expect(calls.filter((args) => args[0] === 'send-keys')).toEqual([]);
 });
+
+// Real chrome, harvested from live k12 estate panes on 2026-08-02. The screen
+// oracle is the one part of plan mode a fake cannot prove: these are the exact
+// footer strings the vendor renders, kept as fixtures so a vendor change breaks
+// the pin here instead of silently disarming approve_plan in production.
+const LIVE_CLAUDE_FOOTERS = [
+  '  ⏵⏵ bypass permissions on           · ',
+  '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ←',
+];
+
+test('the mode oracle reads real Claude footer chrome as work', () => {
+  for (const footer of LIVE_CLAUDE_FOOTERS) {
+    expect(RealTmux.detectAgentMode(footer, 'claude')).toBe('work');
+  }
+});
+
+test('real working chrome never poses as a plan dialog', () => {
+  // The dangerous direction: a false positive sends `1` into a live prompt.
+  for (const footer of LIVE_CLAUDE_FOOTERS) {
+    expect(RealTmux.detectPlanDialog(footer, 'claude')).toBe(false);
+  }
+});
