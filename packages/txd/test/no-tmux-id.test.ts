@@ -39,7 +39,7 @@ test('mutation ingress recursively rejects raw tmux ids before tmux or persisten
   const paths = ['/agents/launch', '/agents/close', '/agents/subscribe'];
   const valid = [
     { seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' },
-    { target: 'palace:W', schema_version: 10 },
+    { source_agent_id: 'ov-1', targets: ['palace:W'], schema_version: 10 },
     { agent_id: 'i1', schema_version: 10, action: 'close' },
   ];
   const attacks = [

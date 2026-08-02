@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 import { buildProjections } from '../src/projections.ts';
 
 function setup() {
@@ -42,10 +43,11 @@ test('GHOST stop — agent never bound — is refused loud; nothing recorded', a
 });
 
 test('a stop AFTER close (bound-then-cleared) is deduped, NOT treated as a ghost', async () => {
-  const { d } = setup();
+  const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
   await d.stop({ agent_id: 'i1', schema_version: 10 });
-  await d.close({ target: 'i1', schema_version: 10 });
+  await bindOverseerSource(d, store);
+  await d.close(closeRequest(['i1']));
   const res = await d.stop({ agent_id: 'i1', schema_version: 10 }); // late stop, seat already freed
   expect(res).toMatchObject({ ok: true, recorded: false, deduped: true });
   // everBound distinguishes this from a ghost: it is NOT refused.

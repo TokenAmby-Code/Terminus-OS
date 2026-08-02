@@ -386,9 +386,11 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const parsed = await parseMutation(req, CloseRequestSchema, 'invalid_close_request');
         if (parsed instanceof Response) return parsed;
         const res = await daemon.close(parsed, receipt(req));
-        // A refused/failed close (no binding, reap failed, schema mismatch) is loud:
-        // non-2xx so a caller can never read a no-op as success.
-        return json(res, res.closed ? 200 : 409);
+        // Any refusal (auth, no binding, mid-turn, palace seat, reap failure —
+        // request-level or any single verdict) is loud: non-2xx so a caller can
+        // never read a no-op or a partial bulk close as full success. The body
+        // carries the per-target verdicts either way.
+        return json(res, res.ok ? 200 : 409);
       },
     },
     {

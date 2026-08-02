@@ -9,6 +9,7 @@ import { AGENT_SCHEMA_VERSION, AgentRetiredSchema, type PhysicalDeclaration } fr
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
@@ -90,11 +91,12 @@ function retirements(published: Array<{ type: string; payload: Record<string, un
 }
 
 test('close publishes agent.retired with the drafted contract shape', async () => {
-  const { tmux, published, d } = setup();
+  const { store, tmux, published, d } = setup();
   const declaration = await bindRegisteredAgent(tmux, d, 'palace:W');
 
-  const res = await d.close({ target: AGENT_ID, schema_version: 10 });
-  expect(res).toMatchObject({ ok: true, closed: true });
+  await bindOverseerSource(d, store);
+  const res = await d.close(closeRequest([AGENT_ID]));
+  expect(res).toMatchObject({ ok: true, closed_count: 1 });
 
   const retired = retirements(published);
   expect(retired).toHaveLength(1);
@@ -127,22 +129,24 @@ test('a forced pane reset over a bound seat publishes agent.retired with cause e
 });
 
 test('a clean stand-down then a pane reset never double-publishes', async () => {
-  const { tmux, published, d } = setup();
+  const { store, tmux, published, d } = setup();
   await bindRegisteredAgent(tmux, d, 'palace:E');
 
-  expect((await d.close({ target: AGENT_ID, schema_version: 10 })).ok).toBe(true);
+  await bindOverseerSource(d, store);
+  expect((await d.close(closeRequest([AGENT_ID]))).ok).toBe(true);
   expect((await d.resetEstateScope({ schema_version: 10, force: true, scope: 'pane', pane: 'palace:E' })).ok).toBe(true);
 
   expect(retirements(published)).toHaveLength(1);
 });
 
 test('a failed reap publishes nothing — retire-with-live-process stays unspellable', async () => {
-  const { tmux, published, d } = setup();
+  const { store, tmux, published, d } = setup();
   await bindRegisteredAgent(tmux, d, 'palace:S');
   tmux.failReapSeat('palace:S');
 
-  const res = await d.close({ target: AGENT_ID, schema_version: 10 });
-  expect(res).toMatchObject({ ok: false, closed: false });
+  await bindOverseerSource(d, store);
+  const res = await d.close(closeRequest([AGENT_ID]));
+  expect(res).toMatchObject({ ok: false, refused_count: 1 });
   expect(retirements(published)).toHaveLength(0);
 });
 
@@ -150,8 +154,9 @@ test('a bus refusal does not fail the close — the reap and event truth stand',
   const { store, tmux, d } = setup({ failPublish: true });
   await bindRegisteredAgent(tmux, d, 'palace:W');
 
-  const res = await d.close({ target: AGENT_ID, schema_version: 10 });
-  expect(res).toMatchObject({ ok: true, closed: true });
+  await bindOverseerSource(d, store);
+  const res = await d.close(closeRequest([AGENT_ID]));
+  expect(res).toMatchObject({ ok: true, closed_count: 1 });
   expect((await store.readAll()).map((e) => e.event_type)).toContain('reg.retired');
 });
 
@@ -161,15 +166,17 @@ test('an unregistered daemon (no bus runtime) closes without publishing', async 
   const d = new Daemon(store, tmux);
   await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'salamander', tint: '#302800' });
 
-  const res = await d.close({ target: 'palace:W', schema_version: 10 });
-  expect(res).toMatchObject({ ok: true, closed: true });
+  await bindOverseerSource(d, store);
+  const res = await d.close(closeRequest(['palace:W']));
+  expect(res).toMatchObject({ ok: true, closed_count: 1 });
 });
 
 test('a non-registration launch identity is skipped, not published malformed', async () => {
-  const { published, d } = setup();
+  const { store, published, d } = setup();
   await d.launch({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'salamander', tint: '#302800' });
 
-  const res = await d.close({ target: 'palace:W', schema_version: 10 });
-  expect(res).toMatchObject({ ok: true, closed: true });
+  await bindOverseerSource(d, store);
+  const res = await d.close(closeRequest(['palace:W']));
+  expect(res).toMatchObject({ ok: true, closed_count: 1 });
   expect(retirements(published)).toHaveLength(0);
 });

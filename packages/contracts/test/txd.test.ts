@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   ACT_EVENT_NAMES,
+  CLOSE_REQUIRED_RANK,
+  CloseRequestSchema,
   CommRequestSchema,
   EVENT_TYPES,
   ESTATE_EVENT_NAMES,
@@ -133,5 +135,23 @@ describe("txd lifecycle vocabulary", () => {
     };
     expect(HealthSchema.parse(health).service).toBe("txd");
     expect(() => HealthSchema.parse({ ...health, service: "k12_daemon" })).toThrow();
+  });
+
+  test("close requires exactly one selector and pins the overseer rank", () => {
+    expect(CLOSE_REQUIRED_RANK).toBe('overseer');
+    const base = { schema_version: 10, source_agent_id: 'ov-1' };
+    expect(CloseRequestSchema.parse({ ...base, targets: ['reservists:W', 'w-2'], force: true }).targets).toHaveLength(2);
+    expect(CloseRequestSchema.parse({ ...base, page: 'reservists' }).page).toBe('reservists');
+    expect(CloseRequestSchema.parse({ ...base, all_idle: true }).all_idle).toBe(true);
+    // Selector discipline: none, two, or an empty list are refused shapes.
+    expect(() => CloseRequestSchema.parse(base)).toThrow();
+    expect(() => CloseRequestSchema.parse({ ...base, targets: [] })).toThrow();
+    expect(() => CloseRequestSchema.parse({ ...base, targets: ['a'], page: 'reservists' })).toThrow();
+    expect(() => CloseRequestSchema.parse({ ...base, page: 'reservists', all_idle: true })).toThrow();
+    // Filters are inherently graceful: force never combines with them.
+    expect(() => CloseRequestSchema.parse({ ...base, page: 'reservists', force: true })).toThrow();
+    expect(() => CloseRequestSchema.parse({ ...base, all_idle: true, force: true })).toThrow();
+    // The caller is named, always.
+    expect(() => CloseRequestSchema.parse({ schema_version: 10, targets: ['a'] })).toThrow();
   });
 });

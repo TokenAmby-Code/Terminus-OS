@@ -17,6 +17,7 @@ import {
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
@@ -137,14 +138,15 @@ test('a tint attestation failure aborts the binding fail-dark and publishes plac
 });
 
 test('consuming an abort closes the binding, un-tints the seat, and publishes NO agent.retired', async () => {
-  const { tmux, published, d } = setup();
+  const { tmux, store, published, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
   await d.recordPhysicalDeclaration(decl, 'bus:9');
   expect(await tmux.seatTint('palace:W')).toBe('#111111');
+  await bindOverseerSource(d, store);
   await d.abortRegistration(abortEvent(), 'bus:10');
   // The seat is free again: a close of the same target refuses loud on
   // no_binding, which is the unbound truth stated by the close door itself.
-  expect(await d.close({ schema_version: 10, target: 'palace:W' })).toMatchObject({ ok: false });
+  expect(await d.close(closeRequest(['palace:W']))).toMatchObject({ ok: false });
   expect(await tmux.seatTint('palace:W')).toBeNull();
   expect(ofType(published, 'agent.retired')).toHaveLength(0);
 });
@@ -161,7 +163,7 @@ test('an abort replay converges: the second delivery finds nothing standing and 
 });
 
 test('an abort for a registered agent refuses: post-birth cleanup is retirement, never abort', async () => {
-  const { tmux, d } = setup();
+  const { tmux, store, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
   await d.recordPhysicalDeclaration(decl, 'bus:9');
   await d.activateRegisteredAgent(registeredAgent(decl));
@@ -169,14 +171,16 @@ test('an abort for a registered agent refuses: post-birth cleanup is retirement,
   // The binding stands untouched: the registered agent still holds its tint
   // and a close of the same target still resolves the binding.
   expect(await tmux.seatTint('palace:W')).toBe('#111111');
-  expect(await d.close({ schema_version: 10, target: AGENT_ID })).toMatchObject({ ok: true, closed: true });
+  await bindOverseerSource(d, store);
+  expect(await d.close(closeRequest([AGENT_ID]))).toMatchObject({ ok: true, closed_count: 1 });
 });
 
 test('closing a never-registered binding publishes no agent.retired — retirement is post-birth', async () => {
-  const { tmux, published, d } = setup();
+  const { tmux, store, published, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
   await d.recordPhysicalDeclaration(decl, 'bus:9');
-  const result = await d.close({ schema_version: 10, target: 'palace:W' });
+  await bindOverseerSource(d, store);
+  const result = await d.close(closeRequest(['palace:W']));
   expect(result.ok).toBe(true);
   expect(ofType(published, 'agent.retired')).toHaveLength(0);
 });
