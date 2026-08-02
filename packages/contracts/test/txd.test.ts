@@ -20,19 +20,19 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 10 (registrationd-owned identity)", () => {
-    expect(SCHEMA_VERSION).toBe(10);
+  test("schema_version pins at 11 (lifecycle correlation leaves txd; plan approval gains its intent)", () => {
+    expect(SCHEMA_VERSION).toBe(11);
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(38);
+    expect(EVENT_TYPES).toHaveLength(37);
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('reg.placement_attested');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
     expect(EVENT_TYPES).toContain('act.mode_transition_requested');
     expect(EVENT_TYPES).toContain('act.mode_transition_attested');
     expect(EVENT_TYPES).toContain('act.mode_transition_failed');
-    expect(REG_EVENT_NAMES).toHaveLength(20);
+    expect(REG_EVENT_NAMES).toHaveLength(19);
     expect(ACT_EVENT_NAMES).toHaveLength(9);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
@@ -51,18 +51,18 @@ describe("txd lifecycle vocabulary", () => {
 
   test("mode transition input is semantic and logical, never raw tmux input", () => {
     expect(ModeTransitionRequestSchema.parse({
-      schema_version: 10,
+      schema_version: 11,
       target: "council:custodes",
       intent: "enter_plan",
       trigger: "preplan",
     })).toEqual({
-      schema_version: 10,
+      schema_version: 11,
       target: "council:custodes",
       intent: "enter_plan",
       trigger: "preplan",
     });
     expect(() => ModeTransitionRequestSchema.parse({
-      schema_version: 10,
+      schema_version: 11,
       target: "council:custodes",
       intent: "send_keys",
       trigger: "operator",
@@ -72,7 +72,7 @@ describe("txd lifecycle vocabulary", () => {
       { keys: ["BTab"] },
     ]) {
       expect(() => ModeTransitionRequestSchema.parse({
-        schema_version: 10,
+        schema_version: 11,
         target: "council:custodes",
         intent: "enter_plan",
         trigger: "preplan",
@@ -94,26 +94,26 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test('tmux lifecycle ingress accepts only typed pane events with canonical page input', () => {
-    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-exited', page: 'palace' })).toEqual({
-      schema_version: 10, event: 'pane-exited', page: 'palace',
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 11, event: 'pane-exited', page: 'palace' })).toEqual({
+      schema_version: 11, event: 'pane-exited', page: 'palace',
     });
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-vanished', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 11, event: 'pane-vanished', page: 'palace' })).toThrow();
   });
 
   test('pane-killed is the page-less kill-time event: tmux cannot name the page a kill emptied', () => {
-    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-killed' })).toEqual({
-      schema_version: 10, event: 'pane-killed',
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 11, event: 'pane-killed' })).toEqual({
+      schema_version: 11, event: 'pane-killed',
     });
     // A kill-time page claim is untrustworthy (hook context is the active
     // window) and a process-death event without its page is unscoped: both
     // shapes are refused, not silently accommodated.
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-killed', page: 'palace' })).toThrow();
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-died' })).toThrow();
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-exited' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 11, event: 'pane-killed', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 11, event: 'pane-died' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 11, event: 'pane-exited' })).toThrow();
   });
 
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
-    const base = { schema_version: 10, source_agent_id: "source", target: "target", ask: false, reply: false };
+    const base = { schema_version: 11, source_agent_id: "source", target: "target", ask: false, reply: false };
     expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
     expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
@@ -139,7 +139,7 @@ describe("txd lifecycle vocabulary", () => {
 
   test("close requires exactly one selector and pins the overseer rank", () => {
     expect(CLOSE_REQUIRED_RANK).toBe('overseer');
-    const base = { schema_version: 10, source_agent_id: 'ov-1' };
+    const base = { schema_version: 11, source_agent_id: 'ov-1' };
     expect(CloseRequestSchema.parse({ ...base, targets: ['reservists:W', 'w-2'], force: true }).targets).toHaveLength(2);
     expect(CloseRequestSchema.parse({ ...base, page: 'reservists' }).page).toBe('reservists');
     expect(CloseRequestSchema.parse({ ...base, all_idle: true }).all_idle).toBe(true);
@@ -152,6 +152,6 @@ describe("txd lifecycle vocabulary", () => {
     expect(() => CloseRequestSchema.parse({ ...base, page: 'reservists', force: true })).toThrow();
     expect(() => CloseRequestSchema.parse({ ...base, all_idle: true, force: true })).toThrow();
     // The caller is named, always.
-    expect(() => CloseRequestSchema.parse({ schema_version: 10, targets: ['a'] })).toThrow();
+    expect(() => CloseRequestSchema.parse({ schema_version: 11, targets: ['a'] })).toThrow();
   });
 });

@@ -36,11 +36,11 @@ test('mutation ingress recursively rejects raw tmux ids before tmux or persisten
   // mutations, and its membrane semantics (ack-not-consume on a leaking
   // consumed payload, tolerate %N text in unconsumed payloads) are pinned in
   // ingress-bus.test.ts.
-  const paths = ['/agents/launch', '/agents/close', '/agents/subscribe'];
+  const paths = ['/agents/launch', '/agents/close'];
   const valid = [
-    { seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' },
-    { source_agent_id: 'ov-1', targets: ['palace:W'], schema_version: 10 },
-    { agent_id: 'i1', schema_version: 10, action: 'close' },
+    { seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' },
+    { source_agent_id: 'ov-1', targets: ['palace:W'], schema_version: 11 },
+    { agent_id: 'i1', schema_version: 11, action: 'close' },
   ];
   const attacks = [
     (body: Record<string, unknown>) => ({ ...body, metadata: { pane: '%91' } }),
@@ -95,7 +95,7 @@ test('handler errors are sanitized before structured logging', async () => {
     // Force a below-membrane adapter error containing a raw id without putting
     // that id in the request (request ingress must remain independently clean).
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/launch`, {
-      method: 'POST', body: JSON.stringify({ seat_id: 'palace:W', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' }),
+      method: 'POST', body: JSON.stringify({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' }),
     });
     expect(res.status).toBe(500);
     expect(lines).toHaveLength(1);
@@ -112,14 +112,14 @@ test('no tmux id appears in any /agents/*, /ingress/bus, /tmux/read, or /ctl res
   try {
     const post = (p: string, body: unknown) => fetch(`http://127.0.0.1:${srv.port}${p}`, { method: 'POST', body: JSON.stringify(body) });
     const bodies: unknown[] = [];
-    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 10, identity: 'i1', persona: 'p', tint: '#1' })).json());
-    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 10 })).json());
+    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' })).json());
+    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 11 })).json());
     bodies.push(await (await post('/ingress/bus', {
       schema_version: 1,
       subscription: 'txd',
       event: {
         seq: 1, event_type: 'hook.stop', source: 'claude',
-        payload: { agent_id: 'i1', schema_version: 10 },
+        payload: { agent_id: 'i1', schema_version: 11 },
         provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'test' },
         occurred_at: '2026-07-22T00:00:00.000Z', recorded_at: '2026-07-22T00:00:00.100Z',
       },

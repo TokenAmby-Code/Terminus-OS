@@ -1247,6 +1247,15 @@ export class RealTmux implements TmuxControlPlane {
     return { bytes, verdict: 'partial_delivered' };
   }
 
+  // A posed plan is a vendor approval dialog, not a footer state. Claude poses
+  // ExitPlanMode as a proceed prompt with numbered options; Codex has no such
+  // dialog, so the detector never claims one for it.
+  static detectPlanDialog(capture: string, engine: 'claude' | 'codex'): boolean {
+    if (engine !== 'claude') return false;
+    return /(?:Would you like to proceed\?|Ready to code\?)/.test(capture)
+      && /1\.\s*Yes/.test(capture);
+  }
+
   static detectAgentMode(capture: string, engine: 'claude' | 'codex'): AgentModeState {
     if (engine === 'claude') {
       if (/(?:^|\s)plan mode on(?:\s|·|$)/.test(capture)) return 'plan';
@@ -1288,6 +1297,34 @@ export class RealTmux implements TmuxControlPlane {
     const before = await this.captureAgentMode(seatId, paneId, engine);
     if (intent === 'enter_plan' && before === 'plan') {
       return { before, after: before, changed: false, verified: true, mechanism: 'none' };
+    }
+
+    if (intent === 'approve_plan') {
+      // A posed plan is a LIVE prompt, so the evidence is the visible pane
+      // ONLY — no scrollback. Transcript history keeps the text of every plan
+      // ever approved on this seat, and accepting on that stale text would
+      // send `1` into whatever prompt is live now.
+      const observeDialog = () => this.command('observe_plan_dialog', seatId, [
+        'capture-pane', '-p', '-J', '-t', paneId,
+      ]);
+      // With no dialog posed nothing is typed blind — the caller sees an
+      // unverified outcome and the failure is loud.
+      const posed = await observeDialog();
+      if (posed.code !== 0 || !RealTmux.detectPlanDialog(posed.stdout, engine)) {
+        return { before, after: before, changed: false, verified: false, mechanism: 'none' };
+      }
+      const accept = await this.command('approve_plan_dialog', seatId, ['send-keys', '-t', paneId, '1']);
+      if (accept.code !== 0) {
+        return { before, after: before, changed: false, verified: false, mechanism: 'dialog_accept' };
+      }
+      // Acceptance needs BOTH witnesses: the dialog is gone AND the agent left
+      // plan mode. A vanished dialog alone is equally consistent with a
+      // dismissal that proceeded with nothing.
+      const readBack = await observeDialog();
+      const dismissed = readBack.code === 0 && !RealTmux.detectPlanDialog(readBack.stdout, engine);
+      const after = await this.captureAgentMode(seatId, paneId, engine);
+      const accepted = dismissed && after === 'work';
+      return { before, after, changed: accepted, verified: accepted, mechanism: 'dialog_accept' };
     }
 
     if (intent === 'toggle_plan' && before === 'plan') {
@@ -1363,6 +1400,7 @@ export class FakeTmux implements TmuxControlPlane {
   private shape: { sessions: string[]; windows: Record<string, string[]> } = { sessions: [], windows: {} };
   private clipboard = new Uint8Array();
   private agentModes = new Map<string, AgentModeState>();
+  private planDialogs = new Set<string>();
   private agentModeInputs = new Map<string, string[]>();
   private agentModeFailures = new Set<string>();
   private attachedClients = new Set<string>();
@@ -1390,12 +1428,29 @@ export class FakeTmux implements TmuxControlPlane {
   setAgentMode(seatId: string, mode: AgentModeState): void { this.agentModes.set(seatId, mode); }
   modeInputs(seatId: string): string[] { return [...(this.agentModeInputs.get(seatId) ?? [])]; }
   failModeTransition(seatId: string): void { this.agentModeFailures.add(seatId); }
+  setPlanDialog(seatId: string, posed: boolean): void {
+    if (posed) this.planDialogs.add(seatId);
+    else this.planDialogs.delete(seatId);
+  }
+  planDialog(seatId: string): boolean { return this.planDialogs.has(seatId); }
   async transitionAgentMode(
     seatId: string,
     engine: 'claude' | 'codex',
     intent: ModeTransitionIntent,
   ): Promise<AgentModeTransitionOutcome> {
     const before = this.agentModes.get(seatId) ?? 'unknown';
+    if (intent === 'approve_plan') {
+      if (engine !== 'claude' || !this.planDialogs.has(seatId)) {
+        return { before, after: before, changed: false, verified: false, mechanism: 'none' };
+      }
+      this.agentModeInputs.set(seatId, [...(this.agentModeInputs.get(seatId) ?? []), '1']);
+      if (this.agentModeFailures.has(seatId)) {
+        return { before, after: before, changed: false, verified: false, mechanism: 'dialog_accept' };
+      }
+      this.planDialogs.delete(seatId);
+      this.agentModes.set(seatId, 'work');
+      return { before, after: 'work', changed: true, verified: true, mechanism: 'dialog_accept' };
+    }
     if (intent === 'enter_plan' && before === 'plan') {
       return { before, after: 'plan', changed: false, verified: true, mechanism: 'none' };
     }

@@ -55,13 +55,10 @@ import {
   type ProvenanceSource,
   type ReconcileResponse,
   type RetirementCause,
-  type StopAutoCloseOutcome,
   type StopReceipt,
   type StopRefusal,
   type StopRefusalReason,
   type StopRequest,
-  type SubscribeRequest,
-  type SubscribeResponse,
   type TmuxLifecycleEventRequest,
   type TmuxLifecycleEventResponse,
   type TintReadiness,
@@ -1881,51 +1878,13 @@ export class Daemon {
     return true;
   }
 
-  // ── /agents/subscribe — the generic stop-hook subscription system (rung 3) ─────────
-  // Records a close-on-next-stop subscription. BOUND-KEYED: refuses unless the
-  // agent is currently bound, so an orphan/never-bound id can never hold a
-  // subscription (the 77f7cfb4 re-firing class is structurally dead). Composing
-  // this with the bus-delivered stop hook (/ingress/bus, hook.stop) yields
-  // `final message → auto-close on next stop-hook`.
-  subscribe(req: SubscribeRequest, transportReceipt: string | null = null): Promise<SubscribeResponse> {
-    return this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) {
-        return {
-          ok: false,
-          agent_id: req.agent_id,
-          action: null,
-          subscribed: false,
-          reason: `schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`,
-        };
-      }
-      const proj = await this.projections();
-      if (!proj.currentBindings.some((b) => b.agent_id === req.agent_id)) {
-        return {
-          ok: false,
-          agent_id: req.agent_id,
-          action: null,
-          subscribed: false,
-          reason: 'not_bound: subscriptions are bound-keyed — an unbound/never-bound agent cannot subscribe',
-        };
-      }
-      await this.store.append({
-        entity_type: 'agent',
-        entity_id: req.agent_id,
-        event_type: 'reg.stop_subscribed',
-        payload: { action: req.action },
-        provenance: this.prov('wrapper', transportReceipt),
-        occurred_at: this.now(),
-      });
-      return { ok: true, agent_id: req.agent_id, action: req.action, subscribed: true, reason: null };
-    });
-  }
-
   // ── stop ingestion — the stop-hook's door (rung 3; delivered via /ingress/bus) ─────────────
   // Three honest outcomes, no blind swallow: record a fresh stop (bound + live),
   // dedupe a repeat/late stop (act.receipt_deduped), or REFUSE a ghost — a stop for
-  // an id that never walked through /agents/launch. The ghost is refused at admission, so
-  // nothing is recorded: no phantom row, no re-firing subscription (the 77f7cfb4
-  // class is structurally dead). The stop-hook is a REAL but UNTRUSTED witness.
+  // an id that never walked through /agents/launch. The ghost is refused at
+  // admission, so nothing is recorded. The stop-hook is a REAL but UNTRUSTED
+  // witness; what other services do with a stop is their correlation, consumed
+  // from the bus — txd only folds the activity axis.
   stop(req: StopRequest, transportReceipt: string | null = null): Promise<StopReceipt | StopRefusal> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {
@@ -1951,7 +1910,7 @@ export class Daemon {
           provenance: this.prov('observer', transportReceipt),
           occurred_at: this.now(),
         });
-        return { ok: true, agent_id: req.agent_id, recorded: false, deduped: true, activity, auto_close: 'none' };
+        return { ok: true, agent_id: req.agent_id, recorded: false, deduped: true, activity };
       }
 
       // Fresh stop for a live, bound agent → record it (activity → stopped).
@@ -1964,25 +1923,7 @@ export class Daemon {
         occurred_at: this.now(),
       });
 
-      // Reflexive auto-close: an OPEN close-on-stop subscription fires now (the stop
-      // we just recorded satiates it). `proj` is the pre-stop read, so the binding
-      // is still present; executeClose is the SAME mechanism as /agents/close.
-      let auto_close: StopAutoCloseOutcome = 'none';
-      if (proj.openStopSubscriptions.has(req.agent_id)) {
-        const binding = proj.currentBindings.find((b) => b.agent_id === req.agent_id);
-        if (binding) {
-          const closed = await this.executeClose(binding, transportReceipt);
-          auto_close = closed ? 'fired' : 'reap_failed';
-          if (!closed) {
-            // Loud, not silent: the agent stays stopped+bound (visible), never a
-            // quiet leak. Reconcile catches any lingering retire-with-live-process.
-            console.error(
-              JSON.stringify({ level: 'error', event: 'auto_close_reap_failed', agent_id: req.agent_id, seat_id: binding.seat_id }),
-            );
-          }
-        }
-      }
-      return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, activity: 'stopped', auto_close };
+      return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, activity: 'stopped' };
     });
   }
 

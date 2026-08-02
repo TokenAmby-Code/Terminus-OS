@@ -60,21 +60,25 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` / page-less `pane-killed` ingress; repairs each faulted seat alone, rebuilding a page only when no tagged pane survives on it |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Remote close (`tx close`, overseer-gated): reap N processes individually, keep estate panes, seats → freelist; graceful by default (mid-turn refuses absent force), palace:N hard-refused |
-| POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |
 | POST   | `/agents/comm`          | Typed one-way/ask/reply communication admission |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
-| POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition |
-| POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost; fires auto-close) and `hook.user_prompt_submit`; acks everything else |
+| POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
+| POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost) and `hook.user_prompt_submit`; acks everything else |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
-- `/agents/mode` accepts only logical identity plus `enter_plan` or
-  `toggle_plan`. It resolves the bound engine from event truth, records
-  `act.mode_transition_requested` before input, then records an attested or
-  failed read-back fact. Codex enters through `/plan` and the `Plan mode`
-  footer; Claude uses its permission-mode cycle and the `plan mode on` footer.
-  No caller sends arbitrary text, keys, raw pane ids, or harness guesses.
+- `/agents/mode` accepts only logical identity plus `enter_plan`,
+  `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
+  truth, records `act.mode_transition_requested` before input, then records an
+  attested or failed read-back fact. Codex enters through `/plan` and the
+  `Plan mode` footer; Claude uses its permission-mode cycle and the
+  `plan mode on` footer. `approve_plan` accepts a POSED plan dialog read from
+  the visible pane only — never scrollback, whose transcript holds every plan
+  already approved — and attests success only when the dialog is gone AND the
+  agent left plan mode. With no dialog posed, nothing is typed and the
+  transition fails loud. No caller sends arbitrary text, keys, raw pane ids, or
+  harness guesses.
 - `/ingress/bus` is txd's **bus subscription door** (central-bus ruling): hook
   fan-in terminates at busd (`packages/busd`), which journals every vendor hook
   type as a `hook.<type>` bus event; txd consumes its two hook types as a
@@ -101,7 +105,7 @@ each route is the ruled daemon behavior, unchanged.
 ## Contracts
 
 The lifecycle vocabulary (`schema_version`, the seed event types, axes,
-comm/stop/close/subscribe/mode shapes) lives in `@terminus-os/contracts`
+comm/stop/close/mode shapes) lives in `@terminus-os/contracts`
 (`./txd` module) — the daemon pins `SCHEMA_VERSION` exactly. No `file:` links,
 no external registry dependency and no compatibility layer.
 
