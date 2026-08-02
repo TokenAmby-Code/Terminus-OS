@@ -142,6 +142,8 @@ test('a registered agent\'s close publishes agent.retired and never the unregist
       rank: 'astartes',
       commander: 'council:custodes',
       tint: '#111111',
+      // A Black Shield is silent: no chapter, no voice.
+      voice: null,
       workspace: '/personas/black-shields',
       continuity_references: [],
       instruction_package: {
