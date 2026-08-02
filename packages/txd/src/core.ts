@@ -7,6 +7,7 @@
 
 import {
   AGENT_SCHEMA_VERSION,
+  AgentRetiredSchema,
   SCHEMA_VERSION,
   type ActivityBoardRow,
   type CloseRequest,
@@ -46,6 +47,7 @@ import {
   type Provenance,
   type ProvenanceSource,
   type ReconcileResponse,
+  type RetirementCause,
   type StopAutoCloseOutcome,
   type StopReceipt,
   type StopRefusal,
@@ -689,6 +691,7 @@ export class Daemon {
         occurred_at,
       });
       await this.store.appendAll(inputs);
+      await this.publishRetirements(bindings, 'estate_reset', occurred_at);
       closed.add(request.entity_id);
     }
     return councilRebuilt;
@@ -1225,6 +1228,7 @@ export class Daemon {
           occurred_at,
         });
         await this.store.appendAll(inputs);
+        await this.publishRetirements(bindings, 'topology_migration', occurred_at);
       } else if (generation === 'foreign') {
         throw new Error('txd refused non-canonical existing tmux estate');
       }
@@ -1300,10 +1304,14 @@ export class Daemon {
         const page = binding.seat_id.split(':', 1)[0];
         return page !== undefined && isTxdPage(page) && rebuiltPages.has(page);
       });
+      const bootRetiredAt = this.now();
       const bootRetirements = bindings.flatMap((binding) =>
-        this.resetBindingInputs(binding, null, this.now()),
+        this.resetBindingInputs(binding, null, bootRetiredAt),
       );
-      if (bootRetirements.length > 0) await this.store.appendAll(bootRetirements);
+      if (bootRetirements.length > 0) {
+        await this.store.appendAll(bootRetirements);
+        await this.publishRetirements(bindings, 'estate_reset', bootRetiredAt);
+      }
       // Seats that already carry a `reg.pane_created` fact. A prior boot could
       // have torn (createSeat committed, its append did not) — the pane persists
       // but the fact was lost. Presence WITHOUT attestation is that torn state.
@@ -1408,6 +1416,52 @@ export class Daemon {
     });
   }
 
+  // Retirement publication (chapter-locks spec §4): every reg.retired append is
+  // followed by `agent.retired` on the bus — the reactive leg of the retirement
+  // authority split. The store facts are already committed when this runs, so a
+  // bus refusal is reported loud and never un-closes the seat; a payload the
+  // contract refuses (a non-registration launch identity) is skipped loud for
+  // the same reason. Both are insurance gaps, not close failures.
+  private async publishRetirements(bindings: CurrentBinding[], cause: RetirementCause, retiredAt: string): Promise<void> {
+    if (!this.physicalRegistration) return;
+    for (const binding of bindings) {
+      if (!binding.agent_id) continue;
+      const retirement = AgentRetiredSchema.safeParse({
+        schema_version: AGENT_SCHEMA_VERSION,
+        agent_id: binding.agent_id,
+        birth_generation: binding.birth_generation,
+        seat_id: binding.seat_id,
+        pane_generation: binding.pane_generation,
+        machine: this.physicalRegistration.machine,
+        cause,
+        retired_at: retiredAt,
+      });
+      if (!retirement.success) {
+        console.error(JSON.stringify({
+          level: 'error',
+          event: 'agent_retired_publish_skipped',
+          agent_id: binding.agent_id,
+          seat_id: binding.seat_id,
+          cause,
+          reason: retirement.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+        }));
+        continue;
+      }
+      try {
+        await this.physicalRegistration.publish('agent.retired', retirement.data);
+      } catch (error) {
+        console.error(JSON.stringify({
+          level: 'error',
+          event: 'agent_retired_publish_failed',
+          agent_id: binding.agent_id,
+          seat_id: binding.seat_id,
+          cause,
+          error: String(error),
+        }));
+      }
+    }
+  }
+
   // The generic close mechanism, shared by /agents/close and the reflexive auto-close.
   // Reap-first, attest-after: respawn-pane -k keeps the estate pane (bare shell)
   // so the seat survives and returns to the freelist. On a confirmed reap, ONE
@@ -1427,6 +1481,7 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     await this.store.appendAll(inputs);
+    await this.publishRetirements([binding], 'close', occurred_at);
     const perpetualEngine = this.physicalRegistration?.perpetual[binding.seat_id];
     if (perpetualEngine && !(await this.tmux.startSeatEngine({
       seatId: binding.seat_id,
@@ -1875,6 +1930,7 @@ export class Daemon {
         occurred_at: completedAt,
       });
       await this.store.appendAll(inputs);
+      await this.publishRetirements(bindings, 'estate_reset', completedAt);
     return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
   }
 

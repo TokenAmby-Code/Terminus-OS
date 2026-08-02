@@ -148,9 +148,12 @@ makes an agent routable. Consumers activate only from `agent.registered`.
 `hook.wrapper_stop`, literal engine stop hooks, pane death, transport loss,
 replacement generations, and retirement use the same event discipline.
 registrationd emits `agent.registration_compensated` or
-`agent.registration_failed` for terminal birth failures. txd emits factual
-placement contradictions. lifecycled emits generation-bound lifecycle stop
-and retirement facts.
+`agent.registration_failed` for terminal birth failures; post-birth it never
+initiates retirement. txd emits factual placement contradictions and, at every
+`reg.retired` append (close, pane death, estate reset, topology migration),
+publishes `agent.retired` — the reactive retirement fact consumers use to
+terminalize the agent row. lifecycled emits generation-bound lifecycle stop
+and retirement facts and owns the proactive retirement leg.
 
 ## Persistence
 
@@ -211,8 +214,8 @@ The locked event vocabulary is:
   `agent.placement_declared`, `agent.registration_compensated`,
   `agent.registration_failed`, and `agent.registered`;
 - txd: `agent.pane_attested`, `agent.pane_refused`,
-  `agent.placement_attested`, `agent.placement_refused`, and
-  `agent.placement_contradicted`;
+  `agent.placement_attested`, `agent.placement_refused`,
+  `agent.placement_contradicted`, and `agent.retired`;
 - lifecycled: `agent.lifecycle_ready`, `agent.lifecycle_stopped`,
   `agent.lifecycle_inactive`, and `agent.lifecycle_retired`.
 
