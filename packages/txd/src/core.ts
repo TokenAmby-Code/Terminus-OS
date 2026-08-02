@@ -8,7 +8,11 @@
 import {
   AGENT_SCHEMA_VERSION,
   AgentRetiredSchema,
+  PLACEMENT_REFUSAL_REASONS,
+  PlacementRefusedSchema,
+  RegistrationAbortedSchema,
   SCHEMA_VERSION,
+  type RegistrationAborted,
   type ActivityBoardRow,
   type CloseRequest,
   type CloseResponse,
@@ -274,8 +278,32 @@ export class Daemon {
     return this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const declaration = PhysicalDeclarationSchema.parse(input);
-      if (declaration.configuration.generation !== this.physicalRegistration.configuration.generation
-          || declaration.configuration.digest !== this.physicalRegistration.configuration.digest) {
+      try {
+        await this.auditAndBindDeclaration(declaration, receipt);
+      } catch (error) {
+        // A Door-1 refusal is the placement's terminal outcome for this
+        // birth: any partial binding was already aborted fail-dark, so the
+        // refusal publishes as the evidence registrationd aborts the birth
+        // on. Contradiction classes (conflicting evidence for one entity)
+        // stay unpublished — they are audit faults, not placement outcomes.
+        const reason = error instanceof Error ? error.message : String(error);
+        if ((PLACEMENT_REFUSAL_REASONS as readonly string[]).includes(reason)) {
+          await this.publishPlacementRefusal(declaration, reason);
+        }
+        throw error;
+      }
+    });
+  }
+
+  private async auditAndBindDeclaration(
+    declaration: PhysicalDeclaration,
+    receipt: string | null,
+  ): Promise<void> {
+    const physicalRegistration = this.physicalRegistration;
+    if (!physicalRegistration) throw new Error('physical_registration_unconfigured');
+    {
+      if (declaration.configuration.generation !== physicalRegistration.configuration.generation
+          || declaration.configuration.digest !== physicalRegistration.configuration.digest) {
         throw new Error('physical_configuration_skew');
       }
       const observed = await this.tmux.attestWrapperPlacement(declaration.wrapper_pid);
@@ -398,12 +426,12 @@ export class Daemon {
           generation: binding.configuration_generation,
           digest: binding.configuration_digest,
         },
-        machine: this.physicalRegistration.machine,
+        machine: physicalRegistration.machine,
         kind: 'local',
         wrapper_pid: binding.wrapper_pid,
         transport_witnesses: { physical_declared_receipt: receipt },
       });
-      await this.physicalRegistration.publish('agent.placement_attested', placement);
+      await physicalRegistration.publish('agent.placement_attested', placement);
       await this.store.append({
         entity_type: 'agent',
         entity_id: binding.agent_id,
@@ -412,6 +440,71 @@ export class Daemon {
         provenance: this.prov('observer', receipt),
         occurred_at: this.now(),
       });
+    }
+  }
+
+  private async publishPlacementRefusal(declaration: PhysicalDeclaration, reason: string): Promise<void> {
+    if (!this.physicalRegistration) return;
+    const refusal = PlacementRefusedSchema.safeParse({
+      schema_version: AGENT_SCHEMA_VERSION,
+      agent_id: declaration.agent_id,
+      birth_generation: declaration.birth_generation,
+      pane_id: declaration.pane_id,
+      pane_generation: declaration.pane_generation,
+      machine: this.physicalRegistration.machine,
+      reason,
+      refused_at: this.now(),
+    });
+    if (!refusal.success) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'placement_refused_publish_skipped',
+        agent_id: declaration.agent_id,
+        reason,
+      }));
+      return;
+    }
+    try {
+      await this.physicalRegistration.publish('agent.placement_refused', refusal.data);
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'placement_refused_publish_failed',
+        agent_id: declaration.agent_id,
+        reason,
+        error: String(error),
+      }));
+    }
+  }
+
+  // The abort-path close (chapter-locks spec §4): registrationd aborted its
+  // partial birth and the single registration-abort event carries the whole
+  // cleanup story, so txd closes whatever binding still stands for that
+  // birth. Convergent by construction — a replay finds nothing standing and
+  // changes nothing. Never a retirement: the registered guard refuses loud,
+  // and executeClose's publication gate keeps agent.retired off the bus for
+  // a never-registered binding.
+  abortRegistration(input: RegistrationAborted, transportReceipt: string | null = null): Promise<void> {
+    return this.locked(async () => {
+      const abort = RegistrationAbortedSchema.parse(input);
+      const projections = await this.projections();
+      const binding = projections.currentBindings.find(
+        (candidate) => candidate.agent_id === abort.agent_id,
+      );
+      if (!binding || binding.birth_generation !== abort.birth_generation) {
+        console.log(JSON.stringify({
+          level: 'info',
+          event: 'registration_abort_already_clear',
+          agent_id: abort.agent_id,
+          birth_generation: abort.birth_generation,
+          reason: abort.reason,
+        }));
+        return;
+      }
+      if (binding.registered) throw new Error('abort_of_registered_agent');
+      if (!(await this.executeClose(binding, transportReceipt))) {
+        throw new Error('abort_reap_failed');
+      }
     });
   }
 
@@ -1426,6 +1519,21 @@ export class Daemon {
     if (!this.physicalRegistration) return;
     for (const binding of bindings) {
       if (!binding.agent_id) continue;
+      if (!binding.registered) {
+        // Retirement is a post-birth concept (the ratified authority split):
+        // a binding whose agent never registered dies by registration abort,
+        // and that single event carries the whole cleanup story. Publishing
+        // agent.retired here would smuggle a birth failure into the
+        // retirement stream consumers terminalize registered agents on.
+        console.log(JSON.stringify({
+          level: 'info',
+          event: 'agent_retired_suppressed_unregistered',
+          agent_id: binding.agent_id,
+          seat_id: binding.seat_id,
+          cause,
+        }));
+        continue;
+      }
       const retirement = AgentRetiredSchema.safeParse({
         schema_version: AGENT_SCHEMA_VERSION,
         agent_id: binding.agent_id,

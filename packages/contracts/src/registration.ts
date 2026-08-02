@@ -283,4 +283,57 @@ export const AgentRetiredSchema = z.object({
   retired_at: z.string().datetime({ offset: true }),
 }).strict();
 export type AgentRetired = z.infer<typeof AgentRetiredSchema>;
+
+export const PLACEMENT_REFUSAL_REASONS = [
+  "physical_configuration_skew",
+  "physical_declaration_contradicted",
+  "persona_seat_incoherent",
+  "physical_binding_conflict",
+  "tint_attestation_failed",
+  "physical_binding_incomplete",
+] as const;
+export const PlacementRefusalReasonSchema = z.enum(PLACEMENT_REFUSAL_REASONS);
+export type PlacementRefusalReason = z.infer<typeof PlacementRefusalReasonSchema>;
+
+// txd's Door-1 audit refused the declared placement. No binding stands (a
+// partial binding is aborted fail-dark before this publishes), so the birth
+// can never complete: registrationd aborts it on this evidence.
+export const PlacementRefusedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  pane_id: z.string().min(1),
+  pane_generation: PaneGenerationSchema,
+  machine: z.string().min(1),
+  reason: PlacementRefusalReasonSchema,
+  refused_at: z.string().datetime({ offset: true }),
+}).strict();
+export type PlacementRefused = z.infer<typeof PlacementRefusedSchema>;
+
+export const REGISTRATION_ABORT_REASONS = [
+  "pane_refused",
+  "wrapper_reply_expired",
+  "placement_refused",
+] as const;
+export const RegistrationAbortReasonSchema = z.enum(REGISTRATION_ABORT_REASONS);
+export type RegistrationAbortReason = z.infer<typeof RegistrationAbortReasonSchema>;
+
+// registrationd's only retirement authority: aborting its own partial birth
+// transactions. The birth row is terminal in the same store transaction that
+// enqueues this event, which is the whole lock release — chapter held-ness is
+// a projection over non-terminal births and live agents. txd consumes this to
+// close and un-tint any binding still standing. Post-birth cleanup is
+// agent.retired, never this event; pane_id and persona are null when the
+// birth failed before a pane was attested or a persona allocated.
+export const RegistrationAbortedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  pane_id: z.string().min(1).nullable(),
+  pane_generation: PaneGenerationSchema.nullable(),
+  persona: z.string().min(1).nullable(),
+  reason: RegistrationAbortReasonSchema,
+  aborted_at: z.string().datetime({ offset: true }),
+}).strict();
+export type RegistrationAborted = z.infer<typeof RegistrationAbortedSchema>;
 // AGENT_CONTRACT_MIRROR_END

@@ -48,6 +48,7 @@ import {
   ModeTransitionRequestSchema,
   PhysicalDeclarationSchema,
   AgentSchema,
+  RegistrationAbortedSchema,
   StopRequestSchema,
   SubscribeRequestSchema,
   TmuxLifecycleEventRequestSchema,
@@ -89,6 +90,8 @@ const PHYSICAL_REFUSALS = new Set([
   'physical_binding_incomplete',
   'registered_agent_physical_conflict',
   'registered_agent_package_conflict',
+  'abort_of_registered_agent',
+  'abort_reap_failed',
 ]);
 
 const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?\n/;
@@ -460,6 +463,12 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           const declaration = PhysicalDeclarationSchema.safeParse(event.payload);
           if (!declaration.success) return ack(false, 'invalid_physical_declaration');
           return physicalAck(() => daemon.recordPhysicalDeclaration(declaration.data, busReceipt));
+        }
+        if (event.event_type === 'agent.registration_aborted') {
+          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
+          const abort = RegistrationAbortedSchema.safeParse(event.payload);
+          if (!abort.success) return ack(false, 'invalid_registration_abort');
+          return physicalAck(() => daemon.abortRegistration(abort.data, busReceipt));
         }
         if (event.event_type === 'agent.registered') {
           if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');

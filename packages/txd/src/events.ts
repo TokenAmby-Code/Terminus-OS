@@ -12,6 +12,7 @@ export type TxdPublishedEventType =
   | 'agent.pane_attested'
   | 'agent.pane_refused'
   | 'agent.placement_attested'
+  | 'agent.placement_refused'
   | 'agent.retired';
 
 export function makeBusPublisher(
