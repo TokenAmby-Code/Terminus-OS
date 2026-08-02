@@ -42,7 +42,7 @@ test("a delivery that never settles folds to a loud stall, never a silent lane d
     if (body.subscription === "stuck") return new Promise(() => {}) as Promise<Response>;
     delivered.push(body.subscription);
     return new Response("{}", { status: 200 });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 30, batchSize: 100, fetchImpl });
   dispatcher.start();
   // The stuck lane's await never settles on its own; the dispatcher must own
@@ -69,7 +69,7 @@ test("a blocked lane backs off: append-wakes inside the window do not retry", as
   const fetchImpl = (async () => {
     attempts += 1;
     return new Response("{}", { status: 422 });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 120, batchSize: 100, fetchImpl });
   dispatcher.start();
   await dispatcher.settled();
@@ -95,7 +95,7 @@ test("a blocked lane retries by its own deadline without traffic, and success cl
   const fetchImpl = (async () => {
     attempts += 1;
     return new Response("{}", { status: healthy ? 200 : 503 });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 40, batchSize: 100, fetchImpl });
   dispatcher.start();
   await dispatcher.settled();
@@ -120,7 +120,7 @@ test("a stalled lane recovers after the stall: the next drive redelivers and adv
     calls += 1;
     if (calls === 1) return new Promise(() => {}) as Promise<Response>;
     return new Response("{}", { status: 200 });
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 30, batchSize: 100, fetchImpl });
   dispatcher.start();
   await Promise.race([dispatcher.settled(), sleep(400)]);

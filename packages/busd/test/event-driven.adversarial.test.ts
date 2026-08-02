@@ -7,7 +7,7 @@ import { expect, test } from "bun:test";
 // stays dead: no polling intervals, no cooldown sleeps inside a drain, no
 // volatile backoff knobs, and no timer anywhere else in busd.
 test("adversarial: durable delivery never regains polling, cooldown sleeps, or volatile retry knobs", async () => {
-  const [dispatcher, ...others] = await Promise.all(
+  const [dispatcher = "", ...others] = await Promise.all(
     ["dispatcher.ts", "replay-store.ts", "store.ts", "daemon.ts", "server.ts"].map((name) =>
       Bun.file(new URL(`../src/${name}`, import.meta.url)).text()),
   );
