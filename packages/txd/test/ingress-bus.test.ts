@@ -226,6 +226,7 @@ test('physical signoff precedes registration and routing activation', async () =
         rank: 'astartes',
         commander: null,
         tint: '#111111',
+        voice: null,
         workspace: '/workspace',
         continuity_references: [],
         instruction_package: {
