@@ -44,7 +44,11 @@ export const realRemoteEnvelopeLister: RemoteEnvelopeLister = (target) =>
         resolve(stdout.split('\n').filter(Boolean));
         return;
       }
-      if (/no server running|no sessions/i.test(stderr)) {
+      // A target with no tmux server holds zero envelopes, in every dialect
+      // tmux speaks it: a running-then-exited server says "no server
+      // running"; a box whose server never started says "error connecting to
+      // <socket> (No such file or directory)". Anything else stays loud.
+      if (/no server running|no sessions|no such file or directory/i.test(stderr)) {
         resolve([]);
         return;
       }
