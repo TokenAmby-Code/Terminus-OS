@@ -94,6 +94,7 @@ function registeredAgent(decl: PhysicalDeclaration): Agent {
       rank: 'astartes',
       commander: 'council:custodes',
       tint: '#111111',
+      voice: null,
       workspace: '/personas/black-shields',
       continuity_references: [],
       instruction_package: {

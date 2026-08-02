@@ -73,6 +73,7 @@ async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): P
       rank: 'astartes',
       commander: 'council:custodes',
       tint: '#111111',
+      voice: null,
       workspace: '/personas/black-shields',
       continuity_references: [],
       instruction_package: {

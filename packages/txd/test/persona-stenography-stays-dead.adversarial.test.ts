@@ -113,6 +113,7 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
         rank: 'astartes',
         commander: null,
         tint: '#111111',
+        voice: null,
         workspace: '/personas/black-shields',
         continuity_references: [],
         instruction_package: {
