@@ -192,16 +192,36 @@ the equivalence proof. Their colors remain `#302800` and `#300808`.
 Restart and reconstruction relaunch the wrapper and create a new generic birth
 generation. txd contains no persona allocation or identity policy.
 
-For k12-work placement, the canonical pane remains in the k12-personal estate.
-Its configured command opens one persistent SSH connection and starts the
-sanctioned remote wrapper with the local `PANE_ID`. registrationd and txd stay
-authoritative on k12-personal. txd attests the local SSH transport and the
-remote wrapper, engine, cwd, and machine tuple through a placement adapter.
-Tint stays local. SSH loss contradicts and retires only that binding.
+For k12-work placement, the canonical pane remains in the k12-personal
+estate and its configured command is the LOCAL agent-wrapper. An ssh seat is
+declared in `estate.ts` (`SSH_SEAT_TARGETS`) with a target machine named by
+machines.json alias, never by address. txd composes the launch environment on
+the pane: `PANE_ID`, `AGENT_ID` (minted by registrationd at dispatch and
+stamped on `agent.dispatch_requested` — identity never rides the birth
+reply), `TXD_LAUNCH_NONCE` (per-launch correlation, remembered against the
+pane generation), and `TXD_SSH_TARGET`. The wrapper fires its birth one-shot
+on the loopback proxy exactly as for local birth, verifies the remote
+instruction package digest, then creates and attaches a one-pane
+`tmux new-session -A` envelope on the target named from the seat and the
+nonce; the engine lives in that envelope with `IMPERIUM_MACHINE` naming the
+target machine.
 
-Pax and Orchestrator remain unbound until this generic local path and remote
-attestation are deployed and separately accepted. This change does not rotate
-the Council.
+The placement adapter attests the local wrapper through the unchanged `/proc`
+ancestry walk and audits the remote half by correlation at Door 1: the seat
+must be a declared ssh seat, the wrapper's transport claim must name the
+seat's configured target, and the claimed nonce must match the launch
+composition for the live pane generation (`placement_kind_incoherent`,
+`placement_machine_incoherent`, `launch_nonce_contradicted` refusals).
+Placement then attests `kind: 'ssh'` with the target as its machine and ssh
+transport witnesses (wrapper pid and start ticks, target alias, nonce digest,
+envelope session name). Remote start ticks are not comparable across kernels
+and are not collected; the transport plus the envelope guard the remote half.
+Tint stays local. Transport loss is reconnect-first — the wrapper holds the
+pane and probes reattach by the envelope's nonce-bearing name at the ssh
+keepalive contract's cadence; envelope death (session-ended evidence) and
+pane kill retire the binding. An envelope alive after its binding retired is
+a zombie: `tx estate zombies` inventories live envelopes on each declared
+target and lists any without a live binding.
 
 ## CLI context
 

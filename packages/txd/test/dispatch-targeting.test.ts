@@ -42,6 +42,7 @@ function request(target: DispatchTarget): DispatchRequested {
   return {
     schema_version: AGENT_SCHEMA_VERSION,
     dispatch_id: DISPATCH_ID,
+    agent_id: AGENT_ID,
     machine: 'k12-personal',
     target,
     engine: 'claude',
@@ -75,11 +76,13 @@ test('a page target autofills the first free seat in declared order', async () =
     type: 'agent.dispatch_attested',
     payload: { dispatch_id: DISPATCH_ID, seat_id: 'palace:W', engine: 'claude' },
   });
-  expect(tmux.seatEngine('palace:W')).toEqual({
+  expect(tmux.seatEngine('palace:W')).toMatchObject({
     seatId: 'palace:W',
     engine: 'claude',
     wrapper: '/fleet/agent-wrapper',
+    agentId: AGENT_ID,
   });
+  expect(tmux.seatEngine('palace:W')!.launchNonce).toMatch(/^[0-9a-f-]{36}$/);
 });
 
 test('a page target to an undeclared page is refused, not guessed', async () => {
@@ -118,7 +121,13 @@ test('an exhausted page refuses with the seat-level truth for every candidate', 
   await bindSeat(d, tmux, 'palace:W');
   tmux.setCommand('palace:N', 'sudo');
   for (const seat of ['palace:S', 'palace:E']) {
-    await tmux.startSeatEngine({ seatId: seat, engine: 'claude', wrapper: '/fleet/agent-wrapper' });
+    await tmux.startSeatEngine({
+      seatId: seat,
+      engine: 'claude',
+      wrapper: '/fleet/agent-wrapper',
+      agentId: AGENT_ID,
+      launchNonce: crypto.randomUUID(),
+    });
   }
   published.length = 0;
   await d.dispatch(request({ kind: 'page', page: 'palace' }));

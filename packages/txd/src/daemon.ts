@@ -10,6 +10,7 @@ import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
 import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
 import { makeBusPublisher } from './events.ts';
+import { realRemoteEnvelopeLister } from './envelopes.ts';
 
 const build: BuildInfo = {
   version: '0.1.0',
@@ -36,7 +37,7 @@ const physicalRegistration = cfg.physicalRegistration
       publish: makeBusPublisher(cfg.physicalRegistration.busUrl),
     }
   : null;
-const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration);
+const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration, realRemoteEnvelopeLister);
 const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
 
 console.log(
