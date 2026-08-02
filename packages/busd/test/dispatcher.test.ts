@@ -16,7 +16,7 @@ function busEvent(eventType = "hook.stop"): BusEventInput {
   };
 }
 
-test("legacy bus delivery is ordered and an outage becomes blocked until a new wake", async () => {
+test("legacy bus delivery is ordered and an outage becomes blocked until the backoff deadline", async () => {
   const store = new MemoryBusStore();
   store.setSubscription({ name: "consumer", delivery_url: DELIVERY_URL, event_pattern: "hook.%", active: true });
   store.seedCursor("consumer", 0);
@@ -29,14 +29,19 @@ test("legacy bus delivery is ordered and an outage becomes blocked until a new w
     delivered.push(body.event.seq);
     return new Response("{}", { status: available ? 200 : 503 });
   }) as typeof fetch;
-  const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 1_000, batchSize: 100, fetchImpl });
+  const dispatcher = new Dispatcher(store, { deliveryTimeoutMs: 30, batchSize: 100, fetchImpl });
   dispatcher.start();
   await dispatcher.settled();
   expect(delivered).toEqual([1]);
   expect(await store.cursor("consumer")).toBe(0);
 
+  // A wake inside the backoff window defers (lane-isolation pin); the lane's
+  // own deadline re-drives it, and the retry preserves order from the cursor.
   available = true;
   dispatcher.wake();
+  await dispatcher.settled();
+  expect(delivered).toEqual([1]);
+  await new Promise((resolve) => setTimeout(resolve, 60));
   await dispatcher.settled();
   expect(delivered).toEqual([1, 1, 2]);
   expect(await store.cursor("consumer")).toBe(2);
@@ -286,8 +291,9 @@ test("a settled 2xx cannot park its delivery lane or graceful shutdown in body d
   dispatcher.start();
 
   await observed;
-  await Promise.resolve();
-  await Promise.resolve();
+  // The lane task is tracked; settled() is the honest join for its cursor
+  // write, independent of how many promise hops the drain chain carries.
+  await dispatcher.settled();
 
   expect(await store.cursor("consumer")).toBe(1);
   await dispatcher.stop();
