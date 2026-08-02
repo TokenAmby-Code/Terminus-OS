@@ -287,6 +287,24 @@ export const AgentRetiredSchema = z.object({
 }).strict();
 export type AgentRetired = z.infer<typeof AgentRetiredSchema>;
 
+// txd's close-of-unregistered signal: a bound-but-unregistered binding closed
+// — its pane died or its seat was reset before lifecycle_ready — so the birth
+// can never complete. registrationd consumes this to abort the birth;
+// terminalizing the row is the chapter-lock release. Post-birth closes publish
+// agent.retired, never this event, and a binding carrying no birth generation
+// identifies no birth, so it publishes nothing.
+export const UnregisteredClosedSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  agent_id: AgentIdSchema,
+  birth_generation: BirthGenerationSchema,
+  seat_id: z.string().min(1),
+  pane_generation: PaneGenerationSchema.nullable(),
+  machine: z.string().min(1),
+  cause: RetirementCauseSchema,
+  closed_at: z.string().datetime({ offset: true }),
+}).strict();
+export type UnregisteredClosed = z.infer<typeof UnregisteredClosedSchema>;
+
 export const PLACEMENT_REFUSAL_REASONS = [
   "physical_configuration_skew",
   "physical_declaration_contradicted",
@@ -317,6 +335,7 @@ export const REGISTRATION_ABORT_REASONS = [
   "pane_refused",
   "wrapper_reply_expired",
   "placement_refused",
+  "unregistered_closed",
 ] as const;
 export const RegistrationAbortReasonSchema = z.enum(REGISTRATION_ABORT_REASONS);
 export type RegistrationAbortReason = z.infer<typeof RegistrationAbortReasonSchema>;
