@@ -275,7 +275,7 @@ test('POST /ctl/estate/rotate resets a page in-process instead of killing the es
   } finally { srv.stop(true); }
 });
 
-test('POST /ingress/tmux reconstructs the canonical page after a pane exits', async () => {
+test('POST /ingress/tmux repairs the lost canonical seat after a pane exits', async () => {
   const tmux = new FakeTmux();
   const d = new Daemon(new MemoryEventStore(), tmux);
   await d.constructEstate();
@@ -287,7 +287,25 @@ test('POST /ingress/tmux reconstructs the canonical page after a pane exits', as
       body: JSON.stringify({ schema_version: 10, event: 'pane-exited', page: 'palace' }),
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ok: true, reconstructed: true, page: 'palace' });
+    expect(await response.json()).toMatchObject({ ok: true, reconstructed: true, page: 'palace', reset_seats: ['palace:E'] });
+    expect(tmux.rebuiltPages()).toEqual([]);
+  } finally { srv.stop(true); }
+});
+
+test('POST /ingress/tmux accepts the page-less kill-time event and sweeps the estate', async () => {
+  const tmux = new FakeTmux();
+  const d = new Daemon(new MemoryEventStore(), tmux);
+  await d.constructEstate();
+  tmux.deleteOutOfBand('somnium:SE');
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: 10, event: 'pane-killed' }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, page: null, reconstructed: true, reset_seats: ['somnium:SE'] });
+    expect(tmux.rebuiltPages()).toEqual([]);
   } finally { srv.stop(true); }
 });
 

@@ -193,11 +193,16 @@ export const COMMANDS: readonly Command[] = [
     summary: 'Forward a tmux pane lifecycle event to txd',
     run: async ({ args, request, write }) => {
       const event = args[0];
-      let page: string | undefined;
-      if ((event !== 'pane-died' && event !== 'pane-exited') || args[1] !== '--page' || args.length !== 3) {
-        throw new Error('usage: tx estate event <pane-died | pane-exited> --page <page>');
+      const usage = 'usage: tx estate event <pane-died | pane-exited> --page <page> | tx estate event pane-killed';
+      if (event === 'pane-killed') {
+        if (args.length !== 1) throw new Error(usage);
+        write(await request('POST', '/ingress/tmux', { schema_version: SCHEMA_VERSION, event }));
+        return 0;
       }
-      page = args[2];
+      if ((event !== 'pane-died' && event !== 'pane-exited') || args[1] !== '--page' || args.length !== 3) {
+        throw new Error(usage);
+      }
+      const page = args[2];
       if (!page) throw new Error('--page requires a page name');
       write(await request('POST', '/ingress/tmux', { schema_version: SCHEMA_VERSION, event, page }));
       return 0;

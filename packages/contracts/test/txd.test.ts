@@ -98,6 +98,18 @@ describe("txd lifecycle vocabulary", () => {
     expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-vanished', page: 'palace' })).toThrow();
   });
 
+  test('pane-killed is the page-less kill-time event: tmux cannot name the page a kill emptied', () => {
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-killed' })).toEqual({
+      schema_version: 10, event: 'pane-killed',
+    });
+    // A kill-time page claim is untrustworthy (hook context is the active
+    // window) and a process-death event without its page is unscoped: both
+    // shapes are refused, not silently accommodated.
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-killed', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-died' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 10, event: 'pane-exited' })).toThrow();
+  });
+
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
     const base = { schema_version: 10, source_agent_id: "source", target: "target", ask: false, reply: false };
     expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);

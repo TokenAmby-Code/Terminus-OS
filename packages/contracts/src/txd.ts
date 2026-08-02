@@ -502,17 +502,25 @@ export const EstateRotateResponseSchema = z.object({
 });
 export type EstateRotateResponse = z.infer<typeof EstateRotateResponseSchema>;
 
+// `pane-died`/`pane-exited` fire in the dying pane's own hook context, so
+// their page claim is trustworthy and required. A kill command fires only
+// `after-kill-*`, whose format context is the ACTIVE window — any page named
+// there would lie — so `pane-killed` is page-less and txd sweeps the estate.
 export const TmuxLifecycleEventRequestSchema = z.object({
   schema_version: z.number().int(),
-  event: z.enum(['pane-died', 'pane-exited']),
-  page: z.string().min(1),
+  event: z.enum(['pane-died', 'pane-exited', 'pane-killed']),
+  page: z.string().min(1).optional(),
+}).superRefine((value, ctx) => {
+  if ((value.event === 'pane-killed') !== (value.page === undefined)) {
+    ctx.addIssue({ code: 'custom', message: 'pane-killed is page-less; pane-died and pane-exited require their page' });
+  }
 });
 export type TmuxLifecycleEventRequest = z.infer<typeof TmuxLifecycleEventRequestSchema>;
 
 export const TmuxLifecycleEventResponseSchema = z.object({
   ok: z.boolean(),
-  event: z.enum(['pane-died', 'pane-exited']),
-  page: z.string(),
+  event: z.enum(['pane-died', 'pane-exited', 'pane-killed']),
+  page: z.string().nullable(),
   reconstructed: z.boolean(),
   // The exact seats whose processes were replaced. A dead pane earns a
   // pane-scoped respawn of that pane alone; siblings are never in this list
