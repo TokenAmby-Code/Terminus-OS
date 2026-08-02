@@ -53,6 +53,26 @@ export const TXD_ESTATE: readonly string[] = [
   'council:orchestrator',
 ];
 
+// ── ssh seats ────────────────────────────────────────────────────────────────
+// An ssh seat is an ordinary estate seat whose pane command is the LOCAL
+// agent-wrapper owning an ssh transport into a one-pane tmux envelope on the
+// declared target machine. The target names a machines.json alias — never an
+// address; addresses resolve through the generated ~/.ssh/config host blocks.
+// somnium is the k12-work page: its engines live in k12-work envelopes while
+// registration, estate, and bus authority stay on k12-personal.
+export const SSH_SEAT_TARGETS: Readonly<Record<string, string>> = {
+  'somnium:W': 'k12-work',
+  'somnium:N': 'k12-work',
+  'somnium:S': 'k12-work',
+  'somnium:NE': 'k12-work',
+  'somnium:SE': 'k12-work',
+};
+
+/** The seat's declared ssh target alias; undefined for a local seat. */
+export function sshSeatTarget(seatId: string): string | undefined {
+  return SSH_SEAT_TARGETS[seatId];
+}
+
 export const DECOMMISSIONED_COUNCIL_SEATS = [
   'council:malcador',
   'council:true-terminal',
