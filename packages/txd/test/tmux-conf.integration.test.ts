@@ -45,6 +45,38 @@ test('the active table is exact, current-viewport, and release-persistent', () =
   tmux('send-keys', '-t', 'main:0.0', '-X', 'cancel');
 });
 
+// The estate hooks only parse under the k12 socket guard, and a server boot
+// tolerates config errors that `source-file` refuses — so sourcing the conf
+// under the guard is the one load that proves every hook name is one the real
+// tmux accepts. Only a tmux carrying the estate's baseline pane hooks ever
+// runs the estate, so a tmux without them cannot judge the conf.
+const estateCapable = (() => {
+  const probeSocket = `tx-conf-cap-${process.pid}`;
+  const probe = Bun.spawnSync([
+    'tmux', '-f', '/dev/null', '-L', probeSocket,
+    'start-server', ';', 'set-hook', '-g', 'pane-exited', 'run-shell true', ';', 'kill-server',
+  ]);
+  return probe.exitCode === 0;
+})();
+
+test.skipIf(!estateCapable)('the k12 estate branch loads through source-file without refusal', () => {
+  const estateSocket = `tx-conf-k12-${process.pid}`;
+  const env = { ...process.env, TXD_TMUX_SOCKET: 'k12' };
+  const estateTmux = (...args: string[]) => Bun.spawnSync(['tmux', '-L', estateSocket, ...args], { env });
+  const started = estateTmux('-f', '/dev/null', 'new-session', '-d', '-s', 'probe', '-x', '80', '-y', '12');
+  if (started.exitCode !== 0) throw new Error(new TextDecoder().decode(started.stderr));
+  try {
+    const sourced = estateTmux('source-file', conf);
+    expect(new TextDecoder().decode(sourced.stderr)).toBe('');
+    expect(sourced.exitCode).toBe(0);
+    const hooks = new TextDecoder().decode(estateTmux('show-hooks', '-g').stdout);
+    expect(hooks).toMatch(/after-kill-pane\[\d+\][^\n]*pane-killed/);
+    expect(hooks).toMatch(/window-unlinked\[\d+\][^\n]*pane-killed/);
+  } finally {
+    estateTmux('kill-server');
+  }
+});
+
 test('copy-pipe -P leaves no automatic buffer behind', () => {
   tmux('delete-buffer', '-b', 'buffer0');
   expect(tmux('copy-mode', '-t', 'main:0.0').exitCode).toBe(0);

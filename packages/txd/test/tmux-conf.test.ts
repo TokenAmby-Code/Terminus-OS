@@ -134,8 +134,12 @@ describe('tmux/tx.conf', () => {
     // `kill-pane` fires neither pane-died nor pane-exited (tmux 3.6), and the
     // after-kill-pane hook context is the ACTIVE window — a page claim from
     // the kill site would lie. The forward is therefore page-less.
+    // `kill-window` has no command hook of its own — tmux rejects
+    // `after-kill-window` as a hook name, refusing the whole conf — so the
+    // window's unlink is the observable moment of that kill.
     expect(conf).toContain('set-hook -g after-kill-pane');
-    expect(conf).toContain('set-hook -g after-kill-window');
+    expect(conf).toContain('set-hook -g window-unlinked');
+    expect(conf).not.toContain('after-kill-window');
     const killForwards = conf.split('\n').filter((line) => line.includes('tx estate event pane-killed'));
     expect(killForwards).toHaveLength(2);
     for (const line of killForwards) {
