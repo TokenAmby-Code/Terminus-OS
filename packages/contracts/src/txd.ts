@@ -335,26 +335,63 @@ export const LaunchResponseSchema = z.object({
 });
 export type LaunchResponse = z.infer<typeof LaunchResponseSchema>;
 
-// ── Close operation (rung 3) — the generic "close this agent" system ──────
-// Executes the terminal-retirement chain for a bound estate seat: reg.retired +
+// ── Close operation (rung 3) — the sanctioned remote-close verb ───────────
+// Executes the terminal-retirement chain for bound estate seats: reg.retired +
 // reg.process_reaped (the agent process is reaped) + reg.seat_cleared (binding
 // cleared → seat returns to the freelist). The persistent estate PANE is kept
 // and respawned bare, so the estate stays standing. Reap-first, attest-after: the
 // three events are recorded only once the process is confirmed reaped, so a
 // retire-with-live-process is unspellable — a failed reap refuses loud, changing
 // nothing (spec §4: retired is not terminal until process_reaped + seat_cleared).
-export const CloseRequestSchema = z.object({
-  target: z.string().min(1), // canonical seat id OR agent id — never a tmux %id
-  schema_version: z.number().int(),
-});
+//
+// Closing is an overseer capability: source_agent_id must resolve to a
+// registered binding holding CLOSE_REQUIRED_RANK. Graceful by default — an
+// agent whose recorded activity is 'working' (mid-turn) refuses absent force.
+// Bulk is first-class: one request selects explicit targets OR one page's
+// closable agents OR every closable agent, and every selected target retires
+// individually with its own facts — never a page rebuild.
+export const CLOSE_REQUIRED_RANK = 'overseer';
+
+export const CloseRequestSchema = z
+  .object({
+    schema_version: z.number().int(),
+    source_agent_id: z.string().min(1), // caller — never a tmux %id
+    // Exactly one selector:
+    targets: z.array(z.string().min(1)).min(1).optional(), // canonical seat ids OR agent ids
+    page: z.string().min(1).optional(), // every closable agent on one page
+    all_idle: z.literal(true).optional(), // every closable agent estate-wide
+    // Explicit-targets only: override the mid-turn gate for a hung agent.
+    // Filters are inherently graceful — force never combines with them.
+    force: z.boolean().optional(),
+  })
+  .superRefine((req, ctx) => {
+    const selectors = [req.targets, req.page, req.all_idle].filter((value) => value !== undefined).length;
+    if (selectors !== 1) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['targets'], message: 'exactly one selector: targets | page | all_idle' });
+    }
+    if (req.force && !req.targets) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['force'], message: 'force applies only to explicit targets' });
+    }
+  });
 export type CloseRequest = z.infer<typeof CloseRequestSchema>;
 
-export const CloseResponseSchema = z.object({
-  ok: z.boolean(),
+// One verdict per selected target — a refused sibling never blocks a close.
+export const CloseVerdictSchema = z.object({
   target: z.string(),
   seat_id: z.string().nullable(),
   agent_id: z.string().nullable(),
   closed: z.boolean(), // true = full retire chain attested + seat freed
+  reason: z.string().nullable(),
+});
+export type CloseVerdict = z.infer<typeof CloseVerdictSchema>;
+
+export const CloseResponseSchema = z.object({
+  ok: z.boolean(), // true = every selected target closed (selection non-empty)
+  closed_count: z.number().int(),
+  refused_count: z.number().int(),
+  verdicts: z.array(CloseVerdictSchema),
+  // Request-level refusal (auth, schema, empty selection); null when the
+  // per-target verdicts carry the story.
   reason: z.string().nullable(),
 });
 export type CloseResponse = z.infer<typeof CloseResponseSchema>;

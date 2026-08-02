@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 
 // Lane: behavioral-pin (the gating lane).
 //
@@ -44,7 +45,8 @@ test('a cleared seat whose pane is gone is flagged as a phantom', async () => {
   await d.launch({
     seat_id: 'proof:bus', schema_version: 10, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
-  await d.close({ target: 'proof:bus', schema_version: 10 });
+  await bindOverseerSource(d, store);
+  await d.close(closeRequest(['proof:bus']));
   tmux.deleteOutOfBand('proof:bus');
 
   const rec = await d.reconcile();
@@ -91,11 +93,12 @@ test('a seat dropped from the declaration without a decommission is flagged', as
 // never consults tmux, tints[] does — so a regression shows up as the same
 // disagreement that exposed this in the first place.
 test('a phantom is exactly a row with no tint-readiness counterpart', async () => {
-  const { tmux, d } = setup();
+  const { tmux, store, d } = setup();
   await d.launch({
     seat_id: 'proof:bus', schema_version: 10, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
-  await d.close({ target: 'proof:bus', schema_version: 10 });
+  await bindOverseerSource(d, store);
+  await d.close(closeRequest(['proof:bus']));
   tmux.deleteOutOfBand('proof:bus');
 
   const rows = await d.estateRows();
@@ -142,11 +145,12 @@ test('an observable dead pane is not reported as absent', async () => {
 // Same satiation rule as every other contradiction: flag once, stay open, do
 // not re-emit on every reconcile pass.
 test('a phantom is not double-flagged across reconcile passes', async () => {
-  const { tmux, d } = setup();
+  const { tmux, store, d } = setup();
   await d.launch({
     seat_id: 'proof:bus', schema_version: 10, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
-  await d.close({ target: 'proof:bus', schema_version: 10 });
+  await bindOverseerSource(d, store);
+  await d.close(closeRequest(['proof:bus']));
   tmux.deleteOutOfBand('proof:bus');
 
   const first = await d.reconcile();

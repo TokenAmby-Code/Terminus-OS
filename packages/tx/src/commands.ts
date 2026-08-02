@@ -23,9 +23,9 @@ export type Command = {
   run: (context: CommandContext) => Promise<number>;
 };
 
-function commSource(): string {
+function agentSource(verb: string): string {
   const value = process.env.AGENT_ID;
-  if (!value) throw new Error('AGENT_ID is required for tx comm');
+  if (!value) throw new Error(`AGENT_ID is required for tx ${verb}`);
   return value;
 }
 
@@ -59,13 +59,13 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
   } else if (positional.length !== 2) throw new Error('usage: tx comm [--ask] <identity> <message>');
   const message = positional.at(-1)!;
   const accepted = await request('POST', '/agents/comm', {
-    schema_version: SCHEMA_VERSION, source_agent_id: commSource(), message, ask, reply,
+    schema_version: SCHEMA_VERSION, source_agent_id: agentSource('comm'), message, ask, reply,
     ...(page ? { page } : {}), ...(!page && !reply ? { target: positional[0] } : {}),
   }) as { ask_id: string | null };
   write(accepted);
   if (!ask) return 0;
   const result = await request('POST', '/agents/comm/wait', {
-    schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_agent_id: commSource(), timeout_ms: 7 * 60 * 1000,
+    schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_agent_id: agentSource('comm'), timeout_ms: 7 * 60 * 1000,
   }) as { complete: boolean };
   write(result);
   return result.complete ? 0 : 3;
@@ -86,6 +86,40 @@ function decodedPush(response: ClipboardPushResponse): string {
 /** The single extension point: subcommands add one declarative entry here. */
 export const COMMANDS: readonly Command[] = [
   { path: ['comm'], summary: 'Send, ask, page, or reply through txd event truth', run: comm },
+  {
+    path: ['close'],
+    summary: 'Close remote agents through the retirement chain (overseer verb)',
+    run: async ({ args, request, write }) => {
+      const usage = 'usage: tx close <target> [<target> ...] [--force] | tx close --page <page> | tx close --all-idle';
+      let force = false;
+      let page: string | undefined;
+      let allIdle = false;
+      const targets: string[] = [];
+      for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index]!;
+        if (arg === '--force' && !force) force = true;
+        else if (arg === '--page' && page === undefined) {
+          page = args[++index];
+          if (!page) throw new Error('--page requires a page name');
+        } else if (arg === '--all-idle' && !allIdle) allIdle = true;
+        else if (arg.startsWith('-')) throw new Error(usage);
+        else targets.push(arg);
+      }
+      const selectors = (targets.length ? 1 : 0) + (page ? 1 : 0) + (allIdle ? 1 : 0);
+      // Exactly one selector; force is explicit-targets only (filters are
+      // inherently graceful) — mirrors the daemon contract, refused pre-transport.
+      if (selectors !== 1 || (force && targets.length === 0)) throw new Error(usage);
+      write(await request('POST', '/agents/close', {
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: agentSource('close'),
+        ...(targets.length ? { targets } : {}),
+        ...(page ? { page } : {}),
+        ...(allIdle ? { all_idle: true } : {}),
+        ...(force ? { force: true } : {}),
+      }));
+      return 0;
+    },
+  },
   {
     path: ['mode'],
     summary: 'Enter or toggle plan mode through txd event truth',

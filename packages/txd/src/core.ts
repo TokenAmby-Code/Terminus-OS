@@ -14,8 +14,10 @@ import {
   SCHEMA_VERSION,
   type RegistrationAborted,
   type ActivityBoardRow,
+  CLOSE_REQUIRED_RANK,
   type CloseRequest,
   type CloseResponse,
+  type CloseVerdict,
   type ClipboardPullRequest,
   type ClipboardPushRequest,
   type ClipboardSelectionRequest,
@@ -69,7 +71,7 @@ import {
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections } from './projections.ts';
-import { DECOMMISSIONED_COUNCIL_SEATS, isTxdPage, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import { DECOMMISSIONED_COUNCIL_SEATS, EMPEROR_SEAT, isTxdPage, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 import type { TxdPublishedEventType } from './events.ts';
@@ -1458,54 +1460,121 @@ export class Daemon {
     return result;
   }
 
-  // ── /agents/close — the generic "close this agent" system (rung 3) ──────────────
-  // Reaps the agent process and returns the estate seat to the freelist. Terminal
-  // chain (retired + process_reaped + seat_cleared) is atomic and only written
-  // AFTER the process is confirmed reaped — a retire-with-live-process is
-  // unspellable (spec §4). No silent no-op: an unbound target or a failed reap
-  // refuses loud and changes nothing.
+  // ── /agents/close — the sanctioned remote-close verb (rung 3) ──────────────
+  // Reaps agent processes and returns their estate seats to the freelist. The
+  // terminal chain (retired + process_reaped + seat_cleared) is atomic per seat
+  // and only written AFTER that process is confirmed reaped — a retire-with-
+  // live-process is unspellable (spec §4). Bulk is N independent single-seat
+  // closes under one lock acquisition: each target gets its own verdict and its
+  // own facts, a refused sibling never blocks a close, and a page is never
+  // rebuilt. No silent no-op: an unbound target, a mid-turn agent (absent
+  // force), the Emperor's seat, an underranked caller, or a failed reap all
+  // refuse loud.
   close(req: CloseRequest, transportReceipt: string | null = null): Promise<CloseResponse> {
     return this.locked(async () => {
+      const refused = (reason: string): CloseResponse => (
+        { ok: false, closed_count: 0, refused_count: 0, verdicts: [], reason }
+      );
       if (req.schema_version !== SCHEMA_VERSION) {
-        return {
-          ok: false,
-          target: req.target,
-          seat_id: null,
-          agent_id: null,
-          closed: false,
-          reason: `schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`,
-        };
+        return refused(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`);
       }
 
       const proj = await this.projections();
-      const binding = proj.currentBindings.find((b) => b.seat_id === req.target || b.agent_id === req.target);
-      if (!binding) {
-        // Refuse loud — closing a non-bound target is a no-op the caller must see,
-        // never a silent success.
-        return {
-          ok: false,
-          target: req.target,
-          seat_id: null,
-          agent_id: null,
-          closed: false,
-          reason: 'no_binding: target resolves to no current binding (already free or never bound)',
-        };
+      const activityOf = (agentId: string | null): string =>
+        (agentId ? proj.activityByAgent.get(agentId) ?? 'idle' : 'idle');
+
+      // Closing is an overseer capability. The caller identity discipline is
+      // comm's (source_agent_id must be a registered binding); the rank gate
+      // reads the rank already recorded on that binding — no new auth scheme.
+      const source = proj.currentBindings.find((b) => b.registered && b.agent_id === req.source_agent_id);
+      if (!source) return refused('source_not_registered: source_agent_id resolves to no registered binding');
+      if (source.rank !== CLOSE_REQUIRED_RANK) {
+        return refused(`not_authorized: close requires rank ${CLOSE_REQUIRED_RANK}; source ${req.source_agent_id} holds rank ${source.rank ?? 'none'}`);
       }
 
-      // Reap FIRST; attest only on a confirmed kill (executeClose is the SAME path
-      // the reflexive auto-close fires — one close mechanism, no bespoke variant).
-      const closed = await this.executeClose(binding, transportReceipt);
-      if (!closed) {
-        return {
-          ok: false,
-          target: req.target,
+      const verdicts: CloseVerdict[] = [];
+      const closeOne = async (target: string, binding: CurrentBinding): Promise<void> => {
+        // Reap FIRST; attest only on a confirmed kill (executeClose is the SAME
+        // path the reflexive auto-close fires — one close mechanism, no bespoke
+        // variant).
+        const closed = await this.executeClose(binding, transportReceipt);
+        verdicts.push({
+          target,
           seat_id: binding.seat_id,
           agent_id: binding.agent_id,
-          closed: false,
-          reason: 'reap_failed: agent process could not be reaped; seat left bound (fail-loud, no half-close)',
-        };
+          closed,
+          reason: closed ? null : 'reap_failed: agent process could not be reaped; seat left bound (fail-loud, no half-close)',
+        });
+      };
+
+      if (req.targets) {
+        const closedSeats = new Set<string>();
+        for (const target of req.targets) {
+          const binding = proj.currentBindings.find(
+            (b) => !closedSeats.has(b.seat_id) && (b.seat_id === target || b.agent_id === target),
+          );
+          if (target === EMPEROR_SEAT || binding?.seat_id === EMPEROR_SEAT) {
+            // Hard refusal, force included: severing the operator is unspellable.
+            verdicts.push({
+              target,
+              seat_id: binding?.seat_id ?? EMPEROR_SEAT,
+              agent_id: binding?.agent_id ?? null,
+              closed: false,
+              reason: `palace_seat: ${EMPEROR_SEAT} is the Emperor's seat and is never closable`,
+            });
+            continue;
+          }
+          if (!binding) {
+            // Refuse loud — closing a non-bound target is a no-op the caller
+            // must see, never a silent success.
+            verdicts.push({
+              target,
+              seat_id: null,
+              agent_id: null,
+              closed: false,
+              reason: 'no_binding: target resolves to no current binding (already free or never bound)',
+            });
+            continue;
+          }
+          if (activityOf(binding.agent_id) === 'working' && !req.force) {
+            // Graceful by default: a mid-turn close destroys work and strands
+            // attestations. Idle-ness is the recorded activity fold, never a probe.
+            verdicts.push({
+              target,
+              seat_id: binding.seat_id,
+              agent_id: binding.agent_id,
+              closed: false,
+              reason: 'mid_turn: recorded activity is working; pass --force to close a hung agent',
+            });
+            continue;
+          }
+          await closeOne(target, binding);
+          closedSeats.add(binding.seat_id);
+        }
+      } else {
+        // Filtered selection is inherently graceful: recorded-idle (or stopped)
+        // registered agents only — never an overseer, never the Emperor's seat,
+        // never a mid-birth (unregistered) binding, whose death is registration
+        // abort's story.
+        const selected = proj.currentBindings.filter((b) => {
+          if (!b.agent_id || !b.registered) return false;
+          if (b.rank === CLOSE_REQUIRED_RANK || b.seat_id === EMPEROR_SEAT) return false;
+          const activity = activityOf(b.agent_id);
+          if (activity !== 'idle' && activity !== 'stopped') return false;
+          return !req.page || b.seat_id.split(':', 1)[0] === req.page;
+        });
+        if (selected.length === 0) return refused('no_targets: selector matched no closable agent');
+        for (const binding of selected) await closeOne(binding.agent_id!, binding);
       }
-      return { ok: true, target: req.target, seat_id: binding.seat_id, agent_id: binding.agent_id, closed: true, reason: null };
+
+      const closedCount = verdicts.filter((v) => v.closed).length;
+      return {
+        ok: closedCount === verdicts.length && verdicts.length > 0,
+        closed_count: closedCount,
+        refused_count: verdicts.length - closedCount,
+        verdicts,
+        reason: null,
+      };
     });
   }
 
