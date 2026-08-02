@@ -215,6 +215,15 @@ export const COMMANDS: readonly Command[] = [
     },
   },
   {
+    path: ['estate', 'zombies'],
+    summary: 'List remote envelopes no live binding accounts for',
+    run: async ({ args, request, write }) => {
+      if (args.length) throw new Error('usage: tx estate zombies');
+      write(await request('GET', '/tmux/read/zombies'));
+      return 0;
+    },
+  },
+  {
     path: ['estate', 'reconcile'],
     summary: 'Observe and non-destructively reconcile the estate',
     run: async ({ args, request, write }) => {

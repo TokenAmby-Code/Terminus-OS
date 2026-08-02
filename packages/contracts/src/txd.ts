@@ -94,6 +94,8 @@ export type EventDomain = (typeof EVENT_DOMAINS)[number];
 // reg.* — registration & binding lifecycle, plus daemon observations about it.
 export const REG_EVENT_NAMES = [
   'dispatch_requested',
+  'launch_composed', // identity + nonce (+ ssh target) set on the pane environment at dispatch
+  'transport_claimed', // the wrapper's placement claim, recorded for the Door-1 audit
   'pane_created',
   'wrapper_started',
   'physical_declared',
@@ -140,6 +142,8 @@ export const ESTATE_EVENT_NAMES = [
 // the type stays a narrow literal union and stays greppable.
 export const EVENT_TYPES = [
   'reg.dispatch_requested',
+  'reg.launch_composed',
+  'reg.transport_claimed',
   'reg.pane_created',
   'reg.wrapper_started',
   'reg.physical_declared',

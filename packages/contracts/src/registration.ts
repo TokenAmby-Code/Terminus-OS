@@ -4,7 +4,7 @@
 import { z } from "zod";
 
 // AGENT_CONTRACT_MIRROR_START
-export const AGENT_SCHEMA_VERSION = 4;
+export const AGENT_SCHEMA_VERSION = 5;
 
 export const AgentIdSchema = z.string().uuid();
 export const BirthGenerationSchema = z.string().uuid();
@@ -109,6 +109,15 @@ export const PaneAttestedSchema = z.object({
   pane_id: z.string().min(1),
   pane_generation: PaneGenerationSchema,
   machine: z.string().min(1),
+  // The seat's placement kind as the estate declares it — the pane itself is
+  // always local; an ssh seat's pane hosts the local wrapper owning the
+  // transport into the remote envelope.
+  kind: z.enum(["local", "ssh"]),
+  // The identity txd's launch composition carried into this pane, attested
+  // back to registrationd as the one identity channel. Null when the pane's
+  // launch predates or lacks a composition (a perpetual seat's relaunch);
+  // registrationd then mints at prepare.
+  agent_id: AgentIdSchema.nullable(),
   wrapper_pid: z.number().int().positive(),
   configuration: z.object({
     generation: z.string().min(1),
@@ -135,9 +144,11 @@ export const PaneRefusedSchema = z.object({
 }).strict();
 export type PaneRefused = z.infer<typeof PaneRefusedSchema>;
 
+// The birth reply carries package and pane facts only — never identity.
+// AGENT_ID enters the pane environment through txd's launch composition;
+// the wrapper is a hooks bot and no reply may teach it who the agent is.
 export const WrapperLaunchReplySchema = z.object({
   schema_version: z.literal(AGENT_SCHEMA_VERSION),
-  agent_id: AgentIdSchema,
   birth_generation: BirthGenerationSchema,
   pane_id: z.string().min(1),
   pane_generation: PaneGenerationSchema,
@@ -213,6 +224,10 @@ export type DispatchTarget = z.infer<typeof DispatchTargetSchema>;
 export const DispatchRequestedSchema = z.object({
   schema_version: z.literal(AGENT_SCHEMA_VERSION),
   dispatch_id: z.string().uuid(),
+  // registrationd mints the agent's identity at dispatch; txd carries it into
+  // the pane environment through launch composition. Identity never rides the
+  // birth reply.
+  agent_id: AgentIdSchema,
   machine: z.string().min(1),
   target: DispatchTargetSchema,
   engine: EngineSchema,
@@ -312,6 +327,13 @@ export const PLACEMENT_REFUSAL_REASONS = [
   "physical_binding_conflict",
   "tint_attestation_failed",
   "physical_binding_incomplete",
+  // Seat-aware placement audit: the declared placement's kind must match the
+  // seat's declared kind, an ssh claim must name the seat's configured
+  // target, and the claimed launch nonce must match the one txd minted for
+  // the live pane generation.
+  "placement_kind_incoherent",
+  "placement_machine_incoherent",
+  "launch_nonce_contradicted",
 ] as const;
 export const PlacementRefusalReasonSchema = z.enum(PLACEMENT_REFUSAL_REASONS);
 export type PlacementRefusalReason = z.infer<typeof PlacementRefusalReasonSchema>;

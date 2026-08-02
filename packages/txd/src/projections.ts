@@ -39,6 +39,30 @@ export type Projections = {
   physicalDeclarations: Map<string, PhysicalDeclaration>;
   placementAttestedAgents: Set<string>;
   decommissionedSeats: Set<string>;
+  // Latest launch composition per seat: the identity, nonce, and target txd
+  // set on the pane environment at dispatch. The nonce is the cross-kernel
+  // correlation an ssh wrapper must echo before its placement is believed.
+  launchCompositions: Map<string, LaunchComposition>;
+  // Latest wrapper transport claim per seat, recorded at pane attestation and
+  // audited at Door 1 against the launch composition.
+  transportClaims: Map<string, TransportClaim>;
+};
+
+export type LaunchComposition = {
+  seat_id: string;
+  pane_generation: string;
+  agent_id: string;
+  launch_nonce: string;
+  target_machine: string | null;
+};
+
+export type TransportClaim = {
+  seat_id: string;
+  pane_generation: string;
+  kind: 'local' | 'ssh';
+  target_machine: string | null;
+  launch_nonce: string | null;
+  envelope_session: string | null;
 };
 
 function str(v: unknown): string | null {
@@ -70,6 +94,8 @@ export function buildProjections(events: EventRecord[]): Projections {
   const entityKey = (type: string, id: string): string => `${type}\x00${id}`;
   const contradictions: OpenContradiction[] = [];
   const decommissionedSeats = new Set<string>();
+  const launchCompositions = new Map<string, LaunchComposition>();
+  const transportClaims = new Map<string, TransportClaim>();
 
   for (const e of events) {
     lastSeqByEntity.set(entityKey(e.entity_type, e.entity_id), e.seq);
@@ -105,6 +131,36 @@ export function buildProjections(events: EventRecord[]): Projections {
           bound_seq: e.seq,
         });
         break;
+      case 'reg.launch_composed': {
+        const paneGeneration = str(e.payload.pane_generation);
+        const agentId = str(e.payload.agent_id);
+        const nonce = str(e.payload.launch_nonce);
+        if (paneGeneration && agentId && nonce) {
+          launchCompositions.set(e.entity_id, {
+            seat_id: e.entity_id,
+            pane_generation: paneGeneration,
+            agent_id: agentId,
+            launch_nonce: nonce,
+            target_machine: str(e.payload.target_machine),
+          });
+        }
+        break;
+      }
+      case 'reg.transport_claimed': {
+        const paneGeneration = str(e.payload.pane_generation);
+        const kind = e.payload.kind === 'ssh' ? 'ssh' : 'local';
+        if (paneGeneration) {
+          transportClaims.set(e.entity_id, {
+            seat_id: e.entity_id,
+            pane_generation: paneGeneration,
+            kind,
+            target_machine: str(e.payload.target_machine),
+            launch_nonce: str(e.payload.launch_nonce),
+            envelope_session: str(e.payload.envelope_session),
+          });
+        }
+        break;
+      }
       case 'reg.physical_declared': {
         const declaration = PhysicalDeclarationSchema.safeParse(e.payload);
         if (declaration.success) {
@@ -205,5 +261,7 @@ export function buildProjections(events: EventRecord[]): Projections {
     physicalDeclarations,
     placementAttestedAgents,
     decommissionedSeats,
+    launchCompositions,
+    transportClaims,
   };
 }

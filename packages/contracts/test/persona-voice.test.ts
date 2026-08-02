@@ -45,7 +45,7 @@ describe("persona voice in the mirrored contract", () => {
 
 describe("agent schema version in the mirrored contract", () => {
   test("the mirror speaks schema 4", () => {
-    expect(AGENT_SCHEMA_VERSION).toBe(4);
+    expect(AGENT_SCHEMA_VERSION).toBe(5);
   });
 
   test("agent.retired is pinned to schema 4 and schema 3 stays dead", () => {
@@ -59,7 +59,7 @@ describe("agent schema version in the mirrored contract", () => {
       cause: "close",
       retired_at: "2026-08-01T12:00:00.000Z",
     };
-    expect(AgentRetiredSchema.parse(retired).schema_version).toBe(4);
+    expect(AgentRetiredSchema.parse(retired).schema_version).toBe(5);
     expect(AgentRetiredSchema.safeParse({ ...retired, schema_version: 3 }).success).toBe(false);
   });
 
@@ -74,7 +74,7 @@ describe("agent schema version in the mirrored contract", () => {
       reason: "pane_refused",
       aborted_at: "2026-08-01T12:00:00.000Z",
     };
-    expect(RegistrationAbortedSchema.parse(aborted).schema_version).toBe(4);
+    expect(RegistrationAbortedSchema.parse(aborted).schema_version).toBe(5);
     expect(RegistrationAbortedSchema.safeParse({ ...aborted, schema_version: 3 }).success).toBe(false);
   });
 });

@@ -511,6 +511,17 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         return json(body);
       },
     },
+    {
+      method: 'GET',
+      match: exact('/tmux/read/zombies'),
+      label: 'GET /tmux/read/zombies',
+      handler: async () => {
+        // On-demand join of remote envelopes against live bindings; derived,
+        // never stored. Session names carry no raw tmux %ids by construction.
+        const zombies = await daemon.zombieEnvelopes();
+        return json({ schema_version: SCHEMA_VERSION, zombies });
+      },
+    },
   ];
 
   return routes;

@@ -25,14 +25,14 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(35);
+    expect(EVENT_TYPES).toHaveLength(37);
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('reg.placement_attested');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
     expect(EVENT_TYPES).toContain('act.mode_transition_requested');
     expect(EVENT_TYPES).toContain('act.mode_transition_attested');
     expect(EVENT_TYPES).toContain('act.mode_transition_failed');
-    expect(REG_EVENT_NAMES).toHaveLength(17);
+    expect(REG_EVENT_NAMES).toHaveLength(19);
     expect(ACT_EVENT_NAMES).toHaveLength(9);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',

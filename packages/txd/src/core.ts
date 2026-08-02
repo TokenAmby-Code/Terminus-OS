@@ -66,10 +66,12 @@ import {
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
 } from '@terminus-os/contracts';
+import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
-import { buildProjections, type Projections } from './projections.ts';
-import { DECOMMISSIONED_COUNCIL_SEATS, EMPEROR_SEAT, isTxdPage, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import { buildProjections, type Projections, type LaunchComposition, type TransportClaim } from './projections.ts';
+import { DECOMMISSIONED_COUNCIL_SEATS, EMPEROR_SEAT, isTxdPage, SSH_SEAT_TARGETS, sshSeatTarget, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 import type { TxdPublishedEventType } from './events.ts';
@@ -109,6 +111,38 @@ const COUNCIL_SEAT_PERSONAS = new Map<string, string>(
 );
 const COUNCIL_PERSONAS = new Set(COUNCIL_SEAT_PERSONAS.values());
 
+// The wrapper's transport claim, read from wrapper_start placement hints as
+// dumb strings. Anything malformed folds to a local claim with no facts —
+// Door 1 then refuses it on an ssh seat, loudly.
+function transportClaimFromHints(hints: Record<string, unknown>): Omit<TransportClaim, 'seat_id' | 'pane_generation'> {
+  const field = (value: unknown): string | null =>
+    typeof value === 'string' && value.length > 0 ? value : null;
+  return {
+    kind: hints.kind === 'ssh' ? 'ssh' : 'local',
+    target_machine: field(hints.target_machine),
+    launch_nonce: field(hints.launch_nonce),
+    envelope_session: field(hints.envelope_session),
+  };
+}
+
+function liveComposition(
+  composition: LaunchComposition | undefined,
+  paneGeneration: string,
+): LaunchComposition | undefined {
+  return composition && composition.pane_generation === paneGeneration ? composition : undefined;
+}
+
+function liveClaim(
+  claim: TransportClaim | undefined,
+  paneGeneration: string,
+): TransportClaim | undefined {
+  return claim && claim.pane_generation === paneGeneration ? claim : undefined;
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
@@ -119,42 +153,67 @@ export class Daemon {
     private now: Now = () => new Date().toISOString(),
     private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
     private physicalRegistration: PhysicalRegistrationRuntime | null = null,
+    private remoteEnvelopes: RemoteEnvelopeLister | null = null,
   ) {}
 
   async attestWrapperStart(
     hook: WrapperStartHook,
   ): Promise<{ attested: boolean; reason: string | null }> {
-    if (!this.physicalRegistration) {
-      return { attested: false, reason: 'physical_registration_unconfigured' };
-    }
-    const observed = await this.tmux.attestWrapperPlacement(hook.wrapper_pid);
-    if (!observed.ok) {
-      const refusal = PaneRefusedSchema.parse({
+    return this.locked(async () => {
+      if (!this.physicalRegistration) {
+        return { attested: false, reason: 'physical_registration_unconfigured' };
+      }
+      const observed = await this.tmux.attestWrapperPlacement(hook.wrapper_pid);
+      if (!observed.ok) {
+        const refusal = PaneRefusedSchema.parse({
+          hook_request_id: hook.hook_request_id,
+          claimed_pane_id: hook.claimed_pane_id,
+          machine: this.physicalRegistration.machine,
+          wrapper_pid: hook.wrapper_pid,
+          reason: observed.reason,
+        });
+        await this.physicalRegistration.publish('agent.pane_refused', refusal);
+        return { attested: false, reason: observed.reason };
+      }
+      // The transport claim is recorded as the wrapper asserted it and audited
+      // at Door 1 against the launch composition; recording is not belief.
+      const claim = transportClaimFromHints(hook.placement_hints);
+      await this.store.append({
+        entity_type: 'seat',
+        entity_id: observed.pane_id,
+        event_type: 'reg.transport_claimed',
+        payload: {
+          seat_id: observed.pane_id,
+          pane_generation: observed.pane_generation,
+          kind: claim.kind,
+          target_machine: claim.target_machine,
+          launch_nonce: claim.launch_nonce,
+          envelope_session: claim.envelope_session,
+        },
+        provenance: this.prov('wrapper', null),
+        occurred_at: this.now(),
+      });
+      const projections = await this.projections();
+      const composition = liveComposition(projections.launchCompositions.get(observed.pane_id), observed.pane_generation);
+      const attestation = PaneAttestedSchema.parse({
         hook_request_id: hook.hook_request_id,
         claimed_pane_id: hook.claimed_pane_id,
+        pane_id: observed.pane_id,
+        pane_generation: observed.pane_generation,
         machine: this.physicalRegistration.machine,
+        kind: sshSeatTarget(observed.pane_id) ? 'ssh' : 'local',
+        agent_id: composition?.agent_id ?? null,
         wrapper_pid: hook.wrapper_pid,
-        reason: observed.reason,
+        configuration: this.physicalRegistration.configuration,
+        process_witnesses: {
+          pane_root_pid: observed.pane_root_pid,
+          ancestry: observed.ancestry,
+          process_start_ticks: observed.process_start_ticks,
+        },
       });
-      await this.physicalRegistration.publish('agent.pane_refused', refusal);
-      return { attested: false, reason: observed.reason };
-    }
-    const attestation = PaneAttestedSchema.parse({
-      hook_request_id: hook.hook_request_id,
-      claimed_pane_id: hook.claimed_pane_id,
-      pane_id: observed.pane_id,
-      pane_generation: observed.pane_generation,
-      machine: this.physicalRegistration.machine,
-      wrapper_pid: hook.wrapper_pid,
-      configuration: this.physicalRegistration.configuration,
-      process_witnesses: {
-        pane_root_pid: observed.pane_root_pid,
-        ancestry: observed.ancestry,
-        process_start_ticks: observed.process_start_ticks,
-      },
+      await this.physicalRegistration.publish('agent.pane_attested', attestation);
+      return { attested: true, reason: null };
     });
-    await this.physicalRegistration.publish('agent.pane_attested', attestation);
-    return { attested: true, reason: null };
   }
 
   /**
@@ -248,14 +307,41 @@ export class Daemon {
         await refuse('seat_generation_unattested');
         return;
       }
+      // Launch composition: identity (minted by registrationd at dispatch),
+      // a fresh per-launch nonce, and — for an ssh seat — the declared target
+      // alias all enter the pane environment here. The composition is
+      // remembered against the pane generation so the placement adapter can
+      // audit the wrapper's echo; a fresh birth on the same seat mints a
+      // fresh nonce, so a new binding can never attach a dead generation's
+      // envelope.
+      const launchNonce = crypto.randomUUID();
+      const sshTarget = sshSeatTarget(seatId);
       if (!(await this.tmux.startSeatEngine({
         seatId,
         engine: request.engine,
         wrapper: this.physicalRegistration.agentWrapper,
+        agentId: request.agent_id,
+        launchNonce,
+        ...(sshTarget ? { sshTarget } : {}),
       }))) {
         await refuse('seat_start_failed');
         return;
       }
+      await this.store.append({
+        entity_type: 'seat',
+        entity_id: seatId,
+        event_type: 'reg.launch_composed',
+        payload: {
+          seat_id: seatId,
+          pane_generation: paneGeneration,
+          agent_id: request.agent_id,
+          launch_nonce: launchNonce,
+          target_machine: sshTarget ?? null,
+          engine: request.engine,
+        },
+        provenance: this.prov('observer', null),
+        occurred_at: this.now(),
+      });
       await publish('agent.dispatch_attested', DispatchAttestedSchema.parse({
         schema_version: request.schema_version,
         dispatch_id: request.dispatch_id,
@@ -324,6 +410,26 @@ export class Daemon {
         throw new Error('persona_seat_incoherent');
       }
       let projections = await this.projections();
+      // Seat-aware placement audit. The estate declares each seat's kind; the
+      // wrapper's transport claim and txd's own launch composition must agree
+      // with it before any binding stands. Remote start ticks are not
+      // comparable across kernels and are never collected — the nonce echo
+      // plus the transport is what guards the remote half.
+      const seatTarget = sshSeatTarget(observed.pane_id);
+      const claim = liveClaim(projections.transportClaims.get(observed.pane_id), observed.pane_generation);
+      const composition = liveComposition(projections.launchCompositions.get(observed.pane_id), observed.pane_generation);
+      if (seatTarget) {
+        if (!claim || claim.kind !== 'ssh') throw new Error('placement_kind_incoherent');
+        if (claim.target_machine !== seatTarget) throw new Error('placement_machine_incoherent');
+        if (!composition
+            || composition.agent_id !== declaration.agent_id
+            || !claim.launch_nonce
+            || claim.launch_nonce !== composition.launch_nonce) {
+          throw new Error('launch_nonce_contradicted');
+        }
+      } else if (claim?.kind === 'ssh') {
+        throw new Error('placement_kind_incoherent');
+      }
       const existing = projections.physicalDeclarations.get(declaration.agent_id);
       if (existing && JSON.stringify(existing) !== JSON.stringify(declaration)) {
         throw new Error('physical_declaration_conflict');
@@ -426,10 +532,22 @@ export class Daemon {
           generation: binding.configuration_generation,
           digest: binding.configuration_digest,
         },
-        machine: physicalRegistration.machine,
-        kind: 'local',
+        machine: seatTarget ?? physicalRegistration.machine,
+        kind: seatTarget ? 'ssh' : 'local',
         wrapper_pid: binding.wrapper_pid,
-        transport_witnesses: { physical_declared_receipt: receipt },
+        // The witnesses let a reader of the final record reconstruct why this
+        // placement was believed. The nonce travels only as a digest — it is
+        // correlation, not a credential, and the record must not become one.
+        transport_witnesses: seatTarget && composition
+          ? {
+              physical_declared_receipt: receipt,
+              wrapper_pid: binding.wrapper_pid,
+              wrapper_start_ticks: observed.process_start_ticks[String(declaration.wrapper_pid)] ?? null,
+              target_machine: seatTarget,
+              launch_nonce_digest: sha256(composition.launch_nonce),
+              envelope_session: claim?.envelope_session ?? envelopeSessionName(binding.seat_id, composition.launch_nonce),
+            }
+          : { physical_declared_receipt: receipt },
       });
       await physicalRegistration.publish('agent.placement_attested', placement);
       await this.store.append({
@@ -524,8 +642,11 @@ export class Daemon {
           || binding.engine !== agent.engine
           || binding.configuration_generation !== agent.configuration.generation
           || binding.configuration_digest !== agent.configuration.digest
-          || agent.placement.machine !== this.physicalRegistration.machine
-          || agent.placement.kind !== 'local'
+          // Seat-aware: an ssh seat's registered placement names the seat's
+          // configured target and kind 'ssh'; a local seat names this daemon's
+          // machine and kind 'local'. Any other combination is a conflict.
+          || agent.placement.machine !== (sshSeatTarget(binding.seat_id) ?? this.physicalRegistration.machine)
+          || agent.placement.kind !== (sshSeatTarget(binding.seat_id) ? 'ssh' : 'local')
           || binding.tint !== (agent.persona?.tint ?? null)
           // The registered agent must be the agent txd signed off at bind time.
           // registrationd holds the persona authority; txd holds it to the
@@ -558,6 +679,36 @@ export class Daemon {
         occurred_at: this.now(),
       });
     });
+  }
+
+  /**
+   * On-demand zombie inventory: live envelopes on every declared ssh target,
+   * joined against live bindings. An envelope whose nonce-bearing name no
+   * live binding's launch composition accounts for is a zombie — alive after
+   * its binding retired, holding no lock and no seat. Derived on demand,
+   * never stored; reaping belongs to the sanctioned temporald ritual.
+   */
+  async zombieEnvelopes(): Promise<Array<{ target: string; session_name: string }>> {
+    const lister = this.remoteEnvelopes;
+    if (!lister) throw new Error('remote_envelope_lister_unconfigured');
+    const projections = await this.projections();
+    const expected = new Set<string>();
+    for (const binding of projections.currentBindings) {
+      if (!sshSeatTarget(binding.seat_id) || !binding.pane_generation) continue;
+      const composition = liveComposition(
+        projections.launchCompositions.get(binding.seat_id),
+        binding.pane_generation,
+      );
+      if (composition) expected.add(envelopeSessionName(binding.seat_id, composition.launch_nonce));
+    }
+    const zombies: Array<{ target: string; session_name: string }> = [];
+    for (const target of new Set(Object.values(SSH_SEAT_TARGETS))) {
+      for (const session of await lister(target)) {
+        if (!session.startsWith(ENVELOPE_PREFIX)) continue;
+        if (!expected.has(session)) zombies.push({ target, session_name: session });
+      }
+    }
+    return zombies;
   }
 
   /** Serialize a mutating op — the single-writer discipline. */
@@ -1716,6 +1867,7 @@ export class Daemon {
       seatId: binding.seat_id,
       engine: perpetualEngine,
       wrapper: this.physicalRegistration!.agentWrapper,
+      launchNonce: crypto.randomUUID(),
     }))) {
       console.error(JSON.stringify({
         level: 'error',
@@ -1980,6 +2132,7 @@ export class Daemon {
           seatId,
           engine,
           wrapper: this.physicalRegistration!.agentWrapper,
+          launchNonce: crypto.randomUUID(),
         }))) throw new Error(`perpetual launch failed: ${seatId}`);
       }
     });

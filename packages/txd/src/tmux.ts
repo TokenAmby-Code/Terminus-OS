@@ -32,6 +32,16 @@ export type SeatEngineLaunch = {
   seatId: string;
   engine: 'claude' | 'codex';
   wrapper: string;
+  // Identity rides launch composition, never the birth reply: registrationd
+  // mints AGENT_ID at dispatch and txd sets it on the pane environment.
+  // Absent for a perpetual relaunch — no dispatch minted an identity, so
+  // registrationd mints one at prepare instead.
+  agentId?: string;
+  // Per-launch correlation minted by txd; the wrapper echoes it in
+  // wrapper_start and, on an ssh seat, names the remote envelope with it.
+  launchNonce: string;
+  // The seat's declared target machine alias; absent for a local seat.
+  sshTarget?: string;
 };
 export type WrapperPlacementAttestation =
   | {
@@ -156,6 +166,9 @@ const REPAIR_SPLITS: Record<string, { source: string; flags: string[]; size?: st
 const CANON_OPT = '@canonical_id';
 const GENERATION_OPT = '@txd_generation';
 const PANE_ID_ENV = 'PANE_ID';
+const AGENT_ID_ENV = 'AGENT_ID';
+const LAUNCH_NONCE_ENV = 'TXD_LAUNCH_NONCE';
+const SSH_TARGET_ENV = 'TXD_SSH_TARGET';
 const MACHINE_ENV = 'IMPERIUM_MACHINE';
 const MAX_PROCESS_ANCESTRY = 256;
 type ProcessWitness = { pid: number; parent_pid: number; start_ticks: string };
@@ -1085,7 +1098,13 @@ export class RealTmux implements TmuxControlPlane {
   async startSeatEngine(launch: SeatEngineLaunch): Promise<boolean> {
     const paneId = await this.resolvePane(launch.seatId);
     if (!paneId) return false;
-    const command = `exec /usr/bin/env ${PANE_ID_ENV}=${this.shellQuote(launch.seatId)} ${this.shellQuote(launch.wrapper)} ${this.shellQuote(launch.engine)}`;
+    const environment = [
+      `${PANE_ID_ENV}=${this.shellQuote(launch.seatId)}`,
+      ...(launch.agentId ? [`${AGENT_ID_ENV}=${this.shellQuote(launch.agentId)}`] : []),
+      `${LAUNCH_NONCE_ENV}=${this.shellQuote(launch.launchNonce)}`,
+      ...(launch.sshTarget ? [`${SSH_TARGET_ENV}=${this.shellQuote(launch.sshTarget)}`] : []),
+    ].join(' ');
+    const command = `exec /usr/bin/env ${environment} ${this.shellQuote(launch.wrapper)} ${this.shellQuote(launch.engine)}`;
     const result = await this.command('start_seat_engine', launch.seatId, [
       'respawn-pane', '-k',
       ...this.paneEnvironment(launch.seatId), '-t', paneId, command,
