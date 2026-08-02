@@ -71,7 +71,7 @@ const ofType = (published: Array<{ type: string; payload: Record<string, unknown
 // red on any base whose contract still carries the pre-window version, which
 // is exactly the merge ordering the ruling demands.
 test('the contract literal rides schema 4, never 3', () => {
-  expect(AGENT_SCHEMA_VERSION).toBe(4);
+  expect(AGENT_SCHEMA_VERSION).toBe(5);
 });
 
 test('a bound-but-unregistered seat\'s pane death publishes agent.unregistered_closed and no agent.retired', async () => {

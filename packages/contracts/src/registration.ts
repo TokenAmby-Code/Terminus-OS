@@ -4,7 +4,7 @@
 import { z } from "zod";
 
 // AGENT_CONTRACT_MIRROR_START
-export const AGENT_SCHEMA_VERSION = 4;
+export const AGENT_SCHEMA_VERSION = 5;
 
 export const AgentIdSchema = z.string().uuid();
 export const BirthGenerationSchema = z.string().uuid();
