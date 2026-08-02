@@ -93,19 +93,20 @@ test('forced page reset reconstructs a deleted canonical terminal instead of par
   expect(tmux.rebuiltPages()).toEqual(['palace']);
 });
 
-test('tmux pane lifecycle event immediately reconstructs only a damaged page and resolves its binding into event truth', async () => {
+test('tmux pane lifecycle event immediately repairs only the lost seat and resolves its binding into event truth', async () => {
   const { store, tmux, daemon } = await setup();
   await daemon.launch({ seat_id: 'palace:E', schema_version: SCHEMA_VERSION, identity: 'east', persona: 'astartes', tint: '#1' });
   tmux.deleteOutOfBand('palace:E');
   const recovered = await daemon.handleTmuxLifecycleEvent({ schema_version: SCHEMA_VERSION, event: 'pane-exited', page: 'palace' });
-  expect(recovered).toMatchObject({ ok: true, reconstructed: true, page: 'palace', event: 'pane-exited' });
-  expect(tmux.rebuiltPages()).toEqual(['palace']);
+  expect(recovered).toMatchObject({ ok: true, reconstructed: true, page: 'palace', event: 'pane-exited', reset_seats: ['palace:E'] });
+  expect(tmux.rebuiltPages()).toEqual([]);
+  expect(tmux.resetSeats()).toEqual(['palace:E']);
   expect((await daemon.estateRows()).find((row) => row.seat_id === 'palace:E')).toMatchObject({ binding: 'unbound', pane: 'live' });
   const requested = (await store.readAll()).findLast((event) => event.event_type === 'estate.scoped_reset_requested');
   expect(requested).toMatchObject({ payload: { trigger: 'pane-exited' }, provenance: { source: 'observer' } });
   const duplicate = await daemon.handleTmuxLifecycleEvent({ schema_version: SCHEMA_VERSION, event: 'pane-exited', page: 'palace' });
   expect(duplicate).toMatchObject({ ok: true, reconstructed: false, reason: 'page_already_canonical' });
-  expect(tmux.rebuiltPages()).toEqual(['palace']);
+  expect(tmux.rebuiltPages()).toEqual([]);
 });
 
 test('a dead pane retires alone: pane-died resets only the faulted pane and bound siblings survive', async () => {

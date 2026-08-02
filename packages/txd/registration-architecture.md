@@ -147,6 +147,14 @@ makes an agent routable. Consumers activate only from `agent.registered`.
 
 `hook.wrapper_stop`, literal engine stop hooks, pane death, transport loss,
 replacement generations, and retirement use the same event discipline.
+Pane death is observed at the moment it happens: process exits fire the
+`pane-died`/`pane-exited` tmux hooks with the dying pane's own page, and kill
+commands — which fire neither pane hook and whose hook context cannot name
+the emptied page — forward a page-less `pane-killed` event that makes txd
+sweep the estate. Either way txd retires exactly the faulted seat and repairs
+its pane in place; a page rebuild happens only when no tagged pane survives
+on the page. This holds for every pane kind, including future ssh-envelope
+panes.
 registrationd emits `agent.registration_compensated` or
 `agent.registration_failed` for terminal birth failures; post-birth it never
 initiates retirement. txd emits factual placement contradictions and, at every

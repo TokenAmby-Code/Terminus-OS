@@ -127,6 +127,32 @@ export interface TmuxControlPlane {
   commitClipboardSelection(text: string, clientTty: string): Promise<number>;
 }
 
+// The declared split placing each seat, mirrored from constructPage's
+// construction graph: the sibling whose edge the seat shares, the split
+// orientation, and the declared share where the default even split would not
+// restore it (the full-height flank columns hold 30% of the window by
+// construction). repairSeat re-runs exactly this split to put a killed seat
+// back without touching any survivor.
+const REPAIR_SPLITS: Record<string, { source: string; flags: string[]; size?: string }> = {
+  'reservists:W': { source: 'reservists:N', flags: ['-f', '-h', '-b'], size: '30%' },
+  'reservists:N': { source: 'reservists:S', flags: ['-v', '-b'] },
+  'reservists:S': { source: 'reservists:N', flags: ['-v'] },
+  'reservists:E': { source: 'reservists:N', flags: ['-f', '-h'], size: '30%' },
+  'palace:W': { source: 'palace:N', flags: ['-f', '-h', '-b'], size: '30%' },
+  'palace:N': { source: 'palace:S', flags: ['-v', '-b'] },
+  'palace:S': { source: 'palace:N', flags: ['-v'] },
+  'palace:E': { source: 'palace:N', flags: ['-f', '-h'], size: '30%' },
+  'somnium:W': { source: 'somnium:N', flags: ['-f', '-h', '-b'], size: '30%' },
+  'somnium:N': { source: 'somnium:S', flags: ['-v', '-b'] },
+  'somnium:S': { source: 'somnium:N', flags: ['-v'] },
+  'somnium:NE': { source: 'somnium:SE', flags: ['-v', '-b'] },
+  'somnium:SE': { source: 'somnium:NE', flags: ['-v'] },
+  'council:custodes': { source: 'council:fabricator-general', flags: ['-v', '-b'] },
+  'council:fabricator-general': { source: 'council:custodes', flags: ['-v'] },
+  'council:pax': { source: 'council:orchestrator', flags: ['-v', '-b'] },
+  'council:orchestrator': { source: 'council:pax', flags: ['-v'] },
+};
+
 const CANON_OPT = '@canonical_id';
 const GENERATION_OPT = '@txd_generation';
 const PANE_ID_ENV = 'PANE_ID';
@@ -993,7 +1019,7 @@ export class RealTmux implements TmuxControlPlane {
 
   async resetSeat(seatId: string): Promise<boolean> {
     const paneId = await this.resolvePane(seatId);
-    if (!paneId) return false;
+    if (!paneId) return this.repairSeat(seatId);
     const shell = await this.defaultShell(seatId);
     if (!shell) return false;
     if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return false;
@@ -1003,6 +1029,53 @@ export class RealTmux implements TmuxControlPlane {
     ])).code !== 0) return false;
     const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
     return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
+  }
+
+  /**
+   * Recreate a KILLED seat's pane in place: split a surviving pane in the
+   * seat's window, tag the new pane with the canonical id, and clear its
+   * tint. The split source and direction come from the same declared
+   * construction graph constructPage stands, so a repaired seat lands in its
+   * declared position; when the declared source is itself gone, any surviving
+   * tagged pane anchors the split and boot-time convergence owns exactness.
+   * Returns false only when the window has no tagged pane left to anchor a
+   * repair — that page is structure damage, not a pane fault.
+   */
+  private async repairSeat(seatId: string): Promise<boolean> {
+    const [page] = seatId.split(':', 1);
+    if (!page || !Object.hasOwn(TXD_WINDOWS, page)) return false;
+    const seats = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[];
+    if (!seats.includes(seatId)) return false;
+    const target = `${TXD_SESSION}:${page}`;
+    const listed = await this.command('observe_page_panes', page, [
+      'list-panes', '-t', target, '-F', `#{pane_id}\t#{${CANON_OPT}}\t#{pane_dead}`,
+    ]);
+    if (listed.code !== 0) return false;
+    const anchors = new Map<string, string>();
+    for (const line of listed.stdout.split('\n')) {
+      const [pane, canon, dead] = line.split('\t');
+      if (pane && canon && dead === '0' && !anchors.has(canon)) anchors.set(canon, pane);
+    }
+    if (anchors.size === 0) return false;
+    if (!(await this.clearPageZoom(page, target))) return false;
+    const spec = REPAIR_SPLITS[seatId];
+    const sourcePane = (spec && anchors.get(spec.source)) ?? [...anchors.values()][0]!;
+    const flags = spec && anchors.has(spec.source)
+      ? [...spec.flags, ...(spec.size ? ['-l', spec.size] : [])]
+      : ['-h'];
+    try {
+      const created = await this.estateChecked(
+        ['split-window', ...flags, '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seatId), '-t', sourcePane],
+        `repair ${seatId}`,
+        seatId,
+      );
+      await this.tag(created, seatId);
+      const verified = await this.command('verify_repair_seat_tag', seatId, ['display-message', '-p', '-t', created, `#{${CANON_OPT}}`]);
+      return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
+    } catch (error) {
+      console.error(JSON.stringify({ level: 'error', event: 'seat_repair_failed', seat: seatId, error: String(error) }));
+      return false;
+    }
   }
 
   private shellQuote(value: string): string {
@@ -1459,10 +1532,26 @@ export class FakeTmux implements TmuxControlPlane {
   }
   async resetSeat(seatId: string): Promise<boolean> {
     // `respawn-pane -k` replaces the pane's process in place: a live process
-    // is killed, a remain-on-exit corpse is revived. Only a missing pane has
-    // nothing to respawn.
+    // is killed, a remain-on-exit corpse is revived. A missing pane is
+    // repaired by splitting a surviving sibling, so it fails only when the
+    // window has no pane left to anchor the split.
     const s = this.seats.get(seatId);
-    if (!s) return false;
+    if (!s) {
+      const [page] = seatId.split(':', 1);
+      const declared = page ? (TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined) : undefined;
+      if (!declared?.includes(seatId)) return false;
+      const anchors = declared.filter((seat) => this.seats.get(seat)?.pane === 'live');
+      if (anchors.length === 0) return false;
+      this.seats.set(seatId, { pane: 'live', generation: crypto.randomUUID() });
+      const window = this.shape.windows[page!];
+      if (window && !window.includes(seatId)) {
+        this.shape.windows[page!] = declared.filter((seat) => window.includes(seat) || seat === seatId);
+      }
+      this.commands.delete(seatId);
+      this.tints.delete(seatId);
+      this.resets.push(seatId);
+      return true;
+    }
     s.pane = 'live';
     this.commands.delete(seatId);
     this.tints.delete(seatId);

@@ -70,3 +70,18 @@ test('tmux lifecycle event input rejects unknown events and incomplete pages', a
   expect(await runCli(['estate', 'event', 'pane-died', '--page'], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
 });
+
+test('a kill-time event is page-less: tx forwards pane-killed with no page claim', async () => {
+  const h = harness();
+  expect(await runCli(['estate', 'event', 'pane-killed'], h.deps)).toBe(0);
+  expect(h.calls).toEqual([
+    { method: 'POST', path: '/ingress/tmux', body: { schema_version: SCHEMA_VERSION, event: 'pane-killed' } },
+  ]);
+});
+
+test('pane-killed refuses a page claim and process-death events still demand one', async () => {
+  const h = harness();
+  expect(await runCli(['estate', 'event', 'pane-killed', '--page', 'palace'], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'event', 'pane-exited'], h.deps)).toBe(1);
+  expect(h.calls).toEqual([]);
+});

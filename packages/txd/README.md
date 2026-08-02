@@ -57,7 +57,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/clipboard/push`   | Read the transient `tx-clipboard` buffer for an explicit client-side push |
 | POST   | `/ctl/clipboard/pull`   | Load UTF-8 into the transient, non-executing `tx-clipboard` buffer |
 | POST   | `/ctl/clipboard/selection` | Commit bounded UTF-8 through txd to `tx-clipboard` and one validated attached client |
-| POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` event ingress; reconstructs a damaged canonical page |
+| POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` / page-less `pane-killed` ingress; repairs each faulted seat alone, rebuilding a page only when no tagged pane survives on it |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Generic close: reap process, keep estate pane, seat → freelist |
 | POST   | `/agents/subscribe`     | Bound-keyed close-on-next-stop subscription (satiated-once) |

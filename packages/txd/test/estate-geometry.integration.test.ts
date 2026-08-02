@@ -33,6 +33,10 @@ function expectRatio(actual: number, total: number, min: number, max: number): v
   expect(actual / total).toBeLessThanOrEqual(max);
 }
 
+async function paneId(socket: string, seat: string): Promise<string> {
+  return tmux(socket, 'list-panes', '-a', '-f', `#{==:#{@canonical_id},${seat}}`, '-F', '#{pane_id}');
+}
+
 async function paneEnvironment(socket: string, seat: string): Promise<string[]> {
   const pid = await tmux(socket, 'list-panes', '-a', '-f', `#{==:#{@canonical_id},${seat}}`, '-F', '#{pane_pid}');
   expect(pid).toMatch(/^[1-9][0-9]*$/);
@@ -353,5 +357,64 @@ describe('disposable canonical estate geometry', () => {
     for (const seat of Object.values(TXD_WINDOWS).flat().filter((seat) => !seat.startsWith('council:'))) {
       expect(after.get(seat)).toBe(before.get(seat));
     }
+  });
+
+  test('a raw kill-pane is repaired as one seat: siblings keep their processes and the page keeps its border', async () => {
+    const socket = `txd-kill-repair-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket, { machine: 'k12-personal' });
+    await control.ensureEstate();
+
+    const before = new Map((await tmux(
+      socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
+    )).split('\n').map((row) => row.split('\t') as [string, string]));
+
+    await tmux(socket, 'kill-pane', '-t', await paneId(socket, 'palace:E'));
+    expect(await control.resetSeat('palace:E')).toBe(true);
+
+    const after = new Map((await tmux(
+      socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
+    )).split('\n').map((row) => row.split('\t') as [string, string]));
+    expect([...after.keys()].sort()).toEqual([...before.keys()].sort());
+    expect(after.get('palace:E')).not.toBe(before.get('palace:E'));
+    for (const seat of Object.values(TXD_WINDOWS).flat().filter((seat) => seat !== 'palace:E')) {
+      expect(after.get(seat)).toBe(before.get(seat));
+    }
+    expect(await paneEnvironment(socket, 'palace:E')).toContain('PANE_ID=palace:E');
+    expect(await control.seatTint('palace:E')).toBeNull();
+  });
+
+  test('a killed Council quadrant is repaired back to its exact quadrant geometry', async () => {
+    const socket = `txd-council-repair-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '160', '-y', '48');
+
+    await tmux(socket, 'kill-pane', '-t', await paneId(socket, 'council:pax'));
+    expect(await control.resetSeat('council:pax')).toBe(true);
+
+    const rows = await tmux(
+      socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_width}\t#{pane_height}',
+    );
+    const panes = rows.split('\n').map((row) => row.split('\t'));
+    expect(panes.map(([seat]) => seat).sort()).toEqual([...TXD_WINDOWS.council].sort());
+    for (const [, width, height] of panes) {
+      expectRatio(Number(width), 160, 0.45, 0.55);
+      expectRatio(Number(height), 48, 0.45, 0.55);
+    }
+  });
+
+  test('seat repair refuses when the page window itself is gone', async () => {
+    const socket = `txd-window-gone-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+
+    await tmux(socket, 'kill-window', '-t', 'main:palace');
+    expect(await control.resetSeat('palace:E')).toBe(false);
   });
 });

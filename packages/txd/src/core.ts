@@ -69,7 +69,7 @@ import {
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections } from './projections.ts';
-import { DECOMMISSIONED_COUNCIL_SEATS, isTxdPage, TXD_ESTATE, TXD_WINDOWS } from './estate.ts';
+import { DECOMMISSIONED_COUNCIL_SEATS, isTxdPage, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 import type { TxdPublishedEventType } from './events.ts';
@@ -1969,7 +1969,7 @@ export class Daemon {
   private async resetEstateScopeUnlocked(
     req: EstateRotateRequest,
     transportReceipt: string | null,
-    trigger: 'operator' | 'pane-died' | 'pane-exited' = 'operator',
+    trigger: 'operator' | 'pane-died' | 'pane-exited' | 'pane-killed' = 'operator',
   ): Promise<EstateRotateResponse> {
     const scope = req.scope;
     const empty = (reason: string): EstateRotateResponse => ({
@@ -2047,63 +2047,87 @@ export class Daemon {
     transportReceipt: string | null = null,
   ): Promise<TmuxLifecycleEventResponse> {
     const result = await this.locked(async () => {
+      const page = req.page ?? null;
       const refused = (reason: string): TmuxLifecycleEventResponse => ({
-        ok: false, event: req.event, page: req.page, reconstructed: false, reset_seats: [], rotation_ids: [], reason,
+        ok: false, event: req.event, page, reconstructed: false, reset_seats: [], rotation_ids: [], reason,
       });
       if (req.schema_version !== SCHEMA_VERSION) return refused('schema_version_mismatch');
-      if (!isTxdPage(req.page)) return refused('page_absent');
-      const expected = [...TXD_WINDOWS[req.page]];
-      const observed = (await this.tmux.listSeats()).filter((seat) => seat.seat_id.startsWith(`${req.page}:`));
-      const dead = expected.filter((seat) => observed.some((o) => o.seat_id === seat && o.pane === 'dead'));
-      const missing = expected.filter((seat) => !observed.some((o) => o.seat_id === seat));
-      if (dead.length === 0 && missing.length === 0) {
-        return { ok: true, event: req.event, page: req.page, reconstructed: false, reset_seats: [], rotation_ids: [], reason: 'page_already_canonical' };
+      // A process-death hook fires in the dying pane's own context, so its
+      // page claim scopes the observation. A kill command's hook context is
+      // the active window — no page claim survives it — so `pane-killed`
+      // sweeps every canonical page for the damage in one estate read.
+      let pages: TxdPage[];
+      if (req.event === 'pane-killed') {
+        pages = Object.keys(TXD_WINDOWS) as TxdPage[];
+      } else if (isTxdPage(req.page!)) {
+        pages = [req.page as TxdPage];
+      } else {
+        return refused('page_absent');
       }
-      // Fault scope is the pane. A dead pane is one faulted PROCESS whose
-      // remain-on-exit corpse is the respawn target: it is retired loudly and
-      // alone, and siblings — which carry no fault — are never touched. Only a
-      // MISSING pane is damage to the window structure itself; with no pane
-      // left to scope a repair to, that class alone earns the border-total
-      // page rebuild.
-      if (missing.length > 0) {
-        const reset = await this.resetEstateScopeUnlocked(
-          { schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: req.page },
-          transportReceipt,
-          req.event,
-        );
-        return {
-          ok: reset.ok,
-          event: req.event,
-          page: req.page,
-          reconstructed: reset.accepted,
-          reset_seats: reset.ok ? [...reset.seats] : [],
-          rotation_ids: reset.rotation_id === null ? [] : [reset.rotation_id],
-          reason: reset.reason,
-        };
-      }
+      const observed = await this.tmux.listSeats();
       const reset_seats: string[] = [];
       const rotation_ids: string[] = [];
       let ok = true;
       let reconstructed = false;
       let reason: string | null = null;
-      for (const seat of dead) {
-        const reset = await this.resetEstateScopeUnlocked(
-          { schema_version: SCHEMA_VERSION, force: true, scope: 'pane', pane: seat },
-          transportReceipt,
-          req.event,
-        );
-        if (reset.rotation_id !== null) rotation_ids.push(reset.rotation_id);
-        if (reset.accepted) reconstructed = true;
-        if (reset.ok) {
-          reset_seats.push(seat);
-        } else {
-          // The durable request stays open; reconstruction recovery resumes
-          // it. One seat's physical failure never blocks a sibling's repair.
-          ok = false;
-          reason = reset.reason;
+      let faultedPages = 0;
+      for (const target of pages) {
+        const expected = [...TXD_WINDOWS[target]];
+        const pageObserved = observed.filter((seat) => seat.seat_id.startsWith(`${target}:`));
+        const dead = new Set(expected.filter((seat) => pageObserved.some((o) => o.seat_id === seat && o.pane === 'dead')));
+        const missing = new Set(expected.filter((seat) => !pageObserved.some((o) => o.seat_id === seat)));
+        const faulted = expected.filter((seat) => dead.has(seat) || missing.has(seat));
+        if (faulted.length === 0) continue;
+        faultedPages += 1;
+        // Fault scope is the pane. A dead pane is one faulted PROCESS whose
+        // remain-on-exit corpse is the respawn target; a missing pane is one
+        // killed TERMINAL whose surviving siblings anchor an in-place repair.
+        // Either way the seat retires loudly and alone — siblings, which
+        // carry no fault, are never touched. Only a page with no tagged pane
+        // left has nothing to anchor a repair to; that class alone earns the
+        // border-total page rebuild, and by then there is nobody left on the
+        // page for the rebuild to sacrifice.
+        if (pageObserved.length === 0) {
+          const reset = await this.resetEstateScopeUnlocked(
+            { schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: target },
+            transportReceipt,
+            req.event,
+          );
+          if (reset.rotation_id !== null) rotation_ids.push(reset.rotation_id);
+          if (reset.accepted) reconstructed = true;
+          if (reset.ok) {
+            reset_seats.push(...reset.seats);
+          } else {
+            ok = false;
+            reason = reset.reason;
+          }
+          continue;
+        }
+        for (const seat of faulted) {
+          const reset = await this.resetEstateScopeUnlocked(
+            { schema_version: SCHEMA_VERSION, force: true, scope: 'pane', pane: seat },
+            transportReceipt,
+            req.event,
+          );
+          if (reset.rotation_id !== null) rotation_ids.push(reset.rotation_id);
+          if (reset.accepted) reconstructed = true;
+          if (reset.ok) {
+            reset_seats.push(seat);
+          } else {
+            // The durable request stays open; reconstruction recovery resumes
+            // it. One seat's physical failure never blocks a sibling's repair.
+            ok = false;
+            reason = reset.reason;
+          }
         }
       }
-      return { ok, event: req.event, page: req.page, reconstructed, reset_seats, rotation_ids, reason };
+      if (faultedPages === 0) {
+        return {
+          ok: true, event: req.event, page, reconstructed: false, reset_seats: [], rotation_ids: [],
+          reason: page === null ? 'estate_already_canonical' : 'page_already_canonical',
+        };
+      }
+      return { ok, event: req.event, page, reconstructed, reset_seats, rotation_ids, reason };
     });
     if (result.ok && result.reconstructed) await this.provisionPerpetualAgents();
     return result;
