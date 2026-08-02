@@ -8,6 +8,7 @@
 import {
   AGENT_SCHEMA_VERSION,
   AgentRetiredSchema,
+  UnregisteredClosedSchema,
   PLACEMENT_REFUSAL_REASONS,
   PlacementRefusedSchema,
   RegistrationAbortedSchema,
@@ -622,7 +623,7 @@ export class Daemon {
         return;
       }
       if (binding.registered) throw new Error('abort_of_registered_agent');
-      if (!(await this.executeClose(binding, transportReceipt))) {
+      if (!(await this.executeClose(binding, transportReceipt, false))) {
         throw new Error('abort_reap_failed');
       }
     });
@@ -1735,23 +1736,26 @@ export class Daemon {
   // bus refusal is reported loud and never un-closes the seat; a payload the
   // contract refuses (a non-registration launch identity) is skipped loud for
   // the same reason. Both are insurance gaps, not close failures.
-  private async publishRetirements(bindings: CurrentBinding[], cause: RetirementCause, retiredAt: string): Promise<void> {
+  //
+  // Retirement is a post-birth concept: a binding whose agent never registered
+  // dies by registration abort instead, and registrationd can only abort on
+  // evidence — the close-of-unregistered signal is that evidence. An abort-path
+  // close (registrationd already terminalized the birth) sets signalUnregistered
+  // false: there is no birth left to abort, so txd publishes nothing for it.
+  private async publishRetirements(
+    bindings: CurrentBinding[],
+    cause: RetirementCause,
+    retiredAt: string,
+    signalUnregistered = true,
+  ): Promise<void> {
     if (!this.physicalRegistration) return;
     for (const binding of bindings) {
       if (!binding.agent_id) continue;
       if (!binding.registered) {
-        // Retirement is a post-birth concept (the ratified authority split):
-        // a binding whose agent never registered dies by registration abort,
-        // and that single event carries the whole cleanup story. Publishing
-        // agent.retired here would smuggle a birth failure into the
-        // retirement stream consumers terminalize registered agents on.
-        console.log(JSON.stringify({
-          level: 'info',
-          event: 'agent_retired_suppressed_unregistered',
-          agent_id: binding.agent_id,
-          seat_id: binding.seat_id,
-          cause,
-        }));
+        // Publishing agent.retired here would smuggle a birth failure into the
+        // retirement stream consumers terminalize registered agents on; the
+        // unregistered close travels on its own signal instead.
+        if (signalUnregistered) await this.publishUnregisteredClose(binding, cause, retiredAt);
         continue;
       }
       const retirement = AgentRetiredSchema.safeParse({
@@ -1790,6 +1794,50 @@ export class Daemon {
     }
   }
 
+  // The close-of-unregistered signal (chapter-locks lock-leak ruling): txd is
+  // the only observer of a bound-but-unregistered seat's close, so it publishes
+  // the evidence registrationd aborts the birth on — the abort's terminal row
+  // is the chapter-lock release. A binding carrying no birth generation (the
+  // launch door) identifies no birth and closes silently. Publication failure
+  // is the same insurance gap as agent.retired: the store facts are committed,
+  // the close stands, the gap is reported loud.
+  private async publishUnregisteredClose(binding: CurrentBinding, cause: RetirementCause, closedAt: string): Promise<void> {
+    if (!this.physicalRegistration || !binding.birth_generation) return;
+    const signal = UnregisteredClosedSchema.safeParse({
+      schema_version: AGENT_SCHEMA_VERSION,
+      agent_id: binding.agent_id,
+      birth_generation: binding.birth_generation,
+      seat_id: binding.seat_id,
+      pane_generation: binding.pane_generation,
+      machine: this.physicalRegistration.machine,
+      cause,
+      closed_at: closedAt,
+    });
+    if (!signal.success) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'unregistered_closed_publish_skipped',
+        agent_id: binding.agent_id,
+        seat_id: binding.seat_id,
+        cause,
+        reason: signal.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+      }));
+      return;
+    }
+    try {
+      await this.physicalRegistration.publish('agent.unregistered_closed', signal.data);
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'unregistered_closed_publish_failed',
+        agent_id: binding.agent_id,
+        seat_id: binding.seat_id,
+        cause,
+        error: String(error),
+      }));
+    }
+  }
+
   // The generic close mechanism, shared by /agents/close and the reflexive auto-close.
   // Reap-first, attest-after: respawn-pane -k keeps the estate pane (bare shell)
   // so the seat survives and returns to the freelist. On a confirmed reap, ONE
@@ -1797,7 +1845,14 @@ export class Daemon {
   // the binding — the ledger PROJECTION follows, no separate ledger to leak).
   // Returns false (nothing written) if the process could not be reaped, so a
   // retire-with-live-process is unspellable. Caller holds the single-writer mutex.
-  private async executeClose(binding: CurrentBinding, transportReceipt: string | null): Promise<boolean> {
+  private async executeClose(
+    binding: CurrentBinding,
+    transportReceipt: string | null,
+    // False only on the abort-path close: registrationd already terminalized
+    // the birth, so there is nothing left for a close-of-unregistered signal
+    // to abort.
+    signalUnregistered = true,
+  ): Promise<boolean> {
     const reaped = await this.tmux.reapSeat(binding.seat_id, binding.tint);
     if (!reaped) return false;
     const occurred_at = this.now();
@@ -1809,7 +1864,7 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     await this.store.appendAll(inputs);
-    await this.publishRetirements([binding], 'close', occurred_at);
+    await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
     const perpetualEngine = this.physicalRegistration?.perpetual[binding.seat_id];
     if (perpetualEngine && !(await this.tmux.startSeatEngine({
       seatId: binding.seat_id,
