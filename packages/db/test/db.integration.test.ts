@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import type { SQL } from "bun";
 import { connectDb } from "../src/client.ts";
 import { DbEndpoint, type DbEndpointT } from "../src/config.ts";
@@ -96,6 +97,26 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
       application_name: "terminus-db-integration",
     });
     await expect(connectDb(dead)).rejects.toThrow(/connect failed/);
+  });
+
+  test("tool hook purge removes only the two per-tool event types", async () => {
+    await sql`
+      INSERT INTO bus.events (event_type, source, payload, provenance, occurred_at, recorded_at)
+      VALUES
+        ('hook.pre_tool_use', 'test', '{}', '{}', '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z'),
+        ('hook.post_tool_use', 'test', '{}', '{}', '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z'),
+        ('hook.post_tool_use_failure', 'test', '{}', '{}', '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z'),
+        ('hook.stop', 'test', '{}', '{}', '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z')`;
+
+    const migration = await readFile(join(MIGRATIONS_DIR, "0014_bus_tool_hook_event_purge.sql"), "utf8");
+    await sql.unsafe(migration);
+
+    const rows = (await sql`
+      SELECT event_type FROM bus.events ORDER BY event_type`) as Array<{ event_type: string }>;
+    expect(rows.map((row) => row.event_type)).toEqual([
+      "hook.post_tool_use_failure",
+      "hook.stop",
+    ]);
   });
 });
 

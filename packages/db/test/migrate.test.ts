@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 import { planMigrations } from "../src/migrate.ts";
 import { DbHealthReport } from "../src/health.ts";
 
 describe("migration planning (pure, forward-only)", () => {
+  test("the per-tool bus event purge is a forward-only migration", async () => {
+    const files = await readdir(join(import.meta.dir, "..", "migrations"));
+    expect(files).toContain("0014_bus_tool_hook_event_purge.sql");
+  });
   test("orders numerically and returns only pending migrations", () => {
     const pending = planMigrations(
       ["0003_third.sql", "0001_schema_migrations.sql", "0002_second.sql"],
