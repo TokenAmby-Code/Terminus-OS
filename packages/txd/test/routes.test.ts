@@ -45,7 +45,7 @@ test('the bus door serves hook.stop deliveries with the ruled stop behavior', as
     expect(await res.json()).toMatchObject({
       ok: true,
       consumed: true,
-      receipt: { ok: true, recorded: true, activity: 'stopped' },
+      receipt: { ok: true, recorded: true, turn: 'awaiting_input' },
     });
   } finally {
     srv.stop(true);

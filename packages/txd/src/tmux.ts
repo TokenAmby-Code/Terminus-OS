@@ -126,6 +126,17 @@ export interface TmuxControlPlane {
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
+  /**
+   * Observe whether an engine process for `agentId` is running under this
+   * seat's pane, RIGHT NOW. The turn fold cannot answer this — nothing in it
+   * watches a process — so a destructive act asks the operating system instead.
+   *
+   * Tri-state on purpose. On an ssh seat the pane's child is the TUNNEL and the
+   * engine runs on the far side, where this machine cannot see it; answering
+   * `dead` there would reap healthy remote agents, which is the very defect
+   * this guard exists to remove. An unobservable seat says so.
+   */
+  agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness>;
   /** Apply one semantic plan-mode intent with engine-specific input and screen read-back. */
   transitionAgentMode(
     seatId: string,
@@ -187,6 +198,51 @@ async function processWitness(pid: number): Promise<ProcessWitness | null> {
     const start_ticks = fields[19];
     if (!Number.isInteger(parent_pid) || parent_pid < 0 || !start_ticks) return null;
     return { pid, parent_pid, start_ticks };
+  } catch {
+    return null;
+  }
+}
+
+const ENGINE_COMMANDS = new Set(['claude', 'codex']);
+
+/**
+ * What this machine can honestly say about an agent's engine.
+ *
+ * `unobservable` is not a failure to try — it is the correct answer for a seat
+ * whose engine runs somewhere this process cannot look. A caller about to do
+ * something irreversible must treat it as "do not proceed", never as "dead".
+ */
+export type AgentLiveness = 'alive' | 'dead' | 'unobservable';
+
+/** One variable from a process's own environment block. */
+async function processEnv(pid: number, name: string): Promise<string | null> {
+  try {
+    const raw = await readFile(`/proc/${pid}/environ`, 'utf8');
+    for (const entry of raw.split('\0')) {
+      const split = entry.indexOf('=');
+      if (split > 0 && entry.slice(0, split) === name) return entry.slice(split + 1);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+const processAgentId = (pid: number): Promise<string | null> => processEnv(pid, AGENT_ID_ENV);
+
+/** A process's direct children, from the kernel's own view of the tree. */
+async function processChildren(pid: number): Promise<number[]> {
+  try {
+    const raw = await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8');
+    return raw.trim().split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger);
+  } catch {
+    return [];
+  }
+}
+
+async function processCommand(pid: number): Promise<string | null> {
+  try {
+    return (await readFile(`/proc/${pid}/comm`, 'utf8')).trim();
   } catch {
     return null;
   }
@@ -487,6 +543,69 @@ export class RealTmux implements TmuxControlPlane {
   async killServer(): Promise<boolean> {
     return (await this.command('rotate_estate', 'estate', ['kill-server'])).code === 0;
   }
+
+  /**
+   * One observation, taken at the moment it is needed: is an engine for this
+   * agent running under this seat's pane?
+   *
+   * This is not a poll. A poll asks repeatedly because an event it should have
+   * received never arrives. This asks once, immediately before an irreversible
+   * act, because the recorded turn fold is inference about the PAST and a close
+   * needs the PRESENT. `awaiting_input` is the normal resting state of a healthy
+   * agent, so gating a close on the fold alone reaps live workers.
+   *
+   * Both halves must hold: an engine command, and that engine's own AGENT_ID
+   * matching. A pane running a bare shell is not the agent, and an engine
+   * carrying a different identity is a different agent in a reused seat.
+   */
+  async agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness> {
+    if (!agentId) return 'unobservable';
+    const observed = await this.command('observe_pane_pid', seatId, [
+      'list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_pid}`,
+    ]);
+    // Only tmux's own answer can establish absence. If we cannot ask, we do
+    // not know — and not knowing must never license a close.
+    if (observed.code !== 0) return 'unobservable';
+    const panePid = observed.stdout.split('\n').flatMap((line) => {
+      const [canonical, rawPid] = line.split('\t');
+      return canonical === seatId && rawPid ? [Number(rawPid)] : [];
+    })[0];
+    // The seat has no pane at all. That is a POSITIVE observation of absence:
+    // there is nothing left to be running, so the agent is dead.
+    if (panePid === undefined) return 'dead';
+    if (!Number.isInteger(panePid)) return 'unobservable';
+
+    // Walk the pane's descendants. The wrapper BACKGROUNDS the engine rather
+    // than exec-ing it, so a fixed depth would be a guess; following the tree
+    // is not.
+    let frontier = [panePid];
+    const visited = new Set<number>(frontier);
+    while (frontier.length > 0) {
+      for (const pid of frontier) {
+        const command = await processCommand(pid);
+        if (command && ENGINE_COMMANDS.has(command) && await processAgentId(pid) === agentId) return 'alive';
+      }
+      const children = await Promise.all(frontier.map((pid) => processChildren(pid)));
+      frontier = children.flat().filter((pid) => !visited.has(pid) && visited.add(pid));
+    }
+
+    // The pane EXISTS but no matching local engine was found. That is not
+    // evidence of death, and it is reached by several very different worlds:
+    //
+    //   - an ssh seat, whose wrapper runs the engine in a REMOTE tmux envelope,
+    //     so the local descendants are a tunnel by construction (council:
+    //     orchestrator carries no TXD_SSH_TARGET at all, so no marker can be
+    //     trusted to identify these);
+    //   - an unreadable /proc entry, a permissions refusal, or a tmux hiccup;
+    //   - an engine whose comm is renamed, added, or truncated by /proc's
+    //     15-character limit, which ENGINE_COMMANDS would not recognise;
+    //   - an agent mid-launch whose engine has not exec'd yet.
+    //
+    // Every one of those is a live-or-unknown agent, and answering 'dead'
+    // reaps it. Absence of proof is not proof of absence: this says so.
+    return 'unobservable';
+  }
+
 
   /** Resolve canonical id -> internal %id (membrane; return value stays inside). */
   private async resolvePane(seatId: string): Promise<string | null> {
@@ -1716,5 +1835,35 @@ export class FakeTmux implements TmuxControlPlane {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' };
+  }
+
+  /**
+   * Test control: which agents this fake observes as running. A seat absent
+   * from the map has no live engine, so the default is DEAD — a test must say
+   * an agent is alive, exactly as the real probe demands evidence.
+   */
+  liveAgents = new Map<string, string>();
+  unobservableSeats = new Set<string>();
+  /** Test control: this agent's engine is observably running. */
+  markAgentAlive(seatId: string, agentId: string): void {
+    this.liveAgents.set(seatId, agentId);
+  }
+  /**
+   * Test control: this seat cannot be observed from here — an ssh transport
+   * whose engine runs in a remote envelope, an unreadable /proc entry, an
+   * unrecognised engine comm, or an agent mid-launch. The real probe reaches
+   * this verdict on its own; the fake needs it stated because it models no
+   * process tree.
+   */
+  markSeatUnobservable(seatId: string): void {
+    this.unobservableSeats.add(seatId);
+  }
+  async agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness> {
+    if (!agentId) return 'unobservable';
+    if (this.liveAgents.get(seatId) === agentId) return 'alive';
+    if (this.unobservableSeats.has(seatId)) return 'unobservable';
+    // Default DEAD on purpose: a test must ASSERT liveness to get protection,
+    // so a guard regression shows up as a reaped fake rather than a quiet pass.
+    return 'dead';
   }
 }

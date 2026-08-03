@@ -14,8 +14,8 @@ test('bare seat create → freelist entry, unbound, live', async () => {
   const p = buildProjections(await s.readAll());
   expect(p.freelist).toEqual([{ seat_id: 'somnium:NE', pane_state: 'live' }]);
   expect(p.currentBindings).toEqual([]);
-  const row = p.activityBoard[0]!;
-  expect(row).toMatchObject({ seat_id: 'somnium:NE', entity_type: 'seat', pane: 'live', binding: 'unbound', activity: 'idle' });
+  const row = p.seatBoard[0]!;
+  expect(row).toMatchObject({ seat_id: 'somnium:NE', entity_type: 'seat', pane: 'live', binding: 'unbound', turn: 'unobserved' });
   await s.close();
 });
 
@@ -25,10 +25,10 @@ test('activity axis folds prompt/stop/retire independently of pane & binding', a
   await s.append(e({ entity_id: 'seatA', event_type: 'reg.bound', payload: { agent_id: 'iA', persona: 'p', tint: '#1' } }));
   await s.append(e({ entity_type: 'agent', entity_id: 'iA', event_type: 'act.prompt_submitted', payload: {} }));
   let p = buildProjections(await s.readAll());
-  expect(p.activityBoard[0]!.activity).toBe('working');
+  expect(p.seatBoard[0]!.turn).toBe('working');
   await s.append(e({ entity_type: 'agent', entity_id: 'iA', event_type: 'act.stop_reported', payload: {} }));
   p = buildProjections(await s.readAll());
-  expect(p.activityBoard[0]!.activity).toBe('stopped');
+  expect(p.seatBoard[0]!.turn).toBe('awaiting_input');
   await s.close();
 });
 

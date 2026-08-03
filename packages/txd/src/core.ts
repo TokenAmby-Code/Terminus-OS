@@ -14,7 +14,7 @@ import {
   RegistrationAbortedSchema,
   SCHEMA_VERSION,
   type RegistrationAborted,
-  type ActivityBoardRow,
+  type SeatBoardRow,
   CLOSE_REQUIRED_RANK,
   type CloseRequest,
   type CloseResponse,
@@ -244,7 +244,7 @@ export class Daemon {
       const pendingResetSeats = this.pendingScopedResetSeats(events);
       const projections = buildProjections(events);
       const bound = new Set(projections.currentBindings.map((binding) => binding.seat_id));
-      const paneBySeat = new Map(projections.activityBoard.map((row) => [row.seat_id, row.pane]));
+      const paneBySeat = new Map(projections.seatBoard.map((row) => [row.seat_id, row.pane]));
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
       // One candidate's seat-level truth, first disqualifier in a fixed order.
       const disqualify = (candidate: string): Exclude<SeatDisqualifier, 'foreign_process'> | null => {
@@ -1291,7 +1291,7 @@ export class Daemon {
           reason: `agent_already_bound: identity already has a current seat binding`,
         };
       }
-      if (proj.activityByAgent.get(req.identity!) === 'retired') {
+      if (proj.turnByAgent.get(req.identity!) === 'retired') {
         return {
           ok: false,
           seat_id: req.seat_id,
@@ -1383,7 +1383,7 @@ export class Daemon {
   // ensure. Runs under the single-writer mutex so it can't interleave with a
   // concurrent launch or comm. Idempotent: a re-run over a fully-present-and-attested
   // estate creates nothing and appends zero events. Each fresh seat records ONE
-  // bare `reg.pane_created` (unbound) — it lands in freelist + activity_board and
+  // bare `reg.pane_created` (unbound) — it lands in freelist + seat_board and
   // triggers NO contradiction (reconcile only flags bound-dead / retired-live).
   //
   // Buckets: `created` = canonical pane made + event written this run;
@@ -1629,8 +1629,24 @@ export class Daemon {
       }
 
       const proj = await this.projections();
-      const activityOf = (agentId: string | null): string =>
-        (agentId ? proj.activityByAgent.get(agentId) ?? 'idle' : 'idle');
+      const turnOf = (agentId: string | null): string =>
+        (agentId ? proj.turnByAgent.get(agentId) ?? 'unobserved' : 'unobserved');
+      // Close is irreversible, so it asks the operating system rather than the
+      // turn fold. `awaiting_input` is the resting state of every healthy agent
+      // between turns, and a message parked in a composer never produces
+      // act.prompt_submitted at all — so an agent commed back into work still
+      // reads `awaiting_input` while it works. Selecting on the fold alone reaps
+      // live workers, which is what killed two of them.
+      // Only a positively OBSERVED-DEAD agent may be closed. 'alive' refuses
+      // for the obvious reason; 'unobservable' refuses because converting a
+      // thing we cannot see into a destructive verdict is precisely the defect
+      // being removed. An ssh seat's pane child is the TUNNEL — the engine runs
+      // on the far side, where this machine cannot look — so reading that as
+      // dead would reap healthy remote agents.
+      const closable = async (binding: { seat_id: string; agent_id: string | null }) => {
+        const liveness = await this.tmux.agentLiveness(binding.seat_id, binding.agent_id ?? '');
+        return { liveness, may: liveness === 'dead' };
+      };
 
       // Closing is an overseer capability. The caller identity discipline is
       // comm's (source_agent_id must be a registered binding); the rank gate
@@ -1685,15 +1701,19 @@ export class Daemon {
             });
             continue;
           }
-          if (activityOf(binding.agent_id) === 'working' && !req.force) {
-            // Graceful by default: a mid-turn close destroys work and strands
-            // attestations. Idle-ness is the recorded activity fold, never a probe.
+          const observed = req.force ? null : await closable(binding);
+          if (observed && !observed.may) {
+            // Graceful by default: a live engine is working even when the turn
+            // fold says otherwise, and a mid-turn close destroys work and
+            // strands attestations.
             verdicts.push({
               target,
               seat_id: binding.seat_id,
               agent_id: binding.agent_id,
               closed: false,
-              reason: 'mid_turn: recorded activity is working; pass --force to close a hung agent',
+              reason: observed.liveness === 'alive'
+                ? `live_engine: an engine for this agent is running under ${binding.seat_id} (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close a hung agent`
+                : `liveness_unobservable: txd cannot observe an engine for this agent at ${binding.seat_id} and cannot prove it dead — the seat may run its engine beyond this machine, or the observation itself failed (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close it anyway`,
             });
             continue;
           }
@@ -1705,13 +1725,16 @@ export class Daemon {
         // registered agents only — never an overseer, never the Emperor's seat,
         // never a mid-birth (unregistered) binding, whose death is registration
         // abort's story.
-        const selected = proj.currentBindings.filter((b) => {
+        const candidates = proj.currentBindings.filter((b) => {
           if (!b.agent_id || !b.registered) return false;
           if (b.rank === CLOSE_REQUIRED_RANK || b.seat_id === EMPEROR_SEAT) return false;
-          const activity = activityOf(b.agent_id);
-          if (activity !== 'idle' && activity !== 'stopped') return false;
+          if (turnOf(b.agent_id) === 'working') return false;
           return !req.page || b.seat_id.split(':', 1)[0] === req.page;
         });
+        // The fold narrows the candidates; the probe decides. A filtered close
+        // names no seat, so it carries no authorization to end a live agent.
+        const observed = await Promise.all(candidates.map((b) => closable(b)));
+        const selected = candidates.filter((_, index) => observed[index]!.may);
         if (selected.length === 0) return refused('no_targets: selector matched no closable agent');
         for (const binding of selected) await closeOne(binding.agent_id!, binding);
       }
@@ -1884,7 +1907,7 @@ export class Daemon {
   // an id that never walked through /agents/launch. The ghost is refused at
   // admission, so nothing is recorded. The stop-hook is a REAL but UNTRUSTED
   // witness; what other services do with a stop is their correlation, consumed
-  // from the bus — txd only folds the activity axis.
+  // from the bus — txd only folds the turn axis.
   stop(req: StopRequest, transportReceipt: string | null = null): Promise<StopReceipt | StopRefusal> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {
@@ -1897,23 +1920,23 @@ export class Daemon {
         return this.refuseStop('no_such_agent', req.agent_id);
       }
 
-      const activity = proj.activityByAgent.get(req.agent_id) ?? null;
+      const turn = proj.turnByAgent.get(req.agent_id) ?? null;
       const stillBound = proj.currentBindings.some((b) => b.agent_id === req.agent_id);
       // Dedupe: already stopped/retired, or already closed (no longer bound) →
       // idempotent, but RECORDED as receipt_deduped (never a blind swallow).
-      if (activity === 'stopped' || activity === 'retired' || !stillBound) {
+      if (turn === 'awaiting_input' || turn === 'retired' || !stillBound) {
         await this.store.append({
           entity_type: 'agent',
           entity_id: req.agent_id,
           event_type: 'act.receipt_deduped',
-          payload: { of: 'stop_reported', reason: activity ?? 'unbound' },
+          payload: { of: 'stop_reported', reason: turn ?? 'unbound' },
           provenance: this.prov('observer', transportReceipt),
           occurred_at: this.now(),
         });
-        return { ok: true, agent_id: req.agent_id, recorded: false, deduped: true, activity };
+        return { ok: true, agent_id: req.agent_id, recorded: false, deduped: true, turn };
       }
 
-      // Fresh stop for a live, bound agent → record it (activity → stopped).
+      // Fresh stop for a live, bound agent → record it (turn → awaiting_input).
       await this.store.append({
         entity_type: 'agent',
         entity_id: req.agent_id,
@@ -1923,7 +1946,7 @@ export class Daemon {
         occurred_at: this.now(),
       });
 
-      return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, activity: 'stopped' };
+      return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, turn: 'awaiting_input' };
     });
   }
 
@@ -2037,7 +2060,7 @@ export class Daemon {
       //
       // The fold itself stays a pure replay projection: reconciling it against
       // observed reality is this pass's job, not buildProjections'.
-      for (const row of proj.activityBoard) {
+      for (const row of proj.seatBoard) {
         if (row.seat_id === null || row.binding === 'bound') continue;
         if (observedPane.has(row.seat_id)) continue;
         await flag(
@@ -2049,10 +2072,10 @@ export class Daemon {
       }
 
       // Retired agent whose pane is still live (retire-with-live-process).
-      for (const row of proj.activityBoard) {
+      for (const row of proj.seatBoard) {
         if (row.seat_id === null) continue; // board row without a seat can't be a seat-liveness contradiction
-        if (row.activity === 'retired' && observedPane.get(row.seat_id) === 'live') {
-          await flag(row.seat_id, 'retired_pane_live', 'process_reaped', `activity=retired but tmux pane is live`);
+        if (row.turn === 'retired' && observedPane.get(row.seat_id) === 'live') {
+          await flag(row.seat_id, 'retired_pane_live', 'process_reaped', `turn=retired but tmux pane is live`);
         }
       }
 
@@ -2066,7 +2089,7 @@ export class Daemon {
         replay_ms,
         bindings: proj.currentBindings.length,
         freelist: proj.freelist.length,
-        agents: proj.activityBoard.length,
+        agents: proj.seatBoard.length,
         new_contradictions: newContradictions,
         open_contradictions: openContradictions,
         p0,
@@ -2081,8 +2104,8 @@ export class Daemon {
   // public read surface. Per-entity event history is NOT served publicly:
   // the stream stays private replay/reconcile truth (biography serving is not
   // txd's job).
-  async estateRows(): Promise<ActivityBoardRow[]> {
-    return (await this.projections()).activityBoard;
+  async estateRows(): Promise<SeatBoardRow[]> {
+    return (await this.projections()).seatBoard;
   }
 
   async tintReadiness(): Promise<TintReadiness[]> {
