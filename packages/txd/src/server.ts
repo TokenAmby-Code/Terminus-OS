@@ -99,7 +99,7 @@ const PHYSICAL_REFUSALS = new Set([
 // coalesced submission instead of stopping at character zero.
 //
 // Matching only the first frame cost real deliveries: on 2026-08-03, fourteen
-// comms across nine stamped workers arrived in a coalesced flush, were read by
+// comms across eight stamped workers arrived in a coalesced flush, were read by
 // their target, and were recorded by txd as never delivered.
 const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?$/gm;
 

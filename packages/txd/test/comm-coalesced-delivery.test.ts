@@ -3,11 +3,11 @@
 //
 // The shapes below are production payloads. On 2026-08-03, `hook.user_prompt_submit`
 // events carrying two, three, and four comm frames were recorded on the bus:
-// nine stamped workers — white-scars, death-guard, thousand-sons, alpha-legion,
-// dark-angels, space-wolves, sons-of-horus, emperors-children, and a repeat —
-// each received a real `reg.comm_accepted` message inside a flush, read it, and
-// had it recorded by txd as never delivered, because the parser stopped at the
-// frame that happened to be first.
+// eight stamped workers — white-scars, death-guard, thousand-sons, alpha-legion,
+// dark-angels, space-wolves, sons-of-horus, and emperors-children seven times
+// over — each received a real `reg.comm_accepted` message inside a flush, read
+// it, and had it recorded by txd as never delivered, because the parser stopped
+// at the frame that happened to be first.
 //
 // The message bodies were intact in every one of those prompts. Nothing was
 // lost in transport; the ATTESTATION was lost, which is the defect that makes
