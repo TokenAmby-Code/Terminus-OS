@@ -656,11 +656,33 @@ export const CommAcceptedSchema = z.object({
 });
 export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
 
+// One prompt submission can carry MANY comm frames. A composer that is mid-turn
+// queues every comm it receives and flushes them together when the turn ends, so
+// the engine reports one `user_prompt_submit` holding two, three, or four whole
+// messages. Each of them was delivered; each of them needs its own fact.
 export const CommHookSchema = z.object({
-  schema_version: z.number().int(), agent_id: z.string().min(1), message_id: z.string().min(1).optional(),
+  schema_version: z.number().int(), agent_id: z.string().min(1),
+  message_ids: z.array(z.string().min(1)).default([]),
   content: z.string().optional(), stop_event_id: z.string().min(1).optional(),
 });
 export type CommHook = z.infer<typeof CommHookSchema>;
+
+// Phase two of the two-phase comm contract, read back on demand. Phase one is
+// the quick release `CommAccepted` above; this is the delivery that follows it,
+// derived from `act.comm_delivery_asserted` and nothing else. Absence of a
+// delivery here is silence, never a verdict: a target whose turn has not ended
+// has not refused the message, and observed latency to this fact ranges from
+// 64ms to nearly ten hours.
+export const CommDeliverySchema = z.object({
+  target: CommTargetSchema, delivered: z.boolean(),
+  asserted_at: z.string().nullable(), assertion_event_id: z.number().int().nullable(),
+});
+export type CommDelivery = z.infer<typeof CommDeliverySchema>;
+export const CommDeliveryReadResponseSchema = z.object({
+  schema_version: z.number().int(), message_id: z.string(), source_agent_id: z.string(),
+  accepted_at: z.string(), deliveries: z.array(CommDeliverySchema), complete: z.boolean(),
+});
+export type CommDeliveryReadResponse = z.infer<typeof CommDeliveryReadResponseSchema>;
 
 export const CommWaitRequestSchema = z.object({
   schema_version: z.number().int(), ask_id: CanonicalIdSchema, subscriber_agent_id: CanonicalIdSchema,

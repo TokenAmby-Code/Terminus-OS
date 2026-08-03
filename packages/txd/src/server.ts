@@ -93,7 +93,22 @@ const PHYSICAL_REFUSALS = new Set([
   'abort_reap_failed',
 ]);
 
-const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?\n/;
+// Every comm frame the flush carried, not just the one that happened to land
+// first. A frame always begins its own line, so the line anchor still refuses
+// an id quoted mid-sentence; `m` lets it find the second and third frame of a
+// coalesced submission instead of stopping at character zero.
+//
+// Matching only the first frame cost real deliveries: on 2026-08-03, fourteen
+// comms across eight stamped workers arrived in a coalesced flush, were read by
+// their target, and were recorded by txd as never delivered.
+const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?$/gm;
+
+export function commFrameMessageIds(prompt: string | undefined): string[] {
+  if (!prompt) return [];
+  const seen = new Set<string>();
+  for (const match of prompt.matchAll(TX_COMM_FRAME)) seen.add(match[1]!);
+  return [...seen];
+}
 
 function stringField(payload: Record<string, unknown>, field: string): string | undefined {
   const value = payload[field];
@@ -114,7 +129,7 @@ function promptHookInput(payload: Record<string, unknown>): unknown {
   return {
     agent_id: payload.agent_id,
     schema_version: payload.schema_version ?? SCHEMA_VERSION,
-    message_id: stringField(payload, 'message_id') ?? prompt?.match(TX_COMM_FRAME)?.[1],
+    message_ids: commFrameMessageIds(prompt),
     content: stringField(payload, 'content'),
     stop_event_id: stringField(payload, 'stop_event_id'),
   };
@@ -130,6 +145,16 @@ function json(body: unknown, status = 200): Response {
 
 function exact(path: string) {
   return (pathname: string) => (pathname === path ? {} : null);
+}
+
+// One trailing path segment, captured as `message_id`. A comm id is a uuid, so
+// a segment carrying a slash is not one and does not match.
+function prefix(base: string) {
+  return (pathname: string) => {
+    if (!pathname.startsWith(base)) return null;
+    const message_id = pathname.slice(base.length);
+    return message_id.length > 0 && !message_id.includes('/') ? { message_id } : null;
+  };
 }
 
 async function readJson(req: Request): Promise<unknown> {
@@ -510,6 +535,22 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           tints: await daemon.tintReadiness(),
         };
         return json(body);
+      },
+    },
+    {
+      // Phase two, on demand. The quick release already handed the caller a
+      // message_id; this is where that handle is redeemed for the delivery
+      // fact, without anything blocking on an event that may be hours away.
+      method: 'GET',
+      match: prefix('/tmux/read/comm/'),
+      label: 'GET /tmux/read/comm/:message_id',
+      handler: async (_req, params) => {
+        try {
+          return json(await daemon.commDelivery(params.message_id!));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return json({ ok: false, error: 'comm_delivery_unreadable', detail }, 404);
+        }
       },
     },
     {
