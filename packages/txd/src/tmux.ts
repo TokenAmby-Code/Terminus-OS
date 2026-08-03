@@ -33,10 +33,11 @@ export type SeatEngineLaunch = {
   engine: 'claude' | 'codex';
   wrapper: string;
   // Identity rides launch composition, never the birth reply: registrationd
-  // mints AGENT_ID at dispatch and txd sets it on the pane environment.
-  // Absent for a perpetual relaunch — no dispatch minted an identity, so
-  // registrationd mints one at prepare instead.
-  agentId?: string;
+  // mints AGENT_ID at dispatch and txd sets it on the pane environment. Every
+  // launch is a dispatch, perpetual seats included, so every launch has one —
+  // there is no way to start an engine in this estate without saying who it
+  // is.
+  agentId: string;
   // Per-launch correlation minted by txd; the wrapper echoes it in
   // wrapper_start and, on an ssh seat, names the remote envelope with it.
   launchNonce: string;
@@ -1218,7 +1219,7 @@ export class RealTmux implements TmuxControlPlane {
     if (!paneId) return false;
     const environment = [
       `${PANE_ID_ENV}=${this.shellQuote(launch.seatId)}`,
-      ...(launch.agentId ? [`${AGENT_ID_ENV}=${this.shellQuote(launch.agentId)}`] : []),
+      `${AGENT_ID_ENV}=${this.shellQuote(launch.agentId)}`,
       `${LAUNCH_NONCE_ENV}=${this.shellQuote(launch.launchNonce)}`,
       ...(launch.sshTarget ? [`${SSH_TARGET_ENV}=${this.shellQuote(launch.sshTarget)}`] : []),
     ].join(' ');

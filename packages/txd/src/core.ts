@@ -31,6 +31,7 @@ import {
   type CommWaitResponse,
   type CurrentBinding,
   DispatchAttestedSchema,
+  PerpetualSeatVacantSchema,
   DispatchRefusedSchema,
   type DispatchRefused,
   type DispatchRequested,
@@ -1606,7 +1607,7 @@ export class Daemon {
 
       return { created, existing, backfilled, failed };
     });
-    await this.provisionPerpetualAgents();
+    await this.announceVacantPerpetualSeats();
     return result;
   }
 
@@ -1886,17 +1887,18 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     await this.store.appendAll(inputs);
     await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
+    // The seat is now cleared, and if it is one the estate keeps staffed the
+    // vacancy is announced rather than filled: registrationd mints the next
+    // agent's identity and dispatches it back here. Staffing the seat from
+    // this line is what produced panes with no AGENT_ID in them — an agent
+    // that cannot say who it is to any surface that asks.
     const perpetualEngine = this.physicalRegistration?.perpetual[binding.seat_id];
-    if (perpetualEngine && !(await this.tmux.startSeatEngine({
-      seatId: binding.seat_id,
-      engine: perpetualEngine,
-      wrapper: this.physicalRegistration!.agentWrapper,
-      launchNonce: crypto.randomUUID(),
-    }))) {
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'perpetual_relaunch_failed',
+    if (perpetualEngine) {
+      await this.physicalRegistration!.publish('agent.perpetual_seat_vacant', PerpetualSeatVacantSchema.parse({
+        schema_version: AGENT_SCHEMA_VERSION,
+        machine: this.physicalRegistration!.machine,
         seat_id: binding.seat_id,
+        engine: perpetualEngine,
       }));
     }
     return true;
@@ -2096,7 +2098,7 @@ export class Daemon {
         p0,
       };
     });
-    if (councilRebuilt) await this.provisionPerpetualAgents();
+    if (councilRebuilt) await this.announceVacantPerpetualSeats();
     return response;
   }
 
@@ -2140,9 +2142,19 @@ export class Daemon {
     return rows;
   }
 
-  async provisionPerpetualAgents(): Promise<void> {
+  /**
+   * Announce every perpetual seat the estate is currently not staffing. txd
+   * owns where an agent sits and can see that a declared seat is empty; it
+   * does not own who arrives to fill it, so it says the seat is vacant and
+   * registrationd answers with a dispatch. This sweep is also the
+   * reconciliation for a vacancy nobody acted on: an announcement lost to a
+   * crash is re-announced the next time txd starts.
+   */
+  async announceVacantPerpetualSeats(): Promise<void> {
     if (!this.physicalRegistration) return;
     return this.locked(async () => {
+      const publish = this.physicalRegistration!.publish;
+      const machine = this.physicalRegistration!.machine;
       const projections = await this.projections();
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
       for (const [seatId, engine] of Object.entries(this.physicalRegistration!.perpetual)) {
@@ -2152,12 +2164,12 @@ export class Daemon {
         if (projections.currentBindings.some((binding) => binding.seat_id === seatId)) continue;
         const workload = workloads.get(seatId);
         if (workload && !workload.idle) continue;
-        if (!(await this.tmux.startSeatEngine({
-          seatId,
+        await publish('agent.perpetual_seat_vacant', PerpetualSeatVacantSchema.parse({
+          schema_version: AGENT_SCHEMA_VERSION,
+          machine,
+          seat_id: seatId,
           engine,
-          wrapper: this.physicalRegistration!.agentWrapper,
-          launchNonce: crypto.randomUUID(),
-        }))) throw new Error(`perpetual launch failed: ${seatId}`);
+        }));
       }
     });
   }
@@ -2204,7 +2216,7 @@ export class Daemon {
    */
   async resetEstateScope(req: EstateRotateRequest, transportReceipt: string | null = null): Promise<EstateRotateResponse> {
     const result = await this.locked(() => this.resetEstateScopeUnlocked(req, transportReceipt));
-    if (result.ok) await this.provisionPerpetualAgents();
+    if (result.ok) await this.announceVacantPerpetualSeats();
     return result;
   }
 
@@ -2371,7 +2383,7 @@ export class Daemon {
       }
       return { ok, event: req.event, page, reconstructed, reset_seats, rotation_ids, reason };
     });
-    if (result.ok && result.reconstructed) await this.provisionPerpetualAgents();
+    if (result.ok && result.reconstructed) await this.announceVacantPerpetualSeats();
     return result;
   }
 
