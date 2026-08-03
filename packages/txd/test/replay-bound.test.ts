@@ -28,7 +28,7 @@ test('full projection rebuild is < 1s at 10k events', async () => {
   const ms = performance.now() - t0;
 
   expect(proj.currentBindings.length).toBe(2500);
-  expect(proj.activityBoard.length).toBe(2500);
+  expect(proj.seatBoard.length).toBe(2500);
   expect(ms).toBeLessThan(1000);
   await store.close();
 });

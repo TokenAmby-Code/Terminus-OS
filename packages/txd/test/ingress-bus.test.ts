@@ -266,7 +266,7 @@ test('a delivered hook.stop is consumed via the SAME ruled stop path, provenance
       seq: 41,
       consumed: true,
       reason: null,
-      receipt: { ok: true, agent_id: 'i1', recorded: true, deduped: false, activity: 'stopped' },
+      receipt: { ok: true, agent_id: 'i1', recorded: true, deduped: false, turn: 'awaiting_input' },
     });
     const stops = (await store.readAll()).filter((e) => e.event_type === 'act.stop_reported');
     expect(stops).toHaveLength(1);

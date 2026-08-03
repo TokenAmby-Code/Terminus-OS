@@ -195,9 +195,18 @@ export const BINDING_STATES = ['unbound', 'bound'] as const;
 export type BindingState = (typeof BINDING_STATES)[number];
 export const BindingStateSchema = z.enum(BINDING_STATES);
 
-export const ACTIVITY_STATES = ['working', 'idle', 'stopped', 'retired'] as const;
-export type ActivityState = (typeof ACTIVITY_STATES)[number];
-export const ActivityStateSchema = z.enum(ACTIVITY_STATES);
+// The TURN axis, folded from act.prompt_submitted / act.stop_reported /
+// reg.retired. Nothing in that fold observes a process, so it is not positioned
+// to answer whether an agent is ALIVE and must never be read as if it were.
+//   working        — mid-turn
+//   awaiting_input — finished a turn; the normal resting state of a healthy agent
+//   unobserved     — no turn fact has ever been recorded for this agent
+//   retired        — terminal
+// The former names `stopped` and `idle` both meant roughly the opposite of what
+// they said, and tx close consumed them as permission to close.
+export const TURN_STATES = ['working', 'awaiting_input', 'unobserved', 'retired'] as const;
+export type TurnState = (typeof TURN_STATES)[number];
+export const TurnStateSchema = z.enum(TURN_STATES);
 
 // ── Provenance (spec §2) — three real emitters, hooks REAL but UNTRUSTED ──────
 export const PROVENANCE_SOURCES = ['hook', 'wrapper', 'observer'] as const;
@@ -258,19 +267,19 @@ export const FreelistEntrySchema = z.object({
 });
 export type FreelistEntry = z.infer<typeof FreelistEntrySchema>;
 
-export const ActivityBoardRowSchema = z.object({
+export const SeatBoardRowSchema = z.object({
   entity_id: z.string(),
   entity_type: EntityTypeSchema,
   seat_id: z.string().nullable(),
   pane: PaneStateSchema,
   binding: BindingStateSchema,
-  activity: ActivityStateSchema,
+  turn: TurnStateSchema,
   persona: z.string().nullable(),
   rank: z.string().nullable(),
   commander: z.string().nullable(),
   tint: z.string().nullable(),
 });
-export type ActivityBoardRow = z.infer<typeof ActivityBoardRowSchema>;
+export type SeatBoardRow = z.infer<typeof SeatBoardRowSchema>;
 
 // "Currently contradicted" is a STREAM FILTER, never a projection table.
 export const OpenContradictionSchema = z.object({
@@ -423,7 +432,7 @@ export const StopReceiptSchema = z.object({
   agent_id: z.string(),
   recorded: z.boolean(), // true = stop_reported appended; false = deduped
   deduped: z.boolean(),
-  activity: ActivityStateSchema.nullable(), // resulting activity for the agent
+  turn: TurnStateSchema.nullable(), // resulting turn state for the agent
 });
 export type StopReceipt = z.infer<typeof StopReceiptSchema>;
 
@@ -460,7 +469,7 @@ export type ReconcileResponse = z.infer<typeof ReconcileResponseSchema>;
 // remains txd's private source of truth for replay/reconcile only.
 export const EstateReadResponseSchema = z.object({
   schema_version: z.number().int(),
-  rows: z.array(ActivityBoardRowSchema),
+  rows: z.array(SeatBoardRowSchema),
   tints: HealthSchema.shape.tints,
 });
 export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;

@@ -123,6 +123,12 @@ export interface TmuxControlPlane {
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
+  /**
+   * Observe whether a live engine process for `agentId` is running under this
+   * seat's pane, RIGHT NOW. The turn fold cannot answer this — nothing in it
+   * watches a process — so a destructive act asks the operating system instead.
+   */
+  agentAlive(seatId: string, agentId: string): Promise<boolean>;
   /** Apply one semantic plan-mode intent with engine-specific input and screen read-back. */
   transitionAgentMode(
     seatId: string,
@@ -184,6 +190,40 @@ async function processWitness(pid: number): Promise<ProcessWitness | null> {
     const start_ticks = fields[19];
     if (!Number.isInteger(parent_pid) || parent_pid < 0 || !start_ticks) return null;
     return { pid, parent_pid, start_ticks };
+  } catch {
+    return null;
+  }
+}
+
+const ENGINE_COMMANDS = new Set(['claude', 'codex']);
+
+/** One process's AGENT_ID, read from its own environment block. */
+async function processAgentId(pid: number): Promise<string | null> {
+  try {
+    const raw = await readFile(`/proc/${pid}/environ`, 'utf8');
+    for (const entry of raw.split('\0')) {
+      const split = entry.indexOf('=');
+      if (split > 0 && entry.slice(0, split) === AGENT_ID_ENV) return entry.slice(split + 1);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** A process's direct children, from the kernel's own view of the tree. */
+async function processChildren(pid: number): Promise<number[]> {
+  try {
+    const raw = await readFile(`/proc/${pid}/task/${pid}/children`, 'utf8');
+    return raw.trim().split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger);
+  } catch {
+    return [];
+  }
+}
+
+async function processCommand(pid: number): Promise<string | null> {
+  try {
+    return (await readFile(`/proc/${pid}/comm`, 'utf8')).trim();
   } catch {
     return null;
   }
@@ -492,6 +532,47 @@ export class RealTmux implements TmuxControlPlane {
 
   async killServer(): Promise<boolean> {
     return (await this.command('rotate_estate', 'estate', ['kill-server'])).code === 0;
+  }
+
+  /**
+   * One observation, taken at the moment it is needed: is an engine for this
+   * agent running under this seat's pane?
+   *
+   * This is not a poll. A poll asks repeatedly because an event it should have
+   * received never arrives. This asks once, immediately before an irreversible
+   * act, because the recorded turn fold is inference about the PAST and a close
+   * needs the PRESENT. `awaiting_input` is the normal resting state of a healthy
+   * agent, so gating a close on the fold alone reaps live workers.
+   *
+   * Both halves must hold: an engine command, and that engine's own AGENT_ID
+   * matching. A pane running a bare shell is not the agent, and an engine
+   * carrying a different identity is a different agent in a reused seat.
+   */
+  async agentAlive(seatId: string, agentId: string): Promise<boolean> {
+    if (!agentId) return false;
+    const observed = await this.command('observe_pane_pid', seatId, [
+      'list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_pid}`,
+    ]);
+    if (observed.code !== 0) return false;
+    const panePid = observed.stdout.split('\n').flatMap((line) => {
+      const [canonical, rawPid] = line.split('\t');
+      return canonical === seatId && rawPid ? [Number(rawPid)] : [];
+    })[0];
+    if (!Number.isInteger(panePid)) return false;
+
+    // Walk the pane's descendants. The engine is the wrapper's child, so a
+    // fixed depth would be a guess; following the process tree is not.
+    let frontier = [panePid!];
+    const visited = new Set<number>(frontier);
+    while (frontier.length > 0) {
+      for (const pid of frontier) {
+        const command = await processCommand(pid);
+        if (command && ENGINE_COMMANDS.has(command) && await processAgentId(pid) === agentId) return true;
+      }
+      const children = await Promise.all(frontier.map((pid) => processChildren(pid)));
+      frontier = children.flat().filter((pid) => !visited.has(pid) && visited.add(pid));
+    }
+    return false;
   }
 
   /** Resolve canonical id -> internal %id (membrane; return value stays inside). */
@@ -1736,5 +1817,20 @@ export class FakeTmux implements TmuxControlPlane {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'delivered' };
+  }
+
+  /**
+   * Test control: which agents this fake observes as running. A seat absent
+   * from the map has no live engine, so the default is DEAD — a test must say
+   * an agent is alive, exactly as the real probe demands evidence.
+   */
+  liveAgents = new Map<string, string>();
+  markAgentAlive(seatId: string, agentId: string): void {
+    this.liveAgents.set(seatId, agentId);
+  }
+  async agentAlive(seatId: string, agentId: string): Promise<boolean> {
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead' || !agentId) return false;
+    return this.liveAgents.get(seatId) === agentId;
   }
 }

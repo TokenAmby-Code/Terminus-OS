@@ -19,9 +19,9 @@ test('fresh stop for a bound live agent is recorded → activity stopped', async
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
   const res = await d.stop({ agent_id: 'i1', schema_version: 11 });
-  expect(res).toEqual({ ok: true, agent_id: 'i1', recorded: true, deduped: false, activity: 'stopped' });
+  expect(res).toEqual({ ok: true, agent_id: 'i1', recorded: true, deduped: false, turn: 'awaiting_input' });
   expect((await store.readAll()).filter((e) => e.event_type === 'act.stop_reported')).toHaveLength(1);
-  expect(buildProjections(await store.readAll()).activityBoard.find((r) => r.seat_id === 'palace:W')!.activity).toBe('stopped');
+  expect(buildProjections(await store.readAll()).seatBoard.find((r) => r.seat_id === 'palace:W')!.turn).toBe('awaiting_input');
 });
 
 test('duplicate stop is deduped (receipt_deduped), not a second stop_reported — no blind swallow', async () => {

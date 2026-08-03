@@ -133,15 +133,16 @@ test('palace:N is never closable — hard refusal by seat id and by agent id, fo
   expect(p.currentBindings.map((b) => b.seat_id)).toContain('palace:N');
 });
 
-test('a mid-turn agent refuses gracefully; force overrides for a hung agent', async () => {
-  const { store, d } = setup();
+test('a live engine refuses gracefully; force overrides for a hung agent', async () => {
+  const { store, tmux, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'reservists:W', 'w-1');
   await working(store, 'w-1');
+  tmux.markAgentAlive('reservists:W', 'w-1');
 
   const refused = await d.close(req({ targets: ['w-1'] }));
   expect(refused.ok).toBe(false);
-  expect(refused.verdicts[0]!.reason).toContain('mid_turn');
+  expect(refused.verdicts[0]!.reason).toContain('live_engine');
   expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('w-1');
 
   const forced = await d.close(req({ targets: ['w-1'], force: true }));
@@ -149,7 +150,31 @@ test('a mid-turn agent refuses gracefully; force overrides for a hung agent', as
   expect(forced.verdicts[0]).toMatchObject({ closed: true, agent_id: 'w-1' });
 });
 
-test('a stopped agent closes without force', async () => {
+// THE DEATH SCENARIO, pinned. `awaiting_input` is the resting state of every
+// healthy agent between turns, and a message parked in a composer never
+// produces act.prompt_submitted — so an agent commed back into work still reads
+// `awaiting_input` while it works. The old guard read that fold as permission
+// and closed live workers. The probe is what stops it.
+test('an awaiting_input agent with a live engine is NOT closed', async () => {
+  const { store, tmux, d } = setup();
+  await overseer(d, store);
+  await bind(d, store, 'reservists:W', 'w-1');
+  await stopped(store, 'w-1');
+  tmux.markAgentAlive('reservists:W', 'w-1');
+
+  const targeted = await d.close(req({ targets: ['w-1'] }));
+  expect(targeted.ok).toBe(false);
+  expect(targeted.verdicts[0]!.reason).toContain('live_engine');
+  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('w-1');
+
+  // And a filtered close, which names no seat and so carries no authorization
+  // to end a live agent, must not reap it either.
+  const filtered = await d.close(req({ page: 'reservists' }));
+  expect(filtered.closed_count).toBe(0);
+  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('w-1');
+});
+
+test('an agent with no live engine closes without force', async () => {
   const { store, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'reservists:W', 'w-1');
@@ -184,15 +209,16 @@ test('bulk close: N explicit targets, N individual retirements, one invocation',
 });
 
 test('bulk close is per-target independent: a refused sibling never blocks a close', async () => {
-  const { store, d } = setup();
+  const { store, tmux, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'reservists:W', 'w-idle');
   await bind(d, store, 'reservists:S', 'w-busy');
   await working(store, 'w-busy');
+  tmux.markAgentAlive('reservists:S', 'w-busy');
   const res = await d.close(req({ targets: ['w-busy', 'w-idle'] }));
   expect(res).toMatchObject({ ok: false, closed_count: 1, refused_count: 1 });
   expect(res.verdicts.find((v) => v.target === 'w-idle')).toMatchObject({ closed: true });
-  expect(res.verdicts.find((v) => v.target === 'w-busy')!.reason).toContain('mid_turn');
+  expect(res.verdicts.find((v) => v.target === 'w-busy')!.reason).toContain('live_engine');
   const bound = buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id);
   expect(bound).toContain('w-busy');
   expect(bound).not.toContain('w-idle');

@@ -8,15 +8,15 @@
 //   reg.seat_cleared   (seat)     clears the binding (pane axis untouched)
 //   reg.teardown_started(seat)    pane → 'dead' (teardown kills the pane)
 //   reg.process_reaped (seat)     pane → 'dead'
-//   act.prompt_submitted(agent) activity → 'working'
-//   act.stop_reported  (agent) activity → 'stopped'
-//   reg.retired        (agent) activity → 'retired'
+//   act.prompt_submitted(agent) turn → 'working'
+//   act.stop_reported  (agent) turn → 'awaiting_input'
+//   reg.retired        (agent) turn → 'retired'
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
 import { PANE_STATES, PhysicalDeclarationSchema } from '@terminus-os/contracts';
 import type {
-  ActivityBoardRow,
-  ActivityState,
+  SeatBoardRow,
+  TurnState,
   CurrentBinding,
   EventRecord,
   FreelistEntry,
@@ -28,11 +28,12 @@ import type {
 export type Projections = {
   currentBindings: CurrentBinding[];
   freelist: FreelistEntry[];
-  activityBoard: ActivityBoardRow[];
+  seatBoard: SeatBoardRow[];
   openContradictions: OpenContradiction[];
-  // Per-agent activity fold (working|idle|stopped|retired), exposed so the
+  // Per-agent TURN fold (working|awaiting_input|unobserved|retired). It says
+  // nothing about liveness: nothing here observes a process. Exposed so the
   // stop-ingestion door can dedupe (already-stopped/retired) without re-reading.
-  activityByAgent: Map<string, ActivityState>;
+  turnByAgent: Map<string, TurnState>;
   // Every agent id that EVER carried a reg.bound — the "did it walk through
   // the door?" oracle. A stop for an id absent here is a ghost (never bound).
   everBoundAgents: Set<string>;
@@ -85,7 +86,7 @@ export function buildProjections(events: EventRecord[]): Projections {
   const bindingBySeat = new Map<string, CurrentBinding>();
   const physicalDeclarations = new Map<string, PhysicalDeclaration>();
   const placementAttestedAgents = new Set<string>();
-  const activityByAgent = new Map<string, ActivityState>();
+  const turnByAgent = new Map<string, TurnState>();
   const everBoundAgents = new Set<string>();
   // (entity_type, entity_id) -> highest seq seen, to supersede stale contradiction
   // flags. Composite so a later event on a different entity type sharing an id can
@@ -193,13 +194,13 @@ export function buildProjections(events: EventRecord[]): Projections {
         bindingBySeat.delete(e.entity_id);
         break;
       case 'act.prompt_submitted':
-        activityByAgent.set(e.entity_id, 'working');
+        turnByAgent.set(e.entity_id, 'working');
         break;
       case 'act.stop_reported':
-        activityByAgent.set(e.entity_id, 'stopped');
+        turnByAgent.set(e.entity_id, 'awaiting_input');
         break;
       case 'reg.retired':
-        activityByAgent.set(e.entity_id, 'retired');
+        turnByAgent.set(e.entity_id, 'retired');
         break;
       case 'reg.contradiction_flagged':
         contradictions.push({
@@ -226,18 +227,18 @@ export function buildProjections(events: EventRecord[]): Projections {
     }
   }
 
-  const activityBoard: ActivityBoardRow[] = [];
+  const seatBoard: SeatBoardRow[] = [];
   for (const [seat, pane] of paneBySeat) {
     const binding = bindingBySeat.get(seat);
     const agentId = binding?.agent_id ?? null;
     const entity_id = agentId ?? seat;
-    activityBoard.push({
+    seatBoard.push({
       entity_id,
       entity_type: agentId ? 'agent' : 'seat',
       seat_id: seat,
       pane,
       binding: binding ? 'bound' : 'unbound',
-      activity: agentId ? activityByAgent.get(agentId) ?? 'idle' : 'idle',
+      turn: agentId ? turnByAgent.get(agentId) ?? 'unobserved' : 'unobserved',
       persona: binding?.persona ?? null,
       rank: binding?.rank ?? null,
       commander: binding?.commander ?? null,
@@ -254,9 +255,9 @@ export function buildProjections(events: EventRecord[]): Projections {
   return {
     currentBindings,
     freelist,
-    activityBoard,
+    seatBoard,
     openContradictions,
-    activityByAgent,
+    turnByAgent,
     everBoundAgents,
     physicalDeclarations,
     placementAttestedAgents,
