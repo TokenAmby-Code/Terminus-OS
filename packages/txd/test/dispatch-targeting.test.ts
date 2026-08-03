@@ -223,3 +223,21 @@ test('a seat target whose engine start fails refuses seat_start_failed', async (
     payload: { reason: 'seat_start_failed', target: { kind: 'seat', seat_id: 'palace:N' } },
   }]);
 });
+
+test('the orders a dispatch carries reach the launch composition verbatim', async () => {
+  const { tmux, published, d } = setup();
+  await d.constructEstate();
+  // Backticks, a blank line and a `$` — the shapes a real brief is made of,
+  // and the ones a second quoting scheme would eat.
+  const orders = 'Worker E.\n\nRun `rg dispatch` and read $PANE_ID.\n';
+  await d.dispatch({ ...request({ kind: 'seat', seat_id: 'palace:N' }), prompt: orders });
+  expect(published).toMatchObject([{ type: 'agent.dispatch_attested' }]);
+  expect(tmux.seatEngine('palace:N')!.prompt).toBe(orders);
+});
+
+test('a bodiless dispatch composes a launch with no orders at all', async () => {
+  const { tmux, d } = setup();
+  await d.constructEstate();
+  await d.dispatch(request({ kind: 'seat', seat_id: 'palace:N' }));
+  expect(tmux.seatEngine('palace:N')!.prompt).toBeUndefined();
+});

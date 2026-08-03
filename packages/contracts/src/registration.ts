@@ -231,6 +231,10 @@ export const DispatchRequestedSchema = z.object({
   machine: z.string().min(1),
   target: DispatchTargetSchema,
   engine: EngineSchema,
+  // The orders the agent is born with. Absent for a bodiless dispatch; never
+  // empty, because empty orders are not orders. Carried byte-for-byte: a brief
+  // that arrives subtly altered is worse than one that fails to arrive.
+  prompt: z.string().min(1).optional(),
 }).strict();
 export type DispatchRequested = z.infer<typeof DispatchRequestedSchema>;
 
