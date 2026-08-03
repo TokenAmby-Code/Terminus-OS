@@ -87,6 +87,19 @@ function decodedPush(response: ClipboardPushResponse): string {
 export const COMMANDS: readonly Command[] = [
   { path: ['comm'], summary: 'Send, ask, page, or reply through txd event truth', run: comm },
   {
+    // The second phase of a comm, asked for rather than waited on. `tx comm`
+    // still quick-releases; this redeems the message_id it returned for the
+    // delivery fact whenever the caller wants to know.
+    path: ['comm', 'delivery'],
+    summary: 'Read the delivery fact for one comm by message id',
+    run: async ({ args, request, write }) => {
+      const messageId = args[0];
+      if (!messageId || args.length > 1) throw new Error('usage: tx comm delivery <message-id>');
+      write(await request('GET', `/tmux/read/comm/${encodeURIComponent(messageId)}`));
+      return 0;
+    },
+  },
+  {
     path: ['close'],
     summary: 'Close remote agents through the retirement chain (overseer verb)',
     run: async ({ args, request, write }) => {

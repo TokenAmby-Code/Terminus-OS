@@ -24,6 +24,7 @@ import {
   type ClipboardSelectionRequest,
   type CommAccepted,
   type CommCallback,
+  type CommDeliveryReadResponse,
   type CommHook,
   type CommRequest,
   type CommTarget,
@@ -1139,20 +1140,66 @@ export class Daemon {
     this.wakeAsk(askId);
   }
 
-  promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: boolean }> {
+  // One flush, every message it carried. A frame this agent was never a target
+  // of belongs to someone else's correspondence and is skipped in silence; only
+  // a flush that matched NOTHING is a refusal, so an ordinary prompt still
+  // fails deterministically instead of wedging the lane.
+  promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[] }> {
     return this.locked(async () => {
       const events = await this.store.readAll();
-      const accepted = events.find((e) => e.entity_id === hook.message_id && e.event_type === 'reg.comm_accepted');
-      if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) throw new Error('message_target_mismatch');
-      const assertionId = `${hook.message_id}:${hook.agent_id}`;
-      if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) return { ok: true, asserted: false };
-      await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
-        payload: { message_id: hook.message_id, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
+      const asserted: string[] = [];
+      const confirmations = new Map<string, string[]>();
+      let matched = false;
+      for (const messageId of hook.message_ids) {
+        const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
+        if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
+        matched = true;
+        const assertionId = `${messageId}:${hook.agent_id}`;
+        if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) continue;
+        await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+          payload: { message_id: messageId, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
+        asserted.push(messageId);
+        const sourceAgentId = String(accepted.payload.source_agent_id);
+        confirmations.set(sourceAgentId, [...(confirmations.get(sourceAgentId) ?? []), messageId]);
+      }
+      if (!matched) throw new Error('message_target_mismatch');
+      // One line per sender, not one per message: the confirmation lands in a
+      // composer that coalesces exactly like the one it is reporting on, and a
+      // burst of them is the same defect pointed back at the sender.
       const proj = await this.projections();
-      const sender = proj.currentBindings.find((b) => b.agent_id === accepted.payload.source_agent_id);
-      if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${hook.message_id} target ${hook.agent_id}]`);
-      return { ok: true, asserted: true };
+      for (const [sourceAgentId, messageIds] of confirmations) {
+        const sender = proj.currentBindings.find((b) => b.agent_id === sourceAgentId);
+        if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`);
+      }
+      return { ok: true, asserted };
     });
+  }
+
+  // Phase two, read back. The delivery fact for one message and every target it
+  // was snapshotted against, derived from `act.comm_delivery_asserted` alone —
+  // never from the bytes that were staged, which is the conflation this surface
+  // exists to end.
+  async commDelivery(messageId: string): Promise<CommDeliveryReadResponse> {
+    const events = await this.store.readAll();
+    const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
+    if (!accepted) throw new Error('message_absent');
+    const snapshot = events.find((e) => e.event_type === 'reg.comm_target_snapshotted' && e.payload.message_id === messageId);
+    const targets = (snapshot?.payload.targets ?? accepted.payload.targets ?? []) as CommTarget[];
+    const deliveries = targets.map((target) => {
+      const assertion = events.find((e) => e.event_type === 'act.comm_delivery_asserted'
+        && e.payload.message_id === messageId && e.payload.target_agent_id === target.agent_id);
+      return {
+        target, delivered: assertion !== undefined,
+        asserted_at: assertion?.occurred_at ?? null,
+        assertion_event_id: assertion?.seq ?? null,
+      };
+    });
+    return {
+      schema_version: SCHEMA_VERSION, message_id: messageId,
+      source_agent_id: String(accepted.payload.source_agent_id),
+      accepted_at: accepted.occurred_at,
+      deliveries, complete: deliveries.length > 0 && deliveries.every((d) => d.delivered),
+    };
   }
 
   commStop(agentId: string, content: string, stopEventId: string | null, receipt: string | null): Promise<void> {
