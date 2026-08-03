@@ -1,6 +1,7 @@
 import { COMMANDS, type Command } from './commands.ts';
 import { createClient, type TxdRequest } from './client.ts';
 import { createLocalClipboard, type LocalClipboard } from './clipboard.ts';
+import { findTmuxIdInIdentifiers } from '@terminus-os/contracts';
 
 export type CliDependencies = {
   request: TxdRequest;
@@ -9,12 +10,18 @@ export type CliDependencies = {
   clipboard?: () => LocalClipboard;
 };
 
+/**
+ * Raw tmux ids live below the membrane and must never surface in an IDENTIFIER
+ * the client prints. Output CONTENT is not judged: an answer, a message body or
+ * a commit subject is prose, and a print guard cannot know whether a sigil in
+ * it is an identifier or a quotation — it is not positioned to know.
+ *
+ * Judged on the same declared basis as the daemon, from one shared definition.
+ */
 function assertCanonicalOutput(value: unknown): void {
-  if (typeof value === 'string' && /(^|[^A-Za-z0-9])[%@$]\d+\b/.test(value)) {
+  if (findTmuxIdInIdentifiers(value)) {
     throw new Error('tx refused output containing a raw tmux identifier');
   }
-  if (Array.isArray(value)) for (const item of value) assertCanonicalOutput(item);
-  else if (value && typeof value === 'object') for (const item of Object.values(value)) assertCanonicalOutput(item);
 }
 
 function usage(commands: readonly Command[]): string {
