@@ -124,11 +124,16 @@ export interface TmuxControlPlane {
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   /**
-   * Observe whether a live engine process for `agentId` is running under this
+   * Observe whether an engine process for `agentId` is running under this
    * seat's pane, RIGHT NOW. The turn fold cannot answer this — nothing in it
    * watches a process — so a destructive act asks the operating system instead.
+   *
+   * Tri-state on purpose. On an ssh seat the pane's child is the TUNNEL and the
+   * engine runs on the far side, where this machine cannot see it; answering
+   * `dead` there would reap healthy remote agents, which is the very defect
+   * this guard exists to remove. An unobservable seat says so.
    */
-  agentAlive(seatId: string, agentId: string): Promise<boolean>;
+  agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness>;
   /** Apply one semantic plan-mode intent with engine-specific input and screen read-back. */
   transitionAgentMode(
     seatId: string,
@@ -197,19 +202,30 @@ async function processWitness(pid: number): Promise<ProcessWitness | null> {
 
 const ENGINE_COMMANDS = new Set(['claude', 'codex']);
 
-/** One process's AGENT_ID, read from its own environment block. */
-async function processAgentId(pid: number): Promise<string | null> {
+/**
+ * What this machine can honestly say about an agent's engine.
+ *
+ * `unobservable` is not a failure to try — it is the correct answer for a seat
+ * whose engine runs somewhere this process cannot look. A caller about to do
+ * something irreversible must treat it as "do not proceed", never as "dead".
+ */
+export type AgentLiveness = 'alive' | 'dead' | 'unobservable';
+
+/** One variable from a process's own environment block. */
+async function processEnv(pid: number, name: string): Promise<string | null> {
   try {
     const raw = await readFile(`/proc/${pid}/environ`, 'utf8');
     for (const entry of raw.split('\0')) {
       const split = entry.indexOf('=');
-      if (split > 0 && entry.slice(0, split) === AGENT_ID_ENV) return entry.slice(split + 1);
+      if (split > 0 && entry.slice(0, split) === name) return entry.slice(split + 1);
     }
     return null;
   } catch {
     return null;
   }
 }
+
+const processAgentId = (pid: number): Promise<string | null> => processEnv(pid, AGENT_ID_ENV);
 
 /** A process's direct children, from the kernel's own view of the tree. */
 async function processChildren(pid: number): Promise<number[]> {
@@ -548,17 +564,18 @@ export class RealTmux implements TmuxControlPlane {
    * matching. A pane running a bare shell is not the agent, and an engine
    * carrying a different identity is a different agent in a reused seat.
    */
-  async agentAlive(seatId: string, agentId: string): Promise<boolean> {
-    if (!agentId) return false;
+  async agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness> {
+    if (!agentId) return 'unobservable';
     const observed = await this.command('observe_pane_pid', seatId, [
       'list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_pid}`,
     ]);
-    if (observed.code !== 0) return false;
+    // A seat we cannot even resolve is not a seat we may destroy on.
+    if (observed.code !== 0) return 'unobservable';
     const panePid = observed.stdout.split('\n').flatMap((line) => {
       const [canonical, rawPid] = line.split('\t');
       return canonical === seatId && rawPid ? [Number(rawPid)] : [];
     })[0];
-    if (!Number.isInteger(panePid)) return false;
+    if (!Number.isInteger(panePid)) return 'unobservable';
 
     // Walk the pane's descendants. The engine is the wrapper's child, so a
     // fixed depth would be a guess; following the process tree is not.
@@ -567,12 +584,15 @@ export class RealTmux implements TmuxControlPlane {
     while (frontier.length > 0) {
       for (const pid of frontier) {
         const command = await processCommand(pid);
-        if (command && ENGINE_COMMANDS.has(command) && await processAgentId(pid) === agentId) return true;
+        if (command && ENGINE_COMMANDS.has(command) && await processAgentId(pid) === agentId) return 'alive';
       }
       const children = await Promise.all(frontier.map((pid) => processChildren(pid)));
       frontier = children.flat().filter((pid) => !visited.has(pid) && visited.add(pid));
     }
-    return false;
+    // No local engine. On an ssh seat that proves nothing: txd stamps
+    // TXD_SSH_TARGET into the pane environment precisely to mark that the
+    // engine lives on the far side. Say unobservable rather than dead.
+    return await processEnv(panePid!, SSH_TARGET_ENV) ? 'unobservable' : 'dead';
   }
 
   /** Resolve canonical id -> internal %id (membrane; return value stays inside). */
@@ -1825,12 +1845,19 @@ export class FakeTmux implements TmuxControlPlane {
    * an agent is alive, exactly as the real probe demands evidence.
    */
   liveAgents = new Map<string, string>();
+  unobservableSeats = new Set<string>();
   markAgentAlive(seatId: string, agentId: string): void {
     this.liveAgents.set(seatId, agentId);
   }
-  async agentAlive(seatId: string, agentId: string): Promise<boolean> {
+  /** Test control: a seat whose engine runs beyond this machine (an ssh seat). */
+  markSeatRemote(seatId: string): void {
+    this.unobservableSeats.add(seatId);
+  }
+  async agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness> {
     const s = this.seats.get(seatId);
-    if (!s || s.pane === 'dead' || !agentId) return false;
-    return this.liveAgents.get(seatId) === agentId;
+    if (!s || !agentId) return 'unobservable';
+    if (this.liveAgents.get(seatId) === agentId) return 'alive';
+    if (this.unobservableSeats.has(seatId)) return 'unobservable';
+    return s.pane === 'dead' ? 'dead' : 'dead';
   }
 }

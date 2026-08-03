@@ -1637,8 +1637,16 @@ export class Daemon {
       // act.prompt_submitted at all — so an agent commed back into work still
       // reads `awaiting_input` while it works. Selecting on the fold alone reaps
       // live workers, which is what killed two of them.
-      const engineRunning = (binding: { seat_id: string; agent_id: string | null }): Promise<boolean> =>
-        this.tmux.agentAlive(binding.seat_id, binding.agent_id ?? '');
+      // Only a positively OBSERVED-DEAD agent may be closed. 'alive' refuses
+      // for the obvious reason; 'unobservable' refuses because converting a
+      // thing we cannot see into a destructive verdict is precisely the defect
+      // being removed. An ssh seat's pane child is the TUNNEL — the engine runs
+      // on the far side, where this machine cannot look — so reading that as
+      // dead would reap healthy remote agents.
+      const closable = async (binding: { seat_id: string; agent_id: string | null }) => {
+        const liveness = await this.tmux.agentLiveness(binding.seat_id, binding.agent_id ?? '');
+        return { liveness, may: liveness === 'dead' };
+      };
 
       // Closing is an overseer capability. The caller identity discipline is
       // comm's (source_agent_id must be a registered binding); the rank gate
@@ -1693,7 +1701,8 @@ export class Daemon {
             });
             continue;
           }
-          if (!req.force && await engineRunning(binding)) {
+          const observed = req.force ? null : await closable(binding);
+          if (observed && !observed.may) {
             // Graceful by default: a live engine is working even when the turn
             // fold says otherwise, and a mid-turn close destroys work and
             // strands attestations.
@@ -1702,7 +1711,9 @@ export class Daemon {
               seat_id: binding.seat_id,
               agent_id: binding.agent_id,
               closed: false,
-              reason: `live_engine: an engine for this agent is running under ${binding.seat_id} (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close a hung agent`,
+              reason: observed.liveness === 'alive'
+                ? `live_engine: an engine for this agent is running under ${binding.seat_id} (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close a hung agent`
+                : `liveness_unobservable: ${binding.seat_id} runs its engine beyond this machine, so txd cannot prove it dead (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close it anyway`,
             });
             continue;
           }
@@ -1722,8 +1733,8 @@ export class Daemon {
         });
         // The fold narrows the candidates; the probe decides. A filtered close
         // names no seat, so it carries no authorization to end a live agent.
-        const liveness = await Promise.all(candidates.map((b) => engineRunning(b)));
-        const selected = candidates.filter((_, index) => !liveness[index]);
+        const observed = await Promise.all(candidates.map((b) => closable(b)));
+        const selected = candidates.filter((_, index) => observed[index]!.may);
         if (selected.length === 0) return refused('no_targets: selector matched no closable agent');
         for (const binding of selected) await closeOne(binding.agent_id!, binding);
       }

@@ -174,6 +174,38 @@ test('an awaiting_input agent with a live engine is NOT closed', async () => {
   expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('w-1');
 });
 
+// SCAR: emperors-children at somnium:S was verified healthy while its pane's
+// child was `ssh`, not an engine — every somnium pane is a tunnel to k12-work
+// and the engine runs on the far side. A guard that walks local process
+// descendants finds a tunnel, and if it called that DEAD it would reap healthy
+// remote agents while correctly protecting local ones: this defect
+// reintroduced by its own fix.
+//
+// txd cannot see through the tunnel, so the honest answer is UNKNOWN and the
+// only safe action is to refuse. An unobservable converted into a destructive
+// verdict is worse than no guard at all.
+test('a remote seat is never reported dead merely because its child is a tunnel', async () => {
+  const { store, tmux, d } = setup();
+  await overseer(d, store);
+  await bind(d, store, 'somnium:S', 'remote-1');
+  await stopped(store, 'remote-1');
+  tmux.markSeatRemote('somnium:S');
+
+  const targeted = await d.close(req({ targets: ['remote-1'] }));
+  expect(targeted.ok).toBe(false);
+  expect(targeted.verdicts[0]!.reason).toContain('liveness_unobservable');
+  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('remote-1');
+
+  // And a filtered close must not sweep it up either.
+  const filtered = await d.close(req({ page: 'somnium' }));
+  expect(filtered.closed_count).toBe(0);
+  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('remote-1');
+
+  // --force remains the deliberate override for a genuinely hung remote agent.
+  const forced = await d.close(req({ targets: ['remote-1'], force: true }));
+  expect(forced.ok).toBe(true);
+});
+
 test('an agent with no live engine closes without force', async () => {
   const { store, d } = setup();
   await overseer(d, store);
