@@ -64,12 +64,15 @@ export type WrapperPlacementAttestation =
         | 'process_changed';
     };
 
-// Below-membrane delivery outcome (discriminated by verdict). `partial_delivered`
-// = the literal text reached the pane but the submit (Enter) did not — first-class,
-// never collapsed to failure. A total failure carries zero bytes by construction.
+// Below-membrane STAGING outcome (discriminated by verdict). tmux can prove it
+// put bytes in a pane and pressed Enter; it cannot prove the engine consumed
+// them. A busy composer queues input and submits it whenever its current turn
+// ends, so no observation available here distinguishes submitted from queued.
+// Submission is a fact of the receiving engine — its UserPromptSubmit hook,
+// which txd folds into `act.comm_delivery_asserted`. That is the only fact
+// permitted to mean delivered, and no verdict here may spell that word.
 export type SendOutcome =
-  | { verdict: 'delivered'; bytes: number }
-  | { verdict: 'partial_delivered'; bytes: number }
+  | { verdict: 'staged'; bytes: number }
   | { verdict: 'failed_none_delivered'; bytes: 0 };
 
 export type AgentModeTransitionOutcome = {
@@ -282,7 +285,6 @@ export type TmuxCommandResult = { code: number; stdout: string; stderr: string }
 type TmuxRunner = (socket: string, args: string[], stdin?: Uint8Array) => Promise<TmuxCommandResult>;
 type TmuxBinaryResult = { code: number; stdout: Uint8Array; stderr: string; overflow?: boolean };
 type TmuxBinaryRunner = (socket: string, args: string[]) => Promise<TmuxBinaryResult>;
-type Sleep = (ms: number) => Promise<void>;
 type WriteClient = (path: string, data: Uint8Array) => Promise<void>;
 
 export type TmuxAuditRecord = {
@@ -364,8 +366,6 @@ async function runBytes(socket: string, args: string[]): Promise<TmuxBinaryResul
 export class RealTmux implements TmuxControlPlane {
   private runner: TmuxRunner;
   private audit: AuditSink;
-  private sleep: Sleep;
-  private enterDelayMs: number;
   private binaryRunner: TmuxBinaryRunner;
   private writeClient: WriteClient;
   private machine: string | undefined;
@@ -377,15 +377,12 @@ export class RealTmux implements TmuxControlPlane {
       runBytes?: TmuxBinaryRunner;
       writeClient?: WriteClient;
       audit?: AuditSink;
-      sleep?: Sleep;
-      enterDelayMs?: number;
       machine?: string;
     } = {},
   ) {
     this.runner = options.run ?? run;
     this.binaryRunner = options.runBytes ?? runBytes;
     this.audit = options.audit ?? ((record) => console.info(JSON.stringify({ level: 'info', event: 'tmux_operation', ...record })));
-    this.sleep = options.sleep ?? ((ms) => Bun.sleep(ms));
     this.writeClient = options.writeClient ?? (async (path, data) => {
       const handle = await open(path, 'w');
       try {
@@ -395,9 +392,6 @@ export class RealTmux implements TmuxControlPlane {
       }
     });
     this.machine = options.machine;
-    const configured = Number(process.env.TXD_SEND_ENTER_DELAY_MS);
-    this.enterDelayMs = options.enterDelayMs
-      ?? (Number.isFinite(configured) && configured >= 0 ? configured : 200);
   }
 
   private paneEnvironment(seatId: string): string[] {
@@ -1343,27 +1337,13 @@ export class RealTmux implements TmuxControlPlane {
     if (literal.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered' };
     const bytes = Buffer.byteLength(text, 'utf8');
 
-    // The cursor's logical line is the cross-composer editable surface: shell,
-    // Codex and Claude all leave swallowed input there. Once submitted, the
-    // cursor moves to output or a fresh composer and this line no longer holds
-    // the final non-empty line of the sent text.
-    const verificationNeedle = text.split(/\r?\n/).filter(Boolean).at(-1)?.trim() ?? '';
-    const verify = async (): Promise<boolean> => {
-      const cursor = await this.command('observe_cursor', seatId, ['display-message', '-p', '-t', paneId, '#{cursor_y}']);
-      if (cursor.code !== 0 || !/^\d+$/.test(cursor.stdout.trim())) return false;
-      const row = cursor.stdout.trim();
-      const captured = await this.command('verify_submit', seatId, ['capture-pane', '-p', '-J', '-t', paneId, '-S', row, '-E', row]);
-      return captured.code === 0 && verificationNeedle.length > 0 && !captured.stdout.includes(verificationNeedle);
-    };
-
-    // One initial submit plus two bounded retries. Every Enter is separated
-    // from the literal paste (and from prior retries) by a tunable backoff.
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      await this.sleep(this.enterDelayMs * attempt);
-      const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-      if (enter.code === 0 && await verify()) return { bytes, verdict: 'delivered' };
-    }
-    return { bytes, verdict: 'partial_delivered' };
+    // One discrete Enter, outside the literal burst. If tmux accepted both
+    // commands the text is staged in the pane; whether the engine has consumed
+    // it is not a question this side can answer, and the answer arrives on its
+    // own as `hook.user_prompt_submit`.
+    const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
+    if (enter.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered' };
+    return { bytes, verdict: 'staged' };
   }
 
   // A posed plan is a vendor approval dialog, not a footer state. Claude poses
@@ -1854,7 +1834,7 @@ export class FakeTmux implements TmuxControlPlane {
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
-    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'delivered' };
+    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' };
   }
 
   /**

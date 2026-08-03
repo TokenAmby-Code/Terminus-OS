@@ -96,7 +96,7 @@ test('canonical ids resolve to seats inside the shared session windows', async (
   const { tmux, d } = setup();
   await d.constructEstate();
 
-  expect(await tmux.sendToSeat('somnium:NE', 'hello')).toMatchObject({ verdict: 'delivered' });
+  expect(await tmux.sendToSeat('somnium:NE', 'hello')).toMatchObject({ verdict: 'staged' });
   expect(await tmux.reapSeat('palace:S')).toBe(true);
   expect((await tmux.listSeats()).map((seat) => seat.seat_id).sort()).toEqual([...TXD_ESTATE].sort());
 });

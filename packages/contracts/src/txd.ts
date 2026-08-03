@@ -557,9 +557,14 @@ export type CommRequest = z.infer<typeof CommRequestSchema>;
 
 export const CommTargetSchema = z.object({ agent_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
 export type CommTarget = z.infer<typeof CommTargetSchema>;
+// `staged` = the bytes are in the target pane and Enter was pressed. It is NOT
+// receipt: a busy composer queues input and submits it whenever its current
+// turn ends. Delivery is asserted later and separately by
+// `act.comm_delivery_asserted`, correlated to `message_id` — which is why the
+// message id is the caller's correlation handle, not a bare receipt number.
 export const CommAcceptedSchema = z.object({
   ok: z.literal(true), message_id: z.string(), ask_id: z.string().nullable(),
-  source_agent_id: z.string(), targets: z.array(CommTargetSchema), bytes_sent: z.boolean(), event_ids: z.array(z.number().int()),
+  source_agent_id: z.string(), targets: z.array(CommTargetSchema), staged: z.boolean(), event_ids: z.array(z.number().int()),
 });
 export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
 

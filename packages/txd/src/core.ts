@@ -1029,13 +1029,13 @@ export class Daemon {
       for (const target of targets) {
         const frame = `[tx comm ${messageId} from ${req.source_agent_id}${askId ? ` ask ${askId}` : ''}]\n${req.message}`;
         const sent = await this.tmux.sendToSeat(target.seat_id, frame);
-        if (sent.verdict !== 'delivered') throw new Error(`transport_${sent.verdict}: ${target.agent_id}`);
+        if (sent.verdict !== 'staged') throw new Error(`transport_${sent.verdict}: ${target.agent_id}`);
         const event = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
           payload: { target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
       }
       if (replyingToAsk) await this.assertCallback(replyingToAsk, req.source_agent_id, req.message, 'reply', null, transportReceipt);
-      return { ok: true, message_id: messageId, ask_id: askId, source_agent_id: req.source_agent_id, targets, bytes_sent: true, event_ids };
+      return { ok: true, message_id: messageId, ask_id: askId, source_agent_id: req.source_agent_id, targets, staged: true, event_ids };
     });
   }
 
