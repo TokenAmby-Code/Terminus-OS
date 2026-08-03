@@ -437,7 +437,19 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         }
         if (event.event_type === 'agent.dispatch_requested') {
           const requested = DispatchRequestedSchema.safeParse(event.payload);
-          if (!requested.success) return ack(false, 'invalid_dispatch_request');
+          // A dispatch is the one bus fact with a caller holding its answer
+          // open: registrationd returns only when txd terminalizes. Acking a
+          // payload this contract cannot read consumed the dispatch, published
+          // nothing, and left that caller waiting on a clock — three briefed
+          // births vanished exactly this way when `prompt` reached the wire
+          // ahead of this mirror. There is no seat-level truth to publish
+          // about a request that cannot be read, so the delivery fails: busd
+          // blocks the lane, names it, and the skew is loud from the first
+          // dispatch instead of the fifth.
+          if (!requested.success) {
+            const issue = requested.error.issues[0];
+            throw new Error(`unreadable_dispatch_request ${issue?.code ?? 'unknown'} at ${issuePath(issue?.path ?? [])}`);
+          }
           if (requested.data.machine !== machine) return ack(false, 'foreign_machine');
           return physicalAck(() => daemon.dispatch(requested.data));
         }

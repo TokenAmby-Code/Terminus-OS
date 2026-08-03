@@ -419,3 +419,38 @@ test('envelope/contract skew is the ONE loud non-2xx: malformed deliveries and v
     srv.stop(true);
   }
 });
+
+// A dispatch is the one delivery on this door with a caller holding its answer
+// open. Acking a request this contract cannot read consumed the dispatch,
+// published no terminal fact, and left registrationd waiting until its client
+// clock gave up — which is how three briefed births vanished with the estate
+// still reporting every palace seat unbound. The delivery fails instead, so
+// busd blocks the lane and names the skew.
+test('a dispatch request this contract cannot read fails the delivery instead of consuming it', async () => {
+  const published: Array<{ type: string }> = [];
+  const runtime = {
+    machine: 'test',
+    configuration: { generation: 'estate-1', digest: 'a'.repeat(64) },
+    agentWrapper: '/fleet/agent-wrapper',
+    perpetual: {},
+    publish: async (type: TxdPublishedEventType) => { published.push({ type }); },
+  };
+  const { srv, post } = setup(runtime);
+  try {
+    const response = await post(delivery('agent.dispatch_requested', {
+      schema_version: AGENT_SCHEMA_VERSION,
+      dispatch_id: '9f1b1f6a-5d4e-4a0f-9a2b-6c3d4e5f6071',
+      agent_id: '2ea2d049-0106-4957-8649-31f93bdc8c9a',
+      machine: 'test',
+      target: { kind: 'seat', seat_id: 'palace:N' },
+      engine: 'claude',
+      // A field a newer registrationd publishes and this mirror has not grown.
+      briefing_url: 'https://example.invalid/orders',
+    }));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ ok: false, error: 'internal_error' });
+    expect(published).toEqual([]);
+  } finally {
+    srv.stop();
+  }
+});
