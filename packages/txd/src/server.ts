@@ -55,7 +55,7 @@ import {
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
-import { assertNoTmuxId, sanitizeTmuxIds } from './ids.ts';
+import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 
 export type BuildInfo = { version: string; git_sha: string; bun: string };
 
@@ -121,9 +121,10 @@ function promptHookInput(payload: Record<string, unknown>): unknown {
 }
 
 function json(body: unknown, status = 200): Response {
-  // Canonical-id membrane enforcement: nothing crosses upward carrying a raw
-  // tmux id. A breach fails loud rather than leaking.
-  assertNoTmuxId(body, 'http_response');
+  // Canonical-id membrane enforcement: no IDENTIFIER crosses upward carrying a
+  // raw tmux id. A breach fails loud rather than leaking. Response CONTENT —
+  // an agent's reply, a stop hook's last message — is data and is not judged.
+  assertNoTmuxIdInIdentifiers(body, 'http_response');
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
@@ -531,7 +532,7 @@ export function makeServer(opts: { bind: string; port: number; daemon: Daemon; b
         } catch (err) {
           console.error(JSON.stringify({ level: 'error', event: 'handler_error', route: route.label, error: sanitizeTmuxIds(String(err)) }));
           // Generic body: the full error stays in the server log only. Serializing
-          // String(err) could echo a raw %id back through the membrane (assertNoTmuxId).
+          // String(err) could echo a raw %id back through the membrane.
           return json({ ok: false, error: 'internal_error' }, 500);
         }
       }

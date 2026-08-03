@@ -13,7 +13,7 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
-import { findTmuxIdDeep } from '../src/ids.ts';
+import { findTmuxIdDeep } from './tmux-id-probe.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };

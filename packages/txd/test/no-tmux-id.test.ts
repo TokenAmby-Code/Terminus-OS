@@ -3,7 +3,8 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
-import { findTmuxId, findTmuxIdDeep, assertNoTmuxId } from '../src/ids.ts';
+import { findTmuxId, findTmuxIdInIdentifiers, assertNoTmuxIdInIdentifiers } from '../src/ids.ts';
+import { findTmuxIdDeep } from './tmux-id-probe.ts';
 import type { TmuxControlPlane } from '../src/tmux.ts';
 
 // Spec §7 rung 2: canonical ids are the ONLY id surface. No raw tmux id (`%N`,
@@ -27,8 +28,16 @@ test('findTmuxIdDeep walks nested structures and object keys', async () => {
   expect(findTmuxIdDeep({ seat_id: 'somnium:NE', pane: 'live' })).toBeNull();
 });
 
-test('assertNoTmuxId throws loud on a leak', async () => {
-  expect(() => assertNoTmuxId({ pane: '%5' }, 'test')).toThrow(/canonical-id breach/);
+test('the membrane throws loud on an IDENTIFIER leak and ignores prose', async () => {
+  expect(() => assertNoTmuxIdInIdentifiers({ pane: '%5' }, 'test')).toThrow(/canonical-id breach/);
+  expect(() => assertNoTmuxIdInIdentifiers({ seat_id: '%5' }, 'test')).toThrow(/canonical-id breach/);
+  expect(() => assertNoTmuxIdInIdentifiers({ targets: ['palace:W', '%5'] }, 'test')).toThrow(/canonical-id breach/);
+  // Nested identifiers cannot hide behind a data key.
+  expect(() => assertNoTmuxIdInIdentifiers({ payload: { agent_id: '@7' } }, 'test')).toThrow(/canonical-id breach/);
+  // Prose is data, at any depth, whatever it happens to contain.
+  expect(() => assertNoTmuxIdInIdentifiers({ message: 'from pane %28' }, 'test')).not.toThrow();
+  expect(() => assertNoTmuxIdInIdentifiers({ payload: { content: 'pin zod@4.4' } }, 'test')).not.toThrow();
+  expect(findTmuxIdInIdentifiers({ payload: { seat_id: 'palace:W', message: '$20' } })).toBeNull();
 });
 
 test('mutation ingress refuses a raw tmux id IN AN IDENTIFIER FIELD, before tmux or persistence', async () => {
@@ -140,6 +149,47 @@ test('no tmux id appears in any /agents/*, /ingress/bus, /tmux/read, or /ctl res
     bodies.push(await (await post('/ctl/reconcile', {})).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/ctl/health`)).json());
     for (const b of bodies) expect(findTmuxIdDeep(b)).toBeNull();
+  } finally {
+    srv.stop(true);
+  }
+});
+
+// Site 5 of the membrane enumeration: `json()` is the SINGLE shared responder
+// and asserts over the WHOLE response body. A comm-wait response carries
+// `callbacks[].content` — an agent's reply text or its stop-hook last message.
+//
+// This path is untestable end-to-end today, because content quoting a sigil
+// cannot be persisted to become a callback in the first place. It is driven
+// here directly at its own boundary instead, so the classification rests on an
+// observation rather than on reading the code path.
+test('a comm-wait response carrying an agent reply that quotes a tmux id breaches on the way out', async () => {
+  const store = new MemoryEventStore();
+  const daemon = new Daemon(store, new FakeTmux());
+  // The agent answered an ask by quoting the pane it was reporting from.
+  (daemon as unknown as { waitComm: () => Promise<unknown> }).waitComm = async () => ({
+    ask_id: 'ask-1',
+    complete: true,
+    callbacks: [{
+      target: { agent_id: 'a-1', seat_id: 'palace:W', persona: 'p' },
+      content: 'attesting from pane %28',
+      assertion_event_id: 1,
+      source: 'reply' as const,
+    }],
+    outstanding: [],
+  });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon, build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/agents/comm/wait`, {
+      method: 'POST',
+      body: JSON.stringify({ schema_version: 11, ask_id: 'ask-1', subscriber_agent_id: 'ov-1' }),
+    });
+    // TODAY: the response membrane scans the agent's prose and throws, so the
+    // caller gets a handler failure instead of its answer.
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ask_id: 'ask-1',
+      callbacks: [{ content: 'attesting from pane %28' }],
+    });
   } finally {
     srv.stop(true);
   }
