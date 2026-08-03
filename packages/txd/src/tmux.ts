@@ -1859,7 +1859,6 @@ export class FakeTmux implements TmuxControlPlane {
     this.unobservableSeats.add(seatId);
   }
   async agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness> {
-    const s = this.seats.get(seatId);
     if (!agentId) return 'unobservable';
     if (this.liveAgents.get(seatId) === agentId) return 'alive';
     if (this.unobservableSeats.has(seatId)) return 'unobservable';
