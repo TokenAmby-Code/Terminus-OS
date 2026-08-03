@@ -109,6 +109,12 @@ test('mode target cannot consume the next option token', async () => {
 // answer is an identifier or a quotation — it is not positioned to know — so it
 // judges structural fields and nothing else, on the same basis as the daemon.
 test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
+  // `comm --ask` resolves the CALLER's identity before it can print anything.
+  // A process with no agent in its ancestry cannot resolve AGENT_ID, so runCli
+  // refuses at identity resolution and never reaches the print path this test
+  // exists to assert. Scoped and restored, matching comm.test.ts.
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
   const h = harness({
     ask_id: 'ask-1',
     complete: true,
@@ -120,10 +126,14 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
     }],
     outstanding: [],
   });
-  expect(await runCli(['comm', '--ask', 'palace:W', 'report your seat'], h.deps)).toBe(0);
-  expect(h.stderr).toEqual([]);
-  expect(JSON.parse(h.stdout[0]!).callbacks[0].content)
-    .toBe('attesting from pane %28 with window @5 and session $5.');
+  try {
+    expect(await runCli(['comm', '--ask', 'palace:W', 'report your seat'], h.deps)).toBe(0);
+    expect(h.stderr).toEqual([]);
+    expect(JSON.parse(h.stdout[0]!).callbacks[0].content)
+      .toBe('attesting from pane %28 with window @5 and session $5.');
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
 });
 
 test('ordinary prose carrying sigil-shaped tokens is printed', async () => {
