@@ -18,35 +18,6 @@ export function findTmuxId(text: string): string | null {
   return m ? m[1]! : null;
 }
 
-/**
- * Recursively scan EVERY string in a value for a tmux id, returning the
- * JSON-path of the first offender. Deliberately has no runtime caller: judging
- * content this way is the defect this module was corrected for. It survives as
- * the adversarial-test checker, where the stronger claim is the useful one —
- * a refusal must not echo the offending id back anywhere, prose included.
- */
-export function findTmuxIdDeep(value: unknown, path = '$'): string | null {
-  if (typeof value === 'string') {
-    return findTmuxId(value) ? path : null;
-  }
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      const hit = findTmuxIdDeep(value[i], `${path}[${i}]`);
-      if (hit) return hit;
-    }
-    return null;
-  }
-  if (value && typeof value === 'object') {
-    for (const [k, v] of Object.entries(value)) {
-      // Keys can leak too (e.g. an object keyed by pane id).
-      if (findTmuxId(k)) return `${path}.* (key)`;
-      const hit = findTmuxIdDeep(v, `${path}.${k}`);
-      if (hit) return hit;
-    }
-    return null;
-  }
-  return null;
-}
 
 /** Redact below-membrane identifiers before an error reaches structured logs. */
 export function sanitizeTmuxIds(text: string): string {

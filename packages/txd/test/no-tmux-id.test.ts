@@ -3,7 +3,8 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
-import { findTmuxId, findTmuxIdDeep, findTmuxIdInIdentifiers, assertNoTmuxIdInIdentifiers } from '../src/ids.ts';
+import { findTmuxId, findTmuxIdInIdentifiers, assertNoTmuxIdInIdentifiers } from '../src/ids.ts';
+import { findTmuxIdDeep } from './tmux-id-probe.ts';
 import type { TmuxControlPlane } from '../src/tmux.ts';
 
 // Spec §7 rung 2: canonical ids are the ONLY id surface. No raw tmux id (`%N`,
