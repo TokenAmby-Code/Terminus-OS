@@ -365,16 +365,35 @@ test('an unconsumed payload carrying raw-tmux-id-shaped text is acked — arbitr
   }
 });
 
-test('the membrane still guards what txd INGESTS: a consumed-type payload with a raw tmux id is refused, acked, zero footprint', async () => {
+// The membrane guards IDENTIFIERS, not prose. A stop hook carries the agent's
+// last assistant message; scanning it meant an agent that merely QUOTED a pane
+// id lost its stop fact entirely. Content is consumed; the id field is judged.
+test('a consumed payload whose CONTENT quotes a tmux id is consumed normally', async () => {
   const { store, d, srv, post } = setup();
   try {
     await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
     const before = await store.count();
     const res = await post(
-      delivery('hook.stop', { agent_id: 'i1', schema_version: 11, content: 'leaked pane %7' }),
+      delivery('hook.stop', { agent_id: 'i1', schema_version: 11, content: 'reporting from pane %7' }),
     );
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'tmux_id_refused' });
+    expect(await res.json()).toMatchObject({ ok: true, consumed: true });
+    expect(await store.count()).toBeGreaterThan(before);
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('a consumed payload whose IDENTIFIER is a raw tmux id is still refused, acked, zero footprint', async () => {
+  const { store, d, srv, post } = setup();
+  try {
+    await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
+    const before = await store.count();
+    const res = await post(delivery('hook.stop', { agent_id: '%7', schema_version: 11 }));
+    expect(res.status).toBe(200);
+    // The REASON matters: refused by the identifier schema, not merely absent
+    // as an unknown agent — otherwise this passes with the membrane removed.
+    expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'invalid_stop_payload' });
     expect(await store.count()).toBe(before);
   } finally {
     srv.stop(true);

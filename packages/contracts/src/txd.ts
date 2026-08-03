@@ -32,6 +32,23 @@ import { z } from 'zod';
 //      its mechanical intent (approve_plan, dialog_accept).
 export const SCHEMA_VERSION = 11;
 
+// A caller-supplied identifier: a canonical seat name (`somnium:NE`), an agent
+// id, or a page. Raw tmux ids — pane `%N`, window `@N`, session `$N` — live
+// strictly below the tmux control plane and are refused HERE, on the field that
+// declares itself an identifier.
+//
+// This is the whole membrane on the inbound side. It is deliberately NOT a scan
+// of request content: a message body, a commit subject or a package pin is the
+// caller's prose, and `zod@4.4` or `$1` in prose says nothing about what the
+// caller meant by an id. A predicate over free text cannot know that, and one
+// that guesses refuses legitimate messages — including, as it turns out, every
+// message that quotes a pane id in order to report one.
+const TMUX_SIGIL_ID = /[%@$]\d+\b/;
+export const CanonicalIdSchema = z
+  .string()
+  .min(1)
+  .refine((value) => !TMUX_SIGIL_ID.test(value), 'raw tmux ids live below the membrane; name a canonical id');
+
 export const CLIPBOARD_BUFFER_NAME = 'tx-clipboard';
 export const MAX_CLIPBOARD_BYTES = 1024 * 1024;
 export const MAX_CLIPBOARD_BASE64_CHARS = Math.ceil(MAX_CLIPBOARD_BYTES / 3) * 4;
@@ -320,18 +337,18 @@ export const HealthSchema = z.object({
 export type Health = z.infer<typeof HealthSchema>;
 
 export const LaunchRequestSchema = z.object({
-  seat_id: z.string().min(1),
+  seat_id: CanonicalIdSchema,
   schema_version: z.number().int(),
   // The attestation tuple the reg-audit scaffold checks. At door step 1 the
   // set is small; later doors grow it. A missing field the audit demands =
   // refused handover (stop-the-line), never a silent partial launch.
-  identity: z.string().min(1).optional(),
+  identity: CanonicalIdSchema.optional(),
   persona: z.string().min(1).optional(),
   rank: z.string().min(1).optional(),
   tint: z.string().min(1).optional(),
-  commander: z.string().min(1).optional(),
+  commander: CanonicalIdSchema.optional(),
   singleton_ok: z.boolean().optional(),
-  dispatch_target: z.string().min(1).optional(),
+  dispatch_target: CanonicalIdSchema.optional(),
 });
 export type LaunchRequest = z.infer<typeof LaunchRequestSchema>;
 
@@ -364,10 +381,10 @@ export const CLOSE_REQUIRED_RANK = 'overseer';
 export const CloseRequestSchema = z
   .object({
     schema_version: z.number().int(),
-    source_agent_id: z.string().min(1), // caller — never a tmux %id
+    source_agent_id: CanonicalIdSchema, // caller — never a raw tmux id
     // Exactly one selector:
-    targets: z.array(z.string().min(1)).min(1).optional(), // canonical seat ids OR agent ids
-    page: z.string().min(1).optional(), // every closable agent on one page
+    targets: z.array(CanonicalIdSchema).min(1).optional(), // canonical seat ids OR agent ids
+    page: CanonicalIdSchema.optional(), // every closable agent on one page
     all_idle: z.literal(true).optional(), // every closable agent estate-wide
     // Explicit-targets only: override the mid-turn gate for a hung agent.
     // Filters are inherently graceful — force never combines with them.
@@ -416,7 +433,7 @@ export type CloseResponse = z.infer<typeof CloseResponseSchema>;
 //     bound) — a ghost. Refused loud at admission; nothing recorded, so no
 //     phantom row and no re-firing subscription can exist (the 77f7cfb4 class).
 export const StopRequestSchema = z.object({
-  agent_id: z.string().min(1), // canonical agent id ONLY — never a tmux %id
+  agent_id: CanonicalIdSchema, // canonical agent id ONLY — never a raw tmux id
   schema_version: z.number().int(),
   content: z.string().optional(),
   stop_event_id: z.string().min(1).optional(),
@@ -478,8 +495,8 @@ export const EstateRotateRequestSchema = z.object({
   schema_version: z.number().int(),
   force: z.boolean().default(false),
   scope: z.enum(['estate', 'page', 'pane']).default('estate'),
-  page: z.string().min(1).optional(),
-  pane: z.string().min(1).optional(),
+  page: CanonicalIdSchema.optional(),
+  pane: CanonicalIdSchema.optional(),
 }).superRefine((value, ctx) => {
   if (value.scope === 'estate' && (value.page !== undefined || value.pane !== undefined)) {
     ctx.addIssue({ code: 'custom', message: 'estate scope accepts no page or pane target' });
@@ -513,7 +530,7 @@ export type EstateRotateResponse = z.infer<typeof EstateRotateResponseSchema>;
 export const TmuxLifecycleEventRequestSchema = z.object({
   schema_version: z.number().int(),
   event: z.enum(['pane-died', 'pane-exited', 'pane-killed']),
-  page: z.string().min(1).optional(),
+  page: CanonicalIdSchema.optional(),
 }).superRefine((value, ctx) => {
   if ((value.event === 'pane-killed') !== (value.page === undefined)) {
     ctx.addIssue({ code: 'custom', message: 'pane-killed is page-less; pane-died and pane-exited require their page' });
@@ -542,9 +559,9 @@ export const MAX_COMM_MESSAGE_BYTES = 64 * 1024;
 export const COMM_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
 export const CommRequestSchema = z.object({
   schema_version: z.number().int(),
-  source_agent_id: z.string().min(1),
-  target: z.string().min(1).optional(),
-  page: z.string().min(1).optional(),
+  source_agent_id: CanonicalIdSchema,
+  target: CanonicalIdSchema.optional(),
+  page: CanonicalIdSchema.optional(),
   message: z.string().refine((value) => new TextEncoder().encode(value).length <= MAX_COMM_MESSAGE_BYTES, 'message exceeds maximum encoded size'),
   ask: z.boolean().default(false),
   reply: z.boolean().default(false),
@@ -575,7 +592,7 @@ export const CommHookSchema = z.object({
 export type CommHook = z.infer<typeof CommHookSchema>;
 
 export const CommWaitRequestSchema = z.object({
-  schema_version: z.number().int(), ask_id: z.string().min(1), subscriber_agent_id: z.string().min(1),
+  schema_version: z.number().int(), ask_id: CanonicalIdSchema, subscriber_agent_id: CanonicalIdSchema,
   timeout_ms: z.number().int().min(COMM_WAIT_TIMEOUT_MS).default(COMM_WAIT_TIMEOUT_MS),
 });
 export type CommWaitRequest = z.infer<typeof CommWaitRequestSchema>;
@@ -605,7 +622,7 @@ export const ModeTransitionMechanismSchema = z.enum(MODE_TRANSITION_MECHANISMS);
 
 export const ModeTransitionRequestSchema = z.strictObject({
   schema_version: z.number().int(),
-  target: z.string().min(1),
+  target: CanonicalIdSchema,
   intent: ModeTransitionIntentSchema,
   trigger: ModeTransitionTriggerSchema,
 });
