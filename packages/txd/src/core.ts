@@ -1713,7 +1713,7 @@ export class Daemon {
               closed: false,
               reason: observed.liveness === 'alive'
                 ? `live_engine: an engine for this agent is running under ${binding.seat_id} (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close a hung agent`
-                : `liveness_unobservable: ${binding.seat_id} runs its engine beyond this machine, so txd cannot prove it dead (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close it anyway`,
+                : `liveness_unobservable: txd cannot observe an engine for this agent at ${binding.seat_id} and cannot prove it dead — the seat may run its engine beyond this machine, or the observation itself failed (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close it anyway`,
             });
             continue;
           }

@@ -189,7 +189,7 @@ test('a remote seat is never reported dead merely because its child is a tunnel'
   await overseer(d, store);
   await bind(d, store, 'somnium:S', 'remote-1');
   await stopped(store, 'remote-1');
-  tmux.markSeatRemote('somnium:S');
+  tmux.markSeatUnobservable('somnium:S');
 
   const targeted = await d.close(req({ targets: ['remote-1'] }));
   expect(targeted.ok).toBe(false);
@@ -206,7 +206,47 @@ test('a remote seat is never reported dead merely because its child is a tunnel'
   expect(forced.ok).toBe(true);
 });
 
-test('an agent with no live engine closes without force', async () => {
+// Only a pane that is GONE is provably dead. A pane that exists but shows no
+// matching engine is unknown, not dead — that is the whole inversion.
+// Could-not-check must never become a verdict, and a close is the most
+// expensive place to get that wrong. A failed observation — an unreadable
+// /proc entry, a permissions refusal, a tmux hiccup, an unrecognised engine
+// comm, an agent mid-launch — is refused exactly like a live one, and the
+// verdict SAYS WHICH so the two are distinguishable after the fact.
+test('an observation failure refuses the close and is distinguishable from death', async () => {
+  const { store, tmux, d } = setup();
+  await overseer(d, store);
+  await bind(d, store, 'reservists:W', 'blind-1');
+  await stopped(store, 'blind-1');
+  tmux.markSeatUnobservable('reservists:W');
+
+  const refused = await d.close(req({ targets: ['blind-1'] }));
+  expect(refused.ok).toBe(false);
+  const reason = refused.verdicts[0]!.reason!;
+  expect(reason).toContain('liveness_unobservable');
+  // Not confusable with either other verdict.
+  expect(reason).not.toContain('live_engine');
+  expect(reason).not.toContain('no_binding');
+  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('blind-1');
+});
+
+// A live engine and an unobservable seat must never produce the same verdict:
+// a guard whose failure modes are indistinguishable in its output cannot be
+// debugged after it has eaten something.
+test('live and unobservable are different verdicts, not one refusal', async () => {
+  const { store, tmux, d } = setup();
+  await overseer(d, store);
+  await bind(d, store, 'reservists:W', 'live-1');
+  await bind(d, store, 'reservists:S', 'blind-2');
+  tmux.markAgentAlive('reservists:W', 'live-1');
+  tmux.markSeatUnobservable('reservists:S');
+
+  const res = await d.close(req({ targets: ['live-1', 'blind-2'] }));
+  expect(res.verdicts.find((v) => v.target === 'live-1')!.reason).toContain('live_engine');
+  expect(res.verdicts.find((v) => v.target === 'blind-2')!.reason).toContain('liveness_unobservable');
+});
+
+test('an observably dead agent closes without force', async () => {
   const { store, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'reservists:W', 'w-1');

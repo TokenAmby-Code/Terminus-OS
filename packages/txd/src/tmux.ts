@@ -569,17 +569,22 @@ export class RealTmux implements TmuxControlPlane {
     const observed = await this.command('observe_pane_pid', seatId, [
       'list-panes', '-a', '-F', `#{${CANON_OPT}}\t#{pane_pid}`,
     ]);
-    // A seat we cannot even resolve is not a seat we may destroy on.
+    // Only tmux's own answer can establish absence. If we cannot ask, we do
+    // not know — and not knowing must never license a close.
     if (observed.code !== 0) return 'unobservable';
     const panePid = observed.stdout.split('\n').flatMap((line) => {
       const [canonical, rawPid] = line.split('\t');
       return canonical === seatId && rawPid ? [Number(rawPid)] : [];
     })[0];
+    // The seat has no pane at all. That is a POSITIVE observation of absence:
+    // there is nothing left to be running, so the agent is dead.
+    if (panePid === undefined) return 'dead';
     if (!Number.isInteger(panePid)) return 'unobservable';
 
-    // Walk the pane's descendants. The engine is the wrapper's child, so a
-    // fixed depth would be a guess; following the process tree is not.
-    let frontier = [panePid!];
+    // Walk the pane's descendants. The wrapper BACKGROUNDS the engine rather
+    // than exec-ing it, so a fixed depth would be a guess; following the tree
+    // is not.
+    let frontier = [panePid];
     const visited = new Set<number>(frontier);
     while (frontier.length > 0) {
       for (const pid of frontier) {
@@ -589,11 +594,24 @@ export class RealTmux implements TmuxControlPlane {
       const children = await Promise.all(frontier.map((pid) => processChildren(pid)));
       frontier = children.flat().filter((pid) => !visited.has(pid) && visited.add(pid));
     }
-    // No local engine. On an ssh seat that proves nothing: txd stamps
-    // TXD_SSH_TARGET into the pane environment precisely to mark that the
-    // engine lives on the far side. Say unobservable rather than dead.
-    return await processEnv(panePid!, SSH_TARGET_ENV) ? 'unobservable' : 'dead';
+
+    // The pane EXISTS but no matching local engine was found. That is not
+    // evidence of death, and it is reached by several very different worlds:
+    //
+    //   - an ssh seat, whose wrapper runs the engine in a REMOTE tmux envelope,
+    //     so the local descendants are a tunnel by construction (council:
+    //     orchestrator carries no TXD_SSH_TARGET at all, so no marker can be
+    //     trusted to identify these);
+    //   - an unreadable /proc entry, a permissions refusal, or a tmux hiccup;
+    //   - an engine whose comm is renamed, added, or truncated by /proc's
+    //     15-character limit, which ENGINE_COMMANDS would not recognise;
+    //   - an agent mid-launch whose engine has not exec'd yet.
+    //
+    // Every one of those is a live-or-unknown agent, and answering 'dead'
+    // reaps it. Absence of proof is not proof of absence: this says so.
+    return 'unobservable';
   }
+
 
   /** Resolve canonical id -> internal %id (membrane; return value stays inside). */
   private async resolvePane(seatId: string): Promise<string | null> {
@@ -1846,18 +1864,27 @@ export class FakeTmux implements TmuxControlPlane {
    */
   liveAgents = new Map<string, string>();
   unobservableSeats = new Set<string>();
+  /** Test control: this agent's engine is observably running. */
   markAgentAlive(seatId: string, agentId: string): void {
     this.liveAgents.set(seatId, agentId);
   }
-  /** Test control: a seat whose engine runs beyond this machine (an ssh seat). */
-  markSeatRemote(seatId: string): void {
+  /**
+   * Test control: this seat cannot be observed from here — an ssh transport
+   * whose engine runs in a remote envelope, an unreadable /proc entry, an
+   * unrecognised engine comm, or an agent mid-launch. The real probe reaches
+   * this verdict on its own; the fake needs it stated because it models no
+   * process tree.
+   */
+  markSeatUnobservable(seatId: string): void {
     this.unobservableSeats.add(seatId);
   }
   async agentLiveness(seatId: string, agentId: string): Promise<AgentLiveness> {
     const s = this.seats.get(seatId);
-    if (!s || !agentId) return 'unobservable';
+    if (!agentId) return 'unobservable';
     if (this.liveAgents.get(seatId) === agentId) return 'alive';
     if (this.unobservableSeats.has(seatId)) return 'unobservable';
-    return s.pane === 'dead' ? 'dead' : 'dead';
+    // Default DEAD on purpose: a test must ASSERT liveness to get protection,
+    // so a guard regression shows up as a reaped fake rather than a quiet pass.
+    return 'dead';
   }
 }
