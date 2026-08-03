@@ -323,6 +323,7 @@ export class Daemon {
         agentId: request.agent_id,
         launchNonce,
         ...(sshTarget ? { sshTarget } : {}),
+        ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
       }))) {
         await refuse('seat_start_failed');
         return;

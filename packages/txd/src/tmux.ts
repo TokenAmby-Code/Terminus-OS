@@ -42,6 +42,11 @@ export type SeatEngineLaunch = {
   launchNonce: string;
   // The seat's declared target machine alias; absent for a local seat.
   sshTarget?: string;
+  // The orders the dispatch carried, handed to the engine as its opening
+  // prompt. Absent for a bodiless dispatch. It travels as one argv element so
+  // a brief keeps its backticks, blank lines and `$` byte-for-byte; nothing
+  // between here and the engine re-quotes it.
+  prompt?: string;
 };
 export type WrapperPlacementAttestation =
   | {
@@ -1217,7 +1222,12 @@ export class RealTmux implements TmuxControlPlane {
       `${LAUNCH_NONCE_ENV}=${this.shellQuote(launch.launchNonce)}`,
       ...(launch.sshTarget ? [`${SSH_TARGET_ENV}=${this.shellQuote(launch.sshTarget)}`] : []),
     ].join(' ');
-    const command = `exec /usr/bin/env ${environment} ${this.shellQuote(launch.wrapper)} ${this.shellQuote(launch.engine)}`;
+    const command = [
+      `exec /usr/bin/env ${environment}`,
+      this.shellQuote(launch.wrapper),
+      this.shellQuote(launch.engine),
+      ...(launch.prompt === undefined ? [] : [this.shellQuote(launch.prompt)]),
+    ].join(' ');
     const result = await this.command('start_seat_engine', launch.seatId, [
       'respawn-pane', '-k',
       ...this.paneEnvironment(launch.seatId), '-t', paneId, command,
