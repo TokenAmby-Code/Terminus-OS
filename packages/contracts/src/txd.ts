@@ -43,7 +43,78 @@ export const SCHEMA_VERSION = 11;
 // caller meant by an id. A predicate over free text cannot know that, and one
 // that guesses refuses legitimate messages — including, as it turns out, every
 // message that quotes a pane id in order to report one.
-const TMUX_SIGIL_ID = /[%@$]\d+\b/;
+const TMUX_SIGIL_ID = /([%@$]\d+)\b/;
+const TMUX_SIGIL_ID_GLOBAL = /[%@$]\d+\b/g;
+
+/** The first raw tmux id in a string, or null. */
+export function findTmuxId(text: string): string | null {
+  const m = TMUX_SIGIL_ID.exec(text);
+  return m ? m[1]! : null;
+}
+
+/** Redact below-membrane identifiers before an error reaches structured logs. */
+export function sanitizeTmuxIds(text: string): string {
+  return text.replace(TMUX_SIGIL_ID_GLOBAL, '[tmux-id]');
+}
+
+/**
+ * The keys that carry an ESTATE IDENTIFIER — the membrane's structural basis,
+ * declared and greppable rather than a scan that guesses from shape.
+ *
+ * Everything NOT named here is data: a comm body, an agent's reply, a stop
+ * hook's last message, a command line, a digest. Prose that happens to contain
+ * a sigil is prose, and only a field claiming to be an identifier can leak one.
+ *
+ * This lives in contracts because BOTH the daemon and the `tx` client must
+ * judge on the same basis. Two copies of this rule is two rules.
+ */
+export const IDENTIFIER_KEYS: ReadonlySet<string> = new Set([
+  'entity_id', 'agent_id', 'source_agent_id', 'target_agent_id', 'subscriber_agent_id',
+  'seat_id', 'seat', 'seats', 'bound_seats', 'pane', 'pane_id', 'claimed_pane_id',
+  'page', 'target', 'targets', 'dispatch_target',
+  // An opaque edge-proxy receipt: it identifies a transport interaction and
+  // never carries caller prose, so judging it costs nothing.
+  'transport_receipt',
+]);
+
+function findTmuxIdInValue(value: unknown, path: string): string | null {
+  if (typeof value === 'string') return findTmuxId(value) ? path : null;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const hit = findTmuxIdInValue(value[i], `${path}[${i}]`);
+      if (hit) return hit;
+    }
+  }
+  return null;
+}
+
+/**
+ * Scan only the IDENTIFIER-bearing fields of a structure, at any depth.
+ * Objects and arrays are still walked so a nested identifier cannot hide, but a
+ * string is only tested when the key holding it declares itself an identifier.
+ * Object KEYS are judged unconditionally: a key is structure, never prose.
+ */
+export function findTmuxIdInIdentifiers(value: unknown, path = '$'): string | null {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const hit = findTmuxIdInIdentifiers(value[i], `${path}[${i}]`);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (value && typeof value === 'object') {
+    for (const [k, v] of Object.entries(value)) {
+      if (findTmuxId(k)) return `${path}.* (key)`;
+      if (IDENTIFIER_KEYS.has(k)) {
+        const hit = findTmuxIdInValue(v, `${path}.${k}`);
+        if (hit) return hit;
+      }
+      const nested = findTmuxIdInIdentifiers(v, `${path}.${k}`);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
 export const CanonicalIdSchema = z
   .string()
   .min(1)

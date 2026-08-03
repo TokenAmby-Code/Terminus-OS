@@ -99,3 +99,62 @@ test('mode target cannot consume the next option token', async () => {
   expect(h.calls).toEqual([]);
   expect(h.stderr[0]).toContain('--target requires a logical identity');
 });
+
+// The CLI print guard used to scan EVERY string it was about to print and throw
+// on the three tmux sigils. That made the operator-visible half of the same
+// defect the daemon was corrected for: txd returns an agent's answer correctly,
+// and tx refuses to show it.
+//
+// An output string is PROSE. A print guard cannot know whether a sigil in an
+// answer is an identifier or a quotation — it is not positioned to know — so it
+// judges structural fields and nothing else, on the same basis as the daemon.
+test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
+  // `comm --ask` resolves the CALLER's identity before it can print anything.
+  // A process with no agent in its ancestry cannot resolve AGENT_ID, so runCli
+  // refuses at identity resolution and never reaches the print path this test
+  // exists to assert. Scoped and restored, matching comm.test.ts.
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const h = harness({
+    ask_id: 'ask-1',
+    complete: true,
+    callbacks: [{
+      target: { agent_id: 'a-1', seat_id: 'palace:W', persona: 'p' },
+      content: 'attesting from pane %28 with window @5 and session $5.',
+      assertion_event_id: 1,
+      source: 'reply',
+    }],
+    outstanding: [],
+  });
+  try {
+    expect(await runCli(['comm', '--ask', 'palace:W', 'report your seat'], h.deps)).toBe(0);
+    expect(h.stderr).toEqual([]);
+    expect(JSON.parse(h.stdout[0]!).callbacks[0].content)
+      .toBe('attesting from pane %28 with window @5 and session $5.');
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('ordinary prose carrying sigil-shaped tokens is printed', async () => {
+  for (const text of ['pin zod@4.4', 'the positional $1', 'it cost $20']) {
+    const h = harness({ ok: true, message: text });
+    expect(await runCli(['health'], h.deps)).toBe(0);
+    expect(h.stderr).toEqual([]);
+    expect(JSON.parse(h.stdout[0]!).message).toBe(text);
+  }
+});
+
+// The leak-upward protection is NARROWED, not removed: an IDENTIFIER field
+// carrying a raw tmux id still refuses, because that is txd leaking one.
+test('an identifier field carrying a raw tmux id is still refused', async () => {
+  for (const body of [
+    { ok: true, seat_id: '%5' },
+    { ok: true, targets: ['palace:W', '@7'] },
+    { ok: true, nested: { agent_id: '$3' } },
+  ]) {
+    const h = harness(body);
+    expect(await runCli(['health'], h.deps)).toBe(1);
+    expect(h.stderr[0]).toContain('raw tmux identifier');
+  }
+});
