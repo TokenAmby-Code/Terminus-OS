@@ -31,21 +31,14 @@ test('assertNoTmuxId throws loud on a leak', async () => {
   expect(() => assertNoTmuxId({ pane: '%5' }, 'test')).toThrow(/canonical-id breach/);
 });
 
-test('mutation ingress recursively rejects raw tmux ids before tmux or persistence', async () => {
-  // The bus door is deliberately absent here: bus deliveries are not agent
-  // mutations, and its membrane semantics (ack-not-consume on a leaking
-  // consumed payload, tolerate %N text in unconsumed payloads) are pinned in
-  // ingress-bus.test.ts.
-  const paths = ['/agents/launch', '/agents/close'];
-  const valid = [
-    { seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' },
-    { source_agent_id: 'ov-1', targets: ['palace:W'], schema_version: 11 },
-    { agent_id: 'i1', schema_version: 11, action: 'close' },
-  ];
-  const attacks = [
-    (body: Record<string, unknown>) => ({ ...body, metadata: { pane: '%91' } }),
-    (body: Record<string, unknown>) => ({ ...body, metadata: ['safe', '@22'] }),
-    (body: Record<string, unknown>) => ({ ...body, metadata: { '$7': 'safe' } }),
+test('mutation ingress refuses a raw tmux id IN AN IDENTIFIER FIELD, before tmux or persistence', async () => {
+  // The membrane is the schema: every field declaring itself an identifier
+  // refuses a raw tmux id on its own path. Nothing scans request content.
+  const attacks: Array<{ path: string; body: Record<string, unknown>; error: string }> = [
+    { path: '/agents/launch', error: 'invalid_launch_request', body: { seat_id: '%91', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' } },
+    { path: '/agents/launch', error: 'invalid_launch_request', body: { seat_id: 'palace:W', schema_version: 11, identity: '@22', persona: 'p', tint: '#1' } },
+    { path: '/agents/close', error: 'invalid_close_request', body: { source_agent_id: 'ov-1', targets: ['$7'], schema_version: 11 } },
+    { path: '/agents/close', error: 'invalid_close_request', body: { source_agent_id: '%3', targets: ['palace:W'], schema_version: 11 } },
   ];
   const store = new MemoryEventStore();
   let tmuxCalls = 0;
@@ -54,24 +47,20 @@ test('mutation ingress recursively rejects raw tmux ids before tmux or persisten
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
       if (typeof value !== 'function') return value;
-      return (...args: unknown[]) => {
-        tmuxCalls += 1;
-        return value.apply(target, args);
-      };
+      return (...args: unknown[]) => { tmuxCalls += 1; return value.apply(target, args); };
     },
   }) as TmuxControlPlane;
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(store, tmux), build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
   try {
-    for (let i = 0; i < paths.length; i += 1) {
-      for (const attack of attacks) {
-        const res = await fetch(`http://127.0.0.1:${srv.port}${paths[i]}`, {
-          method: 'POST', body: JSON.stringify(attack(valid[i]!)),
-        });
-        expect(res.status).toBe(422);
-        const response = await res.json() as Record<string, unknown>;
-        expect(response).toEqual({ ok: false, error: `invalid_${paths[i]!.split('/').pop()}_request`, field: expect.any(String) });
-        expect(findTmuxIdDeep(response)).toBeNull();
-      }
+    for (const attack of attacks) {
+      const res = await fetch(`http://127.0.0.1:${srv.port}${attack.path}`, {
+        method: 'POST', body: JSON.stringify(attack.body),
+      });
+      expect(res.status).toBe(422);
+      const response = await res.json() as Record<string, unknown>;
+      expect(response).toEqual({ ok: false, error: attack.error, field: expect.any(String) });
+      // The refusal must not echo the offending id back through the membrane.
+      expect(findTmuxIdDeep(response)).toBeNull();
     }
     expect(tmuxCalls).toBe(0);
     expect(await store.count()).toBe(0);
@@ -79,6 +68,29 @@ test('mutation ingress recursively rejects raw tmux ids before tmux or persisten
     srv.stop(true);
   }
 });
+
+// Adversarial: content scanning stays dead. These are the shapes that were
+// refused before — a package pin, a shell positional, a dollar amount, and a
+// pane id quoted in prose. Each is legitimate caller content and must pass.
+test('request CONTENT carrying tmux sigils is never refused', async () => {
+  const store = new MemoryEventStore();
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(store, new FakeTmux()), build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
+  try {
+    for (const message of ['pin zod@4.4', 'the positional $1', 'it cost $20', 'attesting from pane %28']) {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
+        method: 'POST',
+        body: JSON.stringify({ schema_version: 11, source_agent_id: 'ov-1', target: 'palace:W', message }),
+      });
+      // Whatever the daemon decides about routing, it must never be a 422
+      // blaming the message body for containing an identifier-shaped token.
+      const body = await res.json() as Record<string, unknown>;
+      expect(body).not.toMatchObject({ error: 'invalid_comm_request', field: '$.message' });
+    }
+  } finally {
+    srv.stop(true);
+  }
+});
+
 
 test('handler errors are sanitized before structured logging', async () => {
   class LeakingAdapter extends FakeTmux {

@@ -55,7 +55,7 @@ import {
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
-import { assertNoTmuxId, findTmuxIdDeep, sanitizeTmuxIds } from './ids.ts';
+import { assertNoTmuxId, sanitizeTmuxIds } from './ids.ts';
 
 export type BuildInfo = { version: string; git_sha: string; bun: string };
 
@@ -153,10 +153,12 @@ type MutationSchema<T> = {
     | { success: false; error: { issues: Array<{ path: PropertyKey[] }> } };
 };
 
+// The inbound membrane is the SCHEMA: every field that declares itself an
+// identifier is a CanonicalIdSchema and refuses a raw tmux id on its own path.
+// Request content is never scanned — a body is the caller's prose, and no
+// predicate over prose can know what the caller meant by an id.
 async function parseMutation<T>(req: Request, schema: MutationSchema<T>, error: string): Promise<T | Response> {
   const body = await readJson(req);
-  const rawIdPath = findTmuxIdDeep(body);
-  if (rawIdPath) return json({ ok: false, error, field: rawIdPath }, 422);
   const parsed = schema.safeParse(body);
   if (!parsed.success) {
     return json({ ok: false, error, field: issuePath(parsed.error.issues[0]?.path ?? []) }, 422);
@@ -209,12 +211,6 @@ function clipboardFailure(error: unknown, direction: 'pull' | 'push' | 'selectio
   if (message.includes('exceeds')) return json({ ok: false, error: 'clipboard_too_large', direction }, 422);
   if (message.includes('valid UTF-8')) return json({ ok: false, error: 'clipboard_invalid_utf8', direction }, 422);
   return json({ ok: false, error: 'clipboard_unavailable', direction }, 409);
-}
-
-async function rejectRawMutation(req: Request, error: string): Promise<Response | null> {
-  const body = await readJson(req);
-  const rawIdPath = findTmuxIdDeep(body);
-  return rawIdPath ? json({ ok: false, error, field: rawIdPath }, 422) : null;
 }
 
 // Ordered route table — the ordering is data so committed route tests can
@@ -277,8 +273,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       match: exact('/ctl/reconcile'),
       label: 'POST /ctl/reconcile',
       handler: async (req) => {
-        const rejected = await rejectRawMutation(req, 'invalid_reconcile_request');
-        if (rejected) return rejected;
+        // Reconcile takes no caller-supplied identifier; its body is unused.
         const res = await daemon.reconcile(receipt(req));
         // Bring-up mode: p0 contradiction ⇒ fail loud with a non-2xx.
         return json(res, res.p0 ? 409 : 200);
@@ -434,39 +429,33 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           }
         };
         if (event.event_type === 'hook.wrapper_start') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const hook = WrapperStartHookSchema.safeParse(event.payload);
           if (!hook.success) return ack(false, 'invalid_wrapper_start_payload');
           const result = await daemon.attestWrapperStart(hook.data);
           return ack(result.attested, result.reason);
         }
         if (event.event_type === 'agent.dispatch_requested') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const requested = DispatchRequestedSchema.safeParse(event.payload);
           if (!requested.success) return ack(false, 'invalid_dispatch_request');
           if (requested.data.machine !== machine) return ack(false, 'foreign_machine');
           return physicalAck(() => daemon.dispatch(requested.data));
         }
         if (event.event_type === 'agent.physical_declared') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const declaration = PhysicalDeclarationSchema.safeParse(event.payload);
           if (!declaration.success) return ack(false, 'invalid_physical_declaration');
           return physicalAck(() => daemon.recordPhysicalDeclaration(declaration.data, busReceipt));
         }
         if (event.event_type === 'agent.registration_aborted') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const abort = RegistrationAbortedSchema.safeParse(event.payload);
           if (!abort.success) return ack(false, 'invalid_registration_abort');
           return physicalAck(() => daemon.abortRegistration(abort.data, busReceipt));
         }
         if (event.event_type === 'agent.registered') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const agent = AgentSchema.safeParse(event.payload);
           if (!agent.success) return ack(false, 'invalid_registered_agent');
           return physicalAck(() => daemon.activateRegisteredAgent(agent.data));
         }
         if (event.event_type === 'hook.stop') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const stop = StopRequestSchema.safeParse(stopHookInput(event.payload, event.seq));
           if (!stop.success) return ack(false, 'invalid_stop_payload');
           const res = await daemon.stop(stop.data, busReceipt);
@@ -479,7 +468,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           return ack(true, null, { receipt: res });
         }
         if (event.event_type === 'hook.user_prompt_submit') {
-          if (findTmuxIdDeep(event.payload)) return ack(false, 'tmux_id_refused');
           const hook = CommHookSchema.safeParse(promptHookInput(event.payload));
           if (!hook.success) return ack(false, 'invalid_user_prompt_submit_payload');
           try {
