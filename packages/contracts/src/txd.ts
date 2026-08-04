@@ -442,8 +442,9 @@ export type LaunchResponse = z.infer<typeof LaunchResponseSchema>;
 // nothing (spec §4: retired is not terminal until process_reaped + seat_cleared).
 //
 // Closing is an overseer capability: source_agent_id must resolve to a
-// registered binding holding CLOSE_REQUIRED_RANK. Graceful by default — an
-// agent whose recorded activity is 'working' (mid-turn) refuses absent force.
+// registered binding holding CLOSE_REQUIRED_RANK. An explicit stopped target
+// is the intended close; other live or unobservable targets refuse absent
+// force.
 // Bulk is first-class: one request selects explicit targets OR one page's
 // closable agents OR every closable agent, and every selected target retires
 // individually with its own facts — never a page rebuild.

@@ -1680,18 +1680,12 @@ export class Daemon {
       const proj = await this.projections();
       const turnOf = (agentId: string | null): string =>
         (agentId ? proj.turnByAgent.get(agentId) ?? 'unobserved' : 'unobserved');
-      // Close is irreversible, so it asks the operating system rather than the
-      // turn fold. `awaiting_input` is the resting state of every healthy agent
-      // between turns, and a message parked in a composer never produces
-      // act.prompt_submitted at all — so an agent commed back into work still
-      // reads `awaiting_input` while it works. Selecting on the fold alone reaps
-      // live workers, which is what killed two of them.
-      // Only a positively OBSERVED-DEAD agent may be closed. 'alive' refuses
-      // for the obvious reason; 'unobservable' refuses because converting a
-      // thing we cannot see into a destructive verdict is precisely the defect
-      // being removed. An ssh seat's pane child is the TUNNEL — the engine runs
-      // on the far side, where this machine cannot look — so reading that as
-      // dead would reap healthy remote agents.
+      // Close is irreversible. An explicit target whose latest durable turn
+      // fact is `awaiting_input` names the intended post-stop close boundary;
+      // its engine remains alive at the prompt by design. Every other explicit
+      // target and every filtered close asks the operating system. There,
+      // 'alive' and 'unobservable' both refuse, and only positively observed
+      // death admits the close.
       const closable = async (binding: { seat_id: string; agent_id: string | null }) => {
         const liveness = await this.tmux.agentLiveness(binding.seat_id, binding.agent_id ?? '');
         return { liveness, may: liveness === 'dead' };
@@ -1750,7 +1744,10 @@ export class Daemon {
             });
             continue;
           }
-          const observed = req.force ? null : await closable(binding);
+          // Naming one stopped agent is the ordinary lifecycle close, not a
+          // force variant. Filters name no agent and never inherit this intent.
+          const intendedStoppedClose = turnOf(binding.agent_id) === 'awaiting_input';
+          const observed = req.force || intendedStoppedClose ? null : await closable(binding);
           if (observed && !observed.may) {
             // Graceful by default: a live engine is working even when the turn
             // fold says otherwise, and a mid-turn close destroys work and
