@@ -285,6 +285,21 @@ export const DispatchRefusedSchema = z.object({
 }).strict();
 export type DispatchRefused = z.infer<typeof DispatchRefusedSchema>;
 
+// A perpetual seat is one the estate keeps staffed. txd observes the vacancy —
+// no binding, and a pane running nothing of its own — and says so; it does not
+// staff the seat itself. Identity is registrationd's to mint, so the seat is
+// filled by the same dispatch every other agent is born through: one birth
+// path, and no way for a pane to come up carrying no identity.
+export const PerpetualSeatVacantSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  machine: z.string().min(1),
+  seat_id: z.string().min(1),
+  // The engine the seat is declared to run. The declaration is txd's; which
+  // agent arrives to run it is not.
+  engine: EngineSchema,
+}).strict();
+export type PerpetualSeatVacant = z.infer<typeof PerpetualSeatVacantSchema>;
+
 // Post-birth, registrationd never initiates retirement. txd publishes this at
 // the point it writes reg.retired — the reactive leg of the retirement
 // authority split; lifecycled owns the proactive leg. Consumers terminalize

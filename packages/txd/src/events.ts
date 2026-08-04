@@ -13,6 +13,7 @@ export type TxdPublishedEventType =
   | 'agent.pane_refused'
   | 'agent.placement_attested'
   | 'agent.placement_refused'
+  | 'agent.perpetual_seat_vacant'
   | 'agent.retired'
   | 'agent.unregistered_closed';
 
