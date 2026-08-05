@@ -72,6 +72,18 @@ test('composer chrome and wrapping do not read as corruption', () => {
   expect(RealTmux.composerVerdict(pane, id, frame(id, 'read the orders file and begin.'))).toBe('intact');
 });
 
+test('behavioral pin: a narrow pane may wrap inside the frame id and payload words', () => {
+  const id = 'd251aa8e-c375-49d2-9c29-71707a245674';
+  const pane = [
+    '│ › [tx comm d251aa8e-c375-',
+    '│   49d2-9c29-71707a245674 from',
+    '│   sender]',
+    '│   read the ord',
+    '│   ers file and begin.',
+  ].join('\n');
+  expect(RealTmux.composerVerdict(pane, id, frame(id, 'read the orders file and begin.'))).toBe('intact');
+});
+
 // ── the redrive mechanism ────────────────────────────────────────────────────
 
 test('redrive on an intact parked frame drives Enter once and attests it', async () => {

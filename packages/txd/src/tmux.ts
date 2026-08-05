@@ -138,6 +138,7 @@ export interface TmuxControlPlane {
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
   /**
    * Re-drive a parked comm frame with a single Enter — never by retyping.
    * Enter fires only when the visible composer holds the frame AND its text
@@ -1362,13 +1363,18 @@ export class RealTmux implements TmuxControlPlane {
    * still verifies while a frame the send-keys race mangled does not.
    */
   static composerVerdict(pane: string, messageId: string, expectedFrame: string): ComposerVerdict {
-    const normalize = (text: string) => text.replace(/[│┃›>]/g, ' ').replace(/\s+/g, ' ').trim();
+    const normalize = (text: string) => text.replace(/[│┃›>]/g, '').replace(/\s+/g, '');
     // Both gates read the SAME normalized text: a bordered composer re-flows
     // its own lines (capture -J rejoins only terminal wraps), so the raw pane
     // may split the very header the absence gate looks for.
     const normalized = normalize(pane);
-    if (!normalized.includes(`tx comm ${messageId}`)) return 'absent';
+    if (!normalized.includes(normalize(`tx comm ${messageId}`))) return 'absent';
     return normalized.includes(normalize(expectedFrame)) ? 'intact' : 'corrupted';
+  }
+
+  static inputVerdict(pane: string, expected: string): ComposerVerdict {
+    const normalize = (text: string) => text.replace(/[│┃›>]/g, '').replace(/\s+/g, '');
+    return normalize(pane).includes(normalize(expected)) ? 'intact' : 'corrupted';
   }
 
   async redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
@@ -1402,6 +1408,23 @@ export class RealTmux implements TmuxControlPlane {
     const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
     if (enter.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered' };
     return { bytes, verdict: 'staged' };
+  }
+
+  async sendVerifiedToSeat(seatId: string, correlationId: string, text: string) {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
+    if (literal.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    const bytes = Buffer.byteLength(text, 'utf8');
+    const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
+    if (captured.code !== 0) return { bytes, verdict: 'seat_unresolved' as const };
+    const verdict = text.includes(`tx comm ${correlationId}`)
+      ? RealTmux.composerVerdict(captured.stdout, correlationId, text)
+      : RealTmux.inputVerdict(captured.stdout, text);
+    if (verdict === 'absent') return { bytes, verdict: 'frame_absent' as const };
+    if (verdict === 'corrupted') return { bytes, verdict: 'composer_corrupted' as const };
+    const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
+    return enter.code === 0 ? { bytes, verdict: 'staged' as const } : { bytes, verdict: 'seat_unresolved' as const };
   }
 
   // A posed plan is a vendor approval dialog, not a footer state. Claude poses
@@ -1898,6 +1921,10 @@ export class FakeTmux implements TmuxControlPlane {
     if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
     this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' };
+  }
+  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string) {
+    const sent = await this.sendToSeat(seatId, text);
+    return sent;
   }
   /** Test observation: every text staged into this seat, in order. */
   sends(seatId: string): string[] { return [...(this.sentLines.get(seatId) ?? [])]; }

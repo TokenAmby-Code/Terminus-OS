@@ -208,6 +208,7 @@ export const ACT_EVENT_NAMES = [
   'stop_reported',
   'receipt_deduped',
   'comm_bytes_sent',
+  'agent_input_injected',
   'comm_delivery_asserted',
   'comm_redrive_attempted',
   'comm_delivery_failed',
@@ -255,6 +256,7 @@ export const EVENT_TYPES = [
   'act.stop_reported',
   'act.receipt_deduped',
   'act.comm_bytes_sent',
+  'act.agent_input_injected',
   'act.comm_delivery_asserted',
   'act.comm_redrive_attempted',
   'act.comm_delivery_failed',
@@ -649,6 +651,11 @@ export const CommRequestSchema = z.object({
   if (value.reply && value.ask) ctx.addIssue({ code: 'custom', message: 'reply cannot also ask' });
 });
 export type CommRequest = z.infer<typeof CommRequestSchema>;
+export const AgentInjectRequestSchema = z.object({
+  schema_version: z.number().int(),
+  target_agent_id: CanonicalIdSchema,
+  text: z.string().min(1),
+}).strict();
 
 export const CommTargetSchema = z.object({ agent_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
 export type CommTarget = z.infer<typeof CommTargetSchema>;
