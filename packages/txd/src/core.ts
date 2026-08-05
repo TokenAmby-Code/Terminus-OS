@@ -27,6 +27,10 @@ import {
   type CommDeliveryReadResponse,
   type CommHook,
   type CommRequest,
+  type CommRedriveRequest,
+  type CommRedriveResponse,
+  type CommFailLoudRequest,
+  type CommFailLoudResponse,
   type CommTarget,
   type CommWaitRequest,
   type CommWaitResponse,
@@ -84,6 +88,17 @@ import type { TxdPublishedEventType } from './events.ts';
 export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as const;
 
 type Now = () => string;
+// What txd hands lifecycled to arm one comm watch: enough to name the
+// subscription's agent stream and the message the absence edge will redrive.
+export type CommWatchArmInput = { message_id: string; target_agent_id: string; source_agent_id: string };
+
+// The ONE comm frame template. comm() stages it and commRedrive() verifies
+// the composer against it; a second copy of this string would let the two
+// silently diverge and turn every redrive into a false `composer_corrupted`.
+function commFrame(messageId: string, sourceAgentId: string, askId: string | null, message: string): string {
+  return `[tx comm ${messageId} from ${sourceAgentId}${askId ? ` ask ${askId}` : ''}]\n${message}`;
+}
+
 export type PhysicalRegistrationRuntime = {
   machine: string;
   configuration: { generation: string; digest: string };
@@ -149,6 +164,7 @@ export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
 
+
   constructor(
     private store: EventStore,
     private tmux: TmuxControlPlane,
@@ -156,6 +172,8 @@ export class Daemon {
     private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
     private physicalRegistration: PhysicalRegistrationRuntime | null = null,
     private remoteEnvelopes: RemoteEnvelopeLister | null = null,
+    /** Arms lifecycled's comm watch pre-send; null = no watch plane configured. */
+    private commWatchArm: ((input: CommWatchArmInput) => Promise<void>) | null = null,
   ) {}
 
   async attestWrapperStart(
@@ -988,6 +1006,26 @@ export class Daemon {
     return matches.map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
   }
 
+  // Arm the delivery watch for one target BEFORE its bytes go to the pane —
+  // the subscription must exist before the submit it waits on can possibly
+  // fire. A dead watch plane degrades loudly, never fatally: comms must not
+  // lose availability to lifecycled, but the gap is attested, not swallowed.
+  private async armCommWatch(
+    messageId: string,
+    sourceAgentId: string,
+    targetAgentId: string,
+    transportReceipt: string | null,
+  ): Promise<void> {
+    if (!this.commWatchArm) return;
+    try {
+      await this.commWatchArm({ message_id: messageId, target_agent_id: targetAgentId, source_agent_id: sourceAgentId });
+    } catch (error) {
+      await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
+        payload: { message_id: messageId, target_agent_id: targetAgentId, detail: String(error) },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+    }
+  }
+
   comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
@@ -1030,7 +1068,8 @@ export class Daemon {
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
       const event_ids = [accepted.seq, snapshot.seq];
       for (const target of targets) {
-        const frame = `[tx comm ${messageId} from ${req.source_agent_id}${askId ? ` ask ${askId}` : ''}]\n${req.message}`;
+        await this.armCommWatch(messageId, req.source_agent_id, target.agent_id, transportReceipt);
+        const frame = commFrame(messageId, req.source_agent_id, askId, req.message);
         const sent = await this.tmux.sendToSeat(target.seat_id, frame);
         if (sent.verdict !== 'staged') throw new Error(`transport_${sent.verdict}: ${target.agent_id}`);
         const event = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
@@ -1174,6 +1213,60 @@ export class Daemon {
         if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`);
       }
       return { ok: true, asserted };
+    });
+  }
+
+  // The remedial half of the two-phase comm contract. Both methods are
+  // deliberate pane actions: something else (lifecycled's absence edge, or an
+  // operator) decides WHEN; this is mechanism only, and both are idempotent
+  // against the race they exist to lose gracefully — a late organic submit.
+  private async commRemedialContext(messageId: string, targetAgentId: string) {
+    const events = await this.store.readAll();
+    const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
+    if (!accepted) throw new Error('message_absent');
+    if (!(accepted.payload.target_agent_ids as unknown[]).includes(targetAgentId)) throw new Error('target_mismatch');
+    const delivered = events.some((e) => e.entity_id === `${messageId}:${targetAgentId}` && e.event_type === 'act.comm_delivery_asserted');
+    return { events, accepted, delivered };
+  }
+
+  commRedrive(req: CommRedriveRequest, transportReceipt: string | null = null): Promise<CommRedriveResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const { accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
+      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
+      // The assertion arriving first is the good ending, not an error — and
+      // the pane is not touched, because there is nothing left to submit.
+      if (delivered) return { ...base, outcome: 'already_delivered' };
+      const proj = await this.projections();
+      const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
+      if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
+      const askId = typeof accepted.payload.ask_id === 'string' ? accepted.payload.ask_id : null;
+      const frame = commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
+      const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
+      await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
+        payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      return { ...base, outcome };
+    });
+  }
+
+  commFailLoud(req: CommFailLoudRequest, transportReceipt: string | null = null): Promise<CommFailLoudResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const { events, accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
+      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
+      // A delivery that happened is never buried under a failure fact.
+      if (delivered) return { ...base, outcome: 'already_delivered' };
+      const failureId = `${req.message_id}:${req.target_agent_id}`;
+      if (!events.some((e) => e.entity_id === failureId && e.event_type === 'act.comm_delivery_failed')) {
+        await this.store.append({ entity_type: 'assertion', entity_id: failureId, event_type: 'act.comm_delivery_failed',
+          payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, source_agent_id: accepted.payload.source_agent_id },
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      }
+      const proj = await this.projections();
+      const sender = proj.currentBindings.find((b) => b.registered && b.agent_id === accepted.payload.source_agent_id);
+      if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery FAILED ${req.message_id} target ${req.target_agent_id}]`);
+      return { ...base, outcome: 'failed_loud' };
     });
   }
 

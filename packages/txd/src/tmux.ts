@@ -81,6 +81,12 @@ export type SendOutcome =
   | { verdict: 'staged'; bytes: number }
   | { verdict: 'failed_none_delivered'; bytes: 0 };
 
+// The redrive verdicts obey the same membrane: 'enter_redriven' says a parked,
+// verified-intact frame was submitted with one Enter — it still does not say
+// delivered. The other verdicts are refusals to type blind.
+export type ComposerVerdict = 'intact' | 'corrupted' | 'absent';
+export type CommRedriveDriveOutcome = 'enter_redriven' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved';
+
 export type AgentModeTransitionOutcome = {
   before: AgentModeState;
   after: AgentModeState;
@@ -132,6 +138,13 @@ export interface TmuxControlPlane {
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
+  /**
+   * Re-drive a parked comm frame with a single Enter — never by retyping.
+   * Enter fires only when the visible composer holds the frame AND its text
+   * verifies intact against the exact payload that was staged; a corrupted
+   * composer is refused (submitting mangled text is worse than failing loud).
+   */
+  redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome>;
   /**
    * Observe whether an engine process for `agentId` is running under this
    * seat's pane, RIGHT NOW. The turn fold cannot answer this — nothing in it
@@ -1341,6 +1354,40 @@ export class RealTmux implements TmuxControlPlane {
     return applied.code === 0 && await this.seatTint(seatId) === tint;
   }
 
+  /**
+   * The composer verdict, pure and pinned: does the visible pane hold this
+   * frame, and does it hold it UNCORRUPTED? Chrome glyphs and wrapping are
+   * presentation, not payload — both sides are stripped of prompt/border
+   * characters and whitespace-collapsed before comparison, so a wrapped frame
+   * still verifies while a frame the send-keys race mangled does not.
+   */
+  static composerVerdict(pane: string, messageId: string, expectedFrame: string): ComposerVerdict {
+    const normalize = (text: string) => text.replace(/[│┃›>]/g, ' ').replace(/\s+/g, ' ').trim();
+    // Both gates read the SAME normalized text: a bordered composer re-flows
+    // its own lines (capture -J rejoins only terminal wraps), so the raw pane
+    // may split the very header the absence gate looks for.
+    const normalized = normalize(pane);
+    if (!normalized.includes(`tx comm ${messageId}`)) return 'absent';
+    return normalized.includes(normalize(expectedFrame)) ? 'intact' : 'corrupted';
+  }
+
+  async redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return 'seat_unresolved';
+    // Live pane only, joined lines, no scrollback: a parked frame is a LIVE
+    // composer state, and transcript history holds the text of every comm
+    // ever delivered here — Enter on stale evidence would submit blind.
+    const captured = await this.command('observe_comm_composer', seatId, [
+      'capture-pane', '-p', '-J', '-t', paneId,
+    ]);
+    if (captured.code !== 0) return 'seat_unresolved';
+    const verdict = RealTmux.composerVerdict(captured.stdout, messageId, expectedFrame);
+    if (verdict === 'absent') return 'frame_absent';
+    if (verdict === 'corrupted') return 'composer_corrupted';
+    const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
+    return enter.code === 0 ? 'enter_redriven' : 'seat_unresolved';
+  }
+
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered' };
@@ -1842,10 +1889,30 @@ export class FakeTmux implements TmuxControlPlane {
     const seats = this.shape.windows[page];
     if (seats) this.shape.windows[page] = seats.filter((seat) => seat !== seatId);
   }
+  private sentLines = new Map<string, string[]>();
+  private paneTexts = new Map<string, string>();
+  private redriveEnterCounts = new Map<string, number>();
+
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
+    this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' };
+  }
+  /** Test observation: every text staged into this seat, in order. */
+  sends(seatId: string): string[] { return [...(this.sentLines.get(seatId) ?? [])]; }
+  /** Test control: what the seat's visible pane currently shows. */
+  setPaneText(seatId: string, text: string): void { this.paneTexts.set(seatId, text); }
+  /** Test observation: how many redrive Enters this seat received. */
+  redriveEnters(seatId: string): number { return this.redriveEnterCounts.get(seatId) ?? 0; }
+  async redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead') return 'seat_unresolved';
+    const verdict = RealTmux.composerVerdict(this.paneTexts.get(seatId) ?? '', messageId, expectedFrame);
+    if (verdict === 'absent') return 'frame_absent';
+    if (verdict === 'corrupted') return 'composer_corrupted';
+    this.redriveEnterCounts.set(seatId, (this.redriveEnterCounts.get(seatId) ?? 0) + 1);
+    return 'enter_redriven';
   }
 
   /**

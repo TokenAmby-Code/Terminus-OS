@@ -22,6 +22,17 @@ export type DaemonConfig = {
   rotationSignalFifo: string;
   /** Sanctioned Fleet wrapper executable. Identity remains compiled into txd. */
   agentWrapper: string;
+  /**
+   * lifecycled's local ingress socket, for arming the pre-send comm watch.
+   * Empty string disables the watch plane (degrades loudly per comm).
+   */
+  lifecycledSocket: string;
+  /**
+   * Bound on the arm await. Mirrors lifecycled's DELIVERY_TIMEOUT_MS — the
+   * one transport contract both sides of the watch derive their deadlines
+   * from; change them together.
+   */
+  commWatchTimeoutMs: number;
   /** Generated physical-only view of Token-Fleet's canonical pane allocation. */
   physicalRegistration?: {
     busUrl: string;
@@ -49,6 +60,8 @@ const HARD_DEFAULTS = {
     application_name: 'txd',
   }),
   tmuxSocket: 'k12',
+  lifecycledSocket: `${process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`}/lifecycled/ingress.sock`,
+  commWatchTimeoutMs: 10_000,
   rotationLockFile: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.lock`,
   rotationSignalFifo: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.signal`,
 } as const;
@@ -87,6 +100,8 @@ function envDefaults(): PartialConfig {
           })
         : undefined,
     tmuxSocket: process.env.TXD_TMUX_SOCKET,
+    lifecycledSocket: process.env.TXD_LIFECYCLED_SOCKET,
+    commWatchTimeoutMs: process.env.TXD_COMM_WATCH_TIMEOUT_MS ? Number(process.env.TXD_COMM_WATCH_TIMEOUT_MS) : undefined,
     rotationLockFile: process.env.TXD_ROTATION_LOCK_FILE,
     rotationSignalFifo: process.env.TXD_ROTATION_SIGNAL_FIFO,
     agentWrapper: process.env.TXD_AGENT_WRAPPER,
@@ -104,6 +119,8 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     machine: raw.machine ?? env.machine, // NO hard default — must be known
     db: raw.db ?? env.db ?? HARD_DEFAULTS.db,
     tmuxSocket: raw.tmuxSocket ?? env.tmuxSocket ?? HARD_DEFAULTS.tmuxSocket,
+    lifecycledSocket: raw.lifecycledSocket ?? env.lifecycledSocket ?? HARD_DEFAULTS.lifecycledSocket,
+    commWatchTimeoutMs: raw.commWatchTimeoutMs ?? env.commWatchTimeoutMs ?? HARD_DEFAULTS.commWatchTimeoutMs,
     rotationLockFile: raw.rotationLockFile ?? env.rotationLockFile ?? HARD_DEFAULTS.rotationLockFile,
     rotationSignalFifo: raw.rotationSignalFifo ?? env.rotationSignalFifo ?? HARD_DEFAULTS.rotationSignalFifo,
     agentWrapper: raw.agentWrapper ?? env.agentWrapper,
@@ -121,6 +138,9 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     throw new Error(`txd config error: invalid db endpoint — ${db.error.message}`);
   cfg.db = db.data;
   if (!cfg.tmuxSocket) throw new Error('txd config error: tmuxSocket is required');
+  if (cfg.lifecycledSocket === undefined) throw new Error('txd config error: lifecycledSocket is required (empty string disables the comm watch plane)');
+  if (!Number.isInteger(cfg.commWatchTimeoutMs) || cfg.commWatchTimeoutMs! < 1)
+    throw new Error(`txd config error: invalid commWatchTimeoutMs ${cfg.commWatchTimeoutMs}`);
   if (!cfg.rotationLockFile) throw new Error('txd config error: rotationLockFile is required');
   if (!cfg.rotationSignalFifo) throw new Error('txd config error: rotationSignalFifo is required');
   if (!cfg.agentWrapper) throw new Error('txd config error: agentWrapper is required');
