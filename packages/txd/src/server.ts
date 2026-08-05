@@ -41,6 +41,7 @@ import {
   ClipboardSelectionRequestSchema,
   CommHookSchema,
   CommRequestSchema,
+  AgentInjectRequestSchema,
   CommRedriveRequestSchema,
   CommFailLoudRequestSchema,
   CommWaitRequestSchema,
@@ -253,6 +254,17 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       handler: async () => {
         const h = await daemon.health(machine, build);
         return json(h, h.ok ? 200 : 503);
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/agents/inject'),
+      label: 'POST /agents/inject',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, AgentInjectRequestSchema, 'invalid_agent_inject_request');
+        if (parsed instanceof Response) return parsed;
+        try { return json(await daemon.inject(parsed, receipt(req))); }
+        catch (error) { return json({ ok: false, error: 'agent_inject_refused', detail: String(error) }, 422); }
       },
     },
     {

@@ -90,7 +90,8 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 type Now = () => string;
 // What txd hands lifecycled to arm one comm watch: enough to name the
 // subscription's agent stream and the message the absence edge will redrive.
-export type CommWatchArmInput = { message_id: string; target_agent_id: string; source_agent_id: string };
+export type CommWatchArmInput = { message_id: string; target_agent_id: string; source_agent_id: string; stream_class: 'interactive' | 'headless' };
+export type ComposerGateInput = { correlation_id: string; target_agent_id: string; stream_class: 'interactive' | 'headless' };
 
 // The ONE comm frame template. comm() stages it and commRedrive() verifies
 // the composer against it; a second copy of this string would let the two
@@ -104,6 +105,7 @@ export type PhysicalRegistrationRuntime = {
   configuration: { generation: string; digest: string };
   agentWrapper: string;
   perpetual: Record<string, 'claude' | 'codex'>;
+  commStreams?: Record<string, 'interactive' | 'headless'>;
   publish: (
     eventType: TxdPublishedEventType,
     payload: Record<string, unknown>,
@@ -174,6 +176,7 @@ export class Daemon {
     private remoteEnvelopes: RemoteEnvelopeLister | null = null,
     /** Arms lifecycled's comm watch pre-send; null = no watch plane configured. */
     private commWatchArm: ((input: CommWatchArmInput) => Promise<void>) | null = null,
+    private composerGate: ((input: ComposerGateInput) => Promise<void>) | null = null,
   ) {}
 
   async attestWrapperStart(
@@ -1006,28 +1009,29 @@ export class Daemon {
     return matches.map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
   }
 
-  // Arm the delivery watch for one target BEFORE its bytes go to the pane —
-  // the subscription must exist before the submit it waits on can possibly
-  // fire. A dead watch plane degrades loudly, never fatally: comms must not
-  // lose availability to lifecycled, but the gap is attested, not swallowed.
+  // Arm the delivery watch and composer gate BEFORE bytes go to the pane.
+  // A dead lifecycle plane is a hard stop: sending without its gate would
+  // recreate the newborn-composer race this contract exists to prevent.
   private async armCommWatch(
     messageId: string,
     sourceAgentId: string,
     targetAgentId: string,
     transportReceipt: string | null,
+    streamClass: 'interactive' | 'headless',
   ): Promise<void> {
     if (!this.commWatchArm) return;
     try {
-      await this.commWatchArm({ message_id: messageId, target_agent_id: targetAgentId, source_agent_id: sourceAgentId });
+      await this.commWatchArm({ message_id: messageId, target_agent_id: targetAgentId, source_agent_id: sourceAgentId, stream_class: streamClass });
     } catch (error) {
-      await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
+      await this.locked(() => this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
         payload: { message_id: messageId, target_agent_id: targetAgentId, detail: String(error) },
-        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() }));
+      throw error;
     }
   }
 
-  comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
-    return this.locked(async () => {
+  async comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
+    const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
       if (!proj.currentBindings.some((b) =>
@@ -1066,18 +1070,74 @@ export class Daemon {
       }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
       const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
-      const event_ids = [accepted.seq, snapshot.seq];
-      for (const target of targets) {
-        await this.armCommWatch(messageId, req.source_agent_id, target.agent_id, transportReceipt);
-        const frame = commFrame(messageId, req.source_agent_id, askId, req.message);
-        const sent = await this.tmux.sendToSeat(target.seat_id, frame);
-        if (sent.verdict !== 'staged') throw new Error(`transport_${sent.verdict}: ${target.agent_id}`);
-        const event = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
-          payload: { target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
-        event_ids.push(event.seq);
+      return { messageId, askId, replyingToAsk, targets, eventIds: [accepted.seq, snapshot.seq] };
+    });
+
+    await Promise.all(prepared.targets.map((target) => {
+      const streamClass = this.physicalRegistration?.commStreams?.[target.seat_id] ?? 'interactive';
+      return this.armCommWatch(prepared.messageId, req.source_agent_id, target.agent_id, transportReceipt, streamClass);
+    }));
+
+    return this.locked(async () => {
+      const proj = await this.projections();
+      const events = await this.store.readAll();
+      const pendingResetSeats = this.pendingScopedResetSeats(events);
+      for (const target of prepared.targets) {
+        const binding = proj.currentBindings.find((row) => row.registered
+          && row.agent_id === target.agent_id && row.seat_id === target.seat_id);
+        if (!binding) throw new Error(`target_binding_changed: ${target.agent_id}`);
+        if (pendingResetSeats.has(target.seat_id)) throw new Error(`scoped_reset_pending: ${target.seat_id}`);
       }
-      if (replyingToAsk) await this.assertCallback(replyingToAsk, req.source_agent_id, req.message, 'reply', null, transportReceipt);
-      return { ok: true, message_id: messageId, ask_id: askId, source_agent_id: req.source_agent_id, targets, staged: true, event_ids };
+
+      const event_ids = [...prepared.eventIds];
+      let allStaged = true;
+      for (const target of prepared.targets) {
+        const streamClass = this.physicalRegistration?.commStreams?.[target.seat_id] ?? 'interactive';
+        const frame = commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message);
+        const sent = await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame);
+        const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
+          payload: { target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+        event_ids.push(event.seq);
+        allStaged &&= sent.verdict === 'staged';
+        if (streamClass === 'headless' && sent.verdict === 'staged') {
+          const assertionId = `${prepared.messageId}:${target.agent_id}`;
+          await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+            payload: { message_id: prepared.messageId, target_agent_id: target.agent_id, source_agent_id: req.source_agent_id, confirmation_fact_type: 'headless_consumed' },
+            provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+          await this.physicalRegistration?.publish('agent.headless_consumed', {
+            schema_version: SCHEMA_VERSION, agent_id: target.agent_id, message_id: prepared.messageId, seat_id: target.seat_id,
+          });
+        }
+      }
+      if (prepared.replyingToAsk) await this.assertCallback(prepared.replyingToAsk, req.source_agent_id, req.message, 'reply', null, transportReceipt);
+      return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
+        targets: prepared.targets, staged: allStaged, event_ids };
+    });
+  }
+
+  async inject(req: { schema_version: number; target_agent_id: string; text: string }, transportReceipt: string | null = null) {
+    const prepared = await this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const proj = await this.projections();
+      const binding = proj.currentBindings.find((row) => row.registered && row.agent_id === req.target_agent_id);
+      if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
+      const correlationId = crypto.randomUUID();
+      const streamClass = this.physicalRegistration?.commStreams?.[binding.seat_id] ?? 'interactive';
+      return { binding, correlationId, streamClass };
+    });
+    if (!this.composerGate) throw new Error('composer_gate_unconfigured');
+    await this.composerGate({ correlation_id: prepared.correlationId, target_agent_id: req.target_agent_id, stream_class: prepared.streamClass });
+
+    return this.locked(async () => {
+      const proj = await this.projections();
+      const binding = proj.currentBindings.find((row) => row.registered
+        && row.agent_id === req.target_agent_id && row.seat_id === prepared.binding.seat_id);
+      if (!binding) throw new Error(`target_binding_changed: ${req.target_agent_id}`);
+      const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text);
+      await this.store.append({ entity_type: 'message', entity_id: prepared.correlationId, event_type: 'act.agent_input_injected',
+        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict, input_class: 'machine_feed' },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      return { ok: true as const, target_agent_id: req.target_agent_id, deferred: true as const };
     });
   }
 
