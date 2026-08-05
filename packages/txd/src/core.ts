@@ -1094,7 +1094,9 @@ export class Daemon {
       for (const target of prepared.targets) {
         const streamClass = this.physicalRegistration?.commStreams?.[target.seat_id] ?? 'interactive';
         const frame = commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message);
-        const sent = await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame);
+        const sent = streamClass === 'headless'
+          ? await this.tmux.sendToSeat(target.seat_id, frame)
+          : await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame);
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: { target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
