@@ -27,6 +27,10 @@ import {
   type CommDeliveryReadResponse,
   type CommHook,
   type CommRequest,
+  type CommRedriveRequest,
+  type CommRedriveResponse,
+  type CommFailLoudRequest,
+  type CommFailLoudResponse,
   type CommTarget,
   type CommWaitRequest,
   type CommWaitResponse,
@@ -1174,6 +1178,60 @@ export class Daemon {
         if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`);
       }
       return { ok: true, asserted };
+    });
+  }
+
+  // The remedial half of the two-phase comm contract. Both methods are
+  // deliberate pane actions: something else (lifecycled's absence edge, or an
+  // operator) decides WHEN; this is mechanism only, and both are idempotent
+  // against the race they exist to lose gracefully — a late organic submit.
+  private async commRemedialContext(messageId: string, targetAgentId: string) {
+    const events = await this.store.readAll();
+    const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
+    if (!accepted) throw new Error('message_absent');
+    if (!(accepted.payload.target_agent_ids as unknown[]).includes(targetAgentId)) throw new Error('target_mismatch');
+    const delivered = events.some((e) => e.entity_id === `${messageId}:${targetAgentId}` && e.event_type === 'act.comm_delivery_asserted');
+    return { events, accepted, delivered };
+  }
+
+  commRedrive(req: CommRedriveRequest, transportReceipt: string | null = null): Promise<CommRedriveResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const { accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
+      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
+      // The assertion arriving first is the good ending, not an error — and
+      // the pane is not touched, because there is nothing left to submit.
+      if (delivered) return { ...base, outcome: 'already_delivered' };
+      const proj = await this.projections();
+      const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
+      if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
+      const askId = typeof accepted.payload.ask_id === 'string' ? accepted.payload.ask_id : null;
+      const frame = `[tx comm ${req.message_id} from ${accepted.payload.source_agent_id}${askId ? ` ask ${askId}` : ''}]\n${accepted.payload.message}`;
+      const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
+      await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
+        payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      return { ...base, outcome };
+    });
+  }
+
+  commFailLoud(req: CommFailLoudRequest, transportReceipt: string | null = null): Promise<CommFailLoudResponse> {
+    return this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const { events, accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
+      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
+      // A delivery that happened is never buried under a failure fact.
+      if (delivered) return { ...base, outcome: 'already_delivered' };
+      const failureId = `${req.message_id}:${req.target_agent_id}`;
+      if (!events.some((e) => e.entity_id === failureId && e.event_type === 'act.comm_delivery_failed')) {
+        await this.store.append({ entity_type: 'assertion', entity_id: failureId, event_type: 'act.comm_delivery_failed',
+          payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, source_agent_id: accepted.payload.source_agent_id },
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      }
+      const proj = await this.projections();
+      const sender = proj.currentBindings.find((b) => b.registered && b.agent_id === accepted.payload.source_agent_id);
+      if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery FAILED ${req.message_id} target ${req.target_agent_id}]`);
+      return { ...base, outcome: 'failed_loud' };
     });
   }
 
