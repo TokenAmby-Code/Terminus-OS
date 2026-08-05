@@ -78,6 +78,17 @@ test('a dead readiness plane fails loud before bytes and attests the unarmed gap
 test('behavioral pin: a declared headless stream asserts delivery without prompt_submitted', async () => {
   const { store, tmux } = await fixture(null);
   const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const sends: string[] = [];
+  const originalHeadlessSend = tmux.sendToSeat.bind(tmux);
+  tmux.sendToSeat = async (seat, text) => {
+    sends.push(`headless:${seat}`);
+    return originalHeadlessSend(seat, text);
+  };
+  const originalInteractiveSend = tmux.sendVerifiedToSeat.bind(tmux);
+  tmux.sendVerifiedToSeat = async (seat, id, text) => {
+    sends.push(`interactive:${seat}`);
+    return originalInteractiveSend(seat, id, text);
+  };
   const d = new Daemon(store, tmux, undefined, undefined, {
     machine: 'test',
     configuration: { generation: 'g', digest: 'd' },
@@ -95,6 +106,7 @@ test('behavioral pin: a declared headless stream asserts delivery without prompt
   expect(delivery.complete).toBe(true);
   expect(delivery.deliveries[0]?.delivered).toBe(true);
   expect(delivery.deliveries[0]?.asserted_at).not.toBeNull();
+  expect(sends).toEqual(['headless:palace:W']);
   expect(published).toEqual([{ type: 'agent.headless_consumed', payload: {
     schema_version: SCHEMA_VERSION,
     agent_id: 'worker',
