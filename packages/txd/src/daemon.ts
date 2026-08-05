@@ -37,7 +37,32 @@ const physicalRegistration = cfg.physicalRegistration
       publish: makeBusPublisher(cfg.physicalRegistration.busUrl),
     }
   : null;
-const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration, realRemoteEnvelopeLister);
+// The pre-send comm watch, armed against lifecycled's local ingress socket.
+// The await is bounded by the same transport contract lifecycled derives its
+// own deadlines from (its DELIVERY_TIMEOUT_MS); a refusal or timeout surfaces
+// as act.comm_watch_unarmed, never as a failed comm.
+const commWatchArm = cfg.lifecycledSocket
+  ? async (input: { message_id: string; target_agent_id: string; source_agent_id: string }) => {
+      const response = await fetch('http://lifecycled/subscriptions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        unix: cfg.lifecycledSocket!,
+        signal: AbortSignal.timeout(cfg.commWatchTimeoutMs),
+        body: JSON.stringify({
+          schema_version: 1,
+          subscriber: `txd-comm:${input.message_id}`,
+          agent_id: input.target_agent_id,
+          fact_types: ['prompt_submitted'],
+          action: { kind: 'comm_redrive', message_id: input.message_id, target_agent_id: input.target_agent_id },
+          context: { message_id: input.message_id, source_agent_id: input.source_agent_id },
+          one_shot: true,
+          seed: 'now',
+        }),
+      });
+      if (!response.ok) throw new Error(`lifecycled refused comm watch: HTTP ${response.status}`);
+    }
+  : null;
+const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration, realRemoteEnvelopeLister, commWatchArm);
 const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
 
 console.log(

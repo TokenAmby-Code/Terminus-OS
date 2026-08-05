@@ -88,6 +88,10 @@ import type { TxdPublishedEventType } from './events.ts';
 export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as const;
 
 type Now = () => string;
+// What txd hands lifecycled to arm one comm watch: enough to name the
+// subscription's agent stream and the message the absence edge will redrive.
+export type CommWatchArmInput = { message_id: string; target_agent_id: string; source_agent_id: string };
+
 export type PhysicalRegistrationRuntime = {
   machine: string;
   configuration: { generation: string; digest: string };
@@ -153,6 +157,7 @@ export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
 
+
   constructor(
     private store: EventStore,
     private tmux: TmuxControlPlane,
@@ -160,6 +165,8 @@ export class Daemon {
     private rotationBarrier: EstateRotationBarrier = NOOP_ROTATION_BARRIER,
     private physicalRegistration: PhysicalRegistrationRuntime | null = null,
     private remoteEnvelopes: RemoteEnvelopeLister | null = null,
+    /** Arms lifecycled's comm watch pre-send; null = no watch plane configured. */
+    private commWatchArm: ((input: CommWatchArmInput) => Promise<void>) | null = null,
   ) {}
 
   async attestWrapperStart(
@@ -992,6 +999,26 @@ export class Daemon {
     return matches.map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
   }
 
+  // Arm the delivery watch for one target BEFORE its bytes go to the pane —
+  // the subscription must exist before the submit it waits on can possibly
+  // fire. A dead watch plane degrades loudly, never fatally: comms must not
+  // lose availability to lifecycled, but the gap is attested, not swallowed.
+  private async armCommWatch(
+    messageId: string,
+    sourceAgentId: string,
+    targetAgentId: string,
+    transportReceipt: string | null,
+  ): Promise<void> {
+    if (!this.commWatchArm) return;
+    try {
+      await this.commWatchArm({ message_id: messageId, target_agent_id: targetAgentId, source_agent_id: sourceAgentId });
+    } catch (error) {
+      await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
+        payload: { message_id: messageId, target_agent_id: targetAgentId, detail: String(error) },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+    }
+  }
+
   comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
@@ -1034,6 +1061,7 @@ export class Daemon {
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
       const event_ids = [accepted.seq, snapshot.seq];
       for (const target of targets) {
+        await this.armCommWatch(messageId, req.source_agent_id, target.agent_id, transportReceipt);
         const frame = `[tx comm ${messageId} from ${req.source_agent_id}${askId ? ` ask ${askId}` : ''}]\n${req.message}`;
         const sent = await this.tmux.sendToSeat(target.seat_id, frame);
         if (sent.verdict !== 'staged') throw new Error(`transport_${sent.verdict}: ${target.agent_id}`);
