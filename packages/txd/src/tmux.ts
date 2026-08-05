@@ -1362,9 +1362,13 @@ export class RealTmux implements TmuxControlPlane {
    * still verifies while a frame the send-keys race mangled does not.
    */
   static composerVerdict(pane: string, messageId: string, expectedFrame: string): ComposerVerdict {
-    if (!pane.includes(`tx comm ${messageId}`)) return 'absent';
     const normalize = (text: string) => text.replace(/[│┃›>]/g, ' ').replace(/\s+/g, ' ').trim();
-    return normalize(pane).includes(normalize(expectedFrame)) ? 'intact' : 'corrupted';
+    // Both gates read the SAME normalized text: a bordered composer re-flows
+    // its own lines (capture -J rejoins only terminal wraps), so the raw pane
+    // may split the very header the absence gate looks for.
+    const normalized = normalize(pane);
+    if (!normalized.includes(`tx comm ${messageId}`)) return 'absent';
+    return normalized.includes(normalize(expectedFrame)) ? 'intact' : 'corrupted';
   }
 
   async redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {

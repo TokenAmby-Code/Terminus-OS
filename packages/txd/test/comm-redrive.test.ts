@@ -138,9 +138,11 @@ test('a late organic submit after a redrive asserts exactly once', async () => {
 
 test('redrive refuses an unknown message or a non-target', async () => {
   const { d, send } = await fixture();
-  await send('real');
+  const id = await send('real');
   await expect(d.commRedrive({ schema_version: SCHEMA_VERSION, message_id: '00000000-0000-4000-8000-000000000000', target_agent_id: 'worker' }))
     .rejects.toThrow('message_absent');
+  await expect(d.commRedrive({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'sender' }))
+    .rejects.toThrow('target_mismatch');
 });
 
 // ── the loud failure ─────────────────────────────────────────────────────────

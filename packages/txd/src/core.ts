@@ -92,6 +92,13 @@ type Now = () => string;
 // subscription's agent stream and the message the absence edge will redrive.
 export type CommWatchArmInput = { message_id: string; target_agent_id: string; source_agent_id: string };
 
+// The ONE comm frame template. comm() stages it and commRedrive() verifies
+// the composer against it; a second copy of this string would let the two
+// silently diverge and turn every redrive into a false `composer_corrupted`.
+function commFrame(messageId: string, sourceAgentId: string, askId: string | null, message: string): string {
+  return `[tx comm ${messageId} from ${sourceAgentId}${askId ? ` ask ${askId}` : ''}]\n${message}`;
+}
+
 export type PhysicalRegistrationRuntime = {
   machine: string;
   configuration: { generation: string; digest: string };
@@ -1062,7 +1069,7 @@ export class Daemon {
       const event_ids = [accepted.seq, snapshot.seq];
       for (const target of targets) {
         await this.armCommWatch(messageId, req.source_agent_id, target.agent_id, transportReceipt);
-        const frame = `[tx comm ${messageId} from ${req.source_agent_id}${askId ? ` ask ${askId}` : ''}]\n${req.message}`;
+        const frame = commFrame(messageId, req.source_agent_id, askId, req.message);
         const sent = await this.tmux.sendToSeat(target.seat_id, frame);
         if (sent.verdict !== 'staged') throw new Error(`transport_${sent.verdict}: ${target.agent_id}`);
         const event = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
@@ -1234,7 +1241,7 @@ export class Daemon {
       const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
       if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
       const askId = typeof accepted.payload.ask_id === 'string' ? accepted.payload.ask_id : null;
-      const frame = `[tx comm ${req.message_id} from ${accepted.payload.source_agent_id}${askId ? ` ask ${askId}` : ''}]\n${accepted.payload.message}`;
+      const frame = commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
       const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
       await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
         payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
