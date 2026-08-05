@@ -209,6 +209,9 @@ export const ACT_EVENT_NAMES = [
   'receipt_deduped',
   'comm_bytes_sent',
   'comm_delivery_asserted',
+  'comm_redrive_attempted',
+  'comm_delivery_failed',
+  'comm_watch_unarmed',
   'comm_callback_asserted',
   'mode_transition_requested',
   'mode_transition_attested',
@@ -253,6 +256,9 @@ export const EVENT_TYPES = [
   'act.receipt_deduped',
   'act.comm_bytes_sent',
   'act.comm_delivery_asserted',
+  'act.comm_redrive_attempted',
+  'act.comm_delivery_failed',
+  'act.comm_watch_unarmed',
   'act.comm_callback_asserted',
   'act.mode_transition_requested',
   'act.mode_transition_attested',
@@ -683,6 +689,34 @@ export const CommDeliveryReadResponseSchema = z.object({
   accepted_at: z.string(), deliveries: z.array(CommDeliverySchema), complete: z.boolean(),
 });
 export type CommDeliveryReadResponse = z.infer<typeof CommDeliveryReadResponseSchema>;
+
+// The remedial half of the two-phase comm contract. Both are deliberate pane
+// actions: lifecycled (or an operator) decides WHEN, txd is the only mechanism.
+// Redrive submits a parked frame with a single Enter — never by retyping —
+// and only after the visible composer text verifies byte-honest against the
+// payload that was staged; a corrupted composer is refused, not submitted.
+// Fail-loud converts an unconfirmed delivery into a durable failure fact and a
+// line in the SENDER's composer, so silence stops being the failure mode.
+export const CommRedriveRequestSchema = z.object({
+  schema_version: z.number().int(),
+  message_id: z.string().min(1),
+  target_agent_id: z.string().min(1),
+});
+export type CommRedriveRequest = z.infer<typeof CommRedriveRequestSchema>;
+export const COMM_REDRIVE_OUTCOMES = ['enter_redriven', 'already_delivered', 'composer_corrupted', 'frame_absent', 'seat_unresolved'] as const;
+export const CommRedriveResponseSchema = z.object({
+  ok: z.literal(true), message_id: z.string(), target_agent_id: z.string(),
+  outcome: z.enum(COMM_REDRIVE_OUTCOMES),
+});
+export type CommRedriveResponse = z.infer<typeof CommRedriveResponseSchema>;
+
+export const CommFailLoudRequestSchema = CommRedriveRequestSchema;
+export type CommFailLoudRequest = CommRedriveRequest;
+export const CommFailLoudResponseSchema = z.object({
+  ok: z.literal(true), message_id: z.string(), target_agent_id: z.string(),
+  outcome: z.enum(['failed_loud', 'already_delivered']),
+});
+export type CommFailLoudResponse = z.infer<typeof CommFailLoudResponseSchema>;
 
 export const CommWaitRequestSchema = z.object({
   schema_version: z.number().int(), ask_id: CanonicalIdSchema, subscriber_agent_id: CanonicalIdSchema,
