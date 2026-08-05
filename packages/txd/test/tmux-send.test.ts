@@ -113,3 +113,65 @@ test('no send outcome can spell a word that means the agent received it', async 
   expect(outcome.verdict).not.toBe('delivered');
   expect(outcome.verdict).not.toBe('partial_delivered');
 });
+
+test('verified send waits for a pane-output event before observing the composer', async () => {
+  const calls: string[] = [];
+  let releaseOutput!: () => void;
+  let literalStarted!: () => void;
+  const output = new Promise<void>((resolve) => { releaseOutput = resolve; });
+  const literal = new Promise<void>((resolve) => { literalStarted = resolve; });
+  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nhello';
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args[0]!);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'send-keys' && args.includes('-l')) literalStarted();
+    if (args[0] === 'capture-pane') return { code: 0, stdout: `> ${frame}\n`, stderr: '' };
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async (_socket, paneId) => {
+      calls.push(`arm:${paneId}`);
+      return { next: async () => output, close: () => { calls.push('close'); } };
+    },
+  });
+
+  const pending = tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', frame);
+  await literal;
+  expect(calls).toEqual(['list-panes', 'arm:%7', 'send-keys']);
+  expect(calls).not.toContain('capture-pane');
+
+  releaseOutput();
+  expect((await pending).verdict).toBe('staged');
+  expect(calls).toEqual(['list-panes', 'arm:%7', 'send-keys', 'capture-pane', 'send-keys', 'close']);
+});
+
+test('verified send never submits when output settles without the expected frame', async () => {
+  const calls: string[][] = [];
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'capture-pane') return { code: 0, stdout: '> unrelated text\n', stderr: '' };
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observation complete');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat('palace:S', 'correlation', 'machine input');
+
+  expect(outcome.verdict).toBe('composer_corrupted');
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
+});

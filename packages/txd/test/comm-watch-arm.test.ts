@@ -134,3 +134,24 @@ test('machine-feed injection shares the composer gate and carries no comm envelo
   expect(response).toEqual({ ok: true, target_agent_id: 'worker', deferred: true });
   expect(order).toEqual(['gate:worker', 'inject:palace:W']);
 });
+
+test('machine-feed injection refuses a non-staged composer verdict so the bus event is redelivered', async () => {
+  const { store, tmux } = await fixture(null);
+  const d = new Daemon(store, tmux, undefined, undefined, null, null, null, async () => undefined);
+  const refusingTmux = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string): Promise<{ bytes: number; verdict: 'composer_corrupted' }>;
+  };
+  refusingTmux.sendVerifiedToSeat = async (_seat, _id, text) => ({
+    bytes: Buffer.byteLength(text, 'utf8'),
+    verdict: 'composer_corrupted',
+  });
+
+  await expect(d.inject({ schema_version: SCHEMA_VERSION, target_agent_id: 'worker', text: 'durable machine fact' }))
+    .rejects.toThrow('machine_feed_not_staged: composer_corrupted');
+
+  const events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'act.agent_input_injected')).toHaveLength(1);
+  expect(events.find((event) => event.event_type === 'act.agent_input_injected')?.payload.submit_verdict)
+    .toBe('composer_corrupted');
+  expect(events.some((event) => event.event_type.startsWith('reg.comm_'))).toBe(false);
+});
