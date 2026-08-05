@@ -306,6 +306,8 @@ type TmuxRunner = (socket: string, args: string[], stdin?: Uint8Array) => Promis
 type TmuxBinaryResult = { code: number; stdout: Uint8Array; stderr: string; overflow?: boolean };
 type TmuxBinaryRunner = (socket: string, args: string[]) => Promise<TmuxBinaryResult>;
 type WriteClient = (path: string, data: Uint8Array) => Promise<void>;
+type PaneOutputSubscription = { next(signal: AbortSignal): Promise<void>; close(): void };
+type PaneOutputObserver = (socket: string, paneId: string, signal: AbortSignal) => Promise<PaneOutputSubscription>;
 
 export type TmuxAuditRecord = {
   operation: string;
@@ -350,13 +352,21 @@ async function readLimited(
   return { bytes, overflow };
 }
 
+function spawnTmuxProcess(
+  socket: string,
+  args: string[],
+  options: { stdin?: 'pipe' | undefined; stdout: 'pipe'; stderr: 'pipe' },
+) {
+  return Bun.spawn(['tmux', '-L', socket, ...args], options);
+}
+
 async function spawnTmux(
   socket: string,
   args: string[],
   stdin?: Uint8Array,
   stdoutLimit = 8 * 1024 * 1024,
 ): Promise<TmuxBinaryResult> {
-  const proc = Bun.spawn(['tmux', '-L', socket, ...args], {
+  const proc = spawnTmuxProcess(socket, args, {
     stdin: stdin === undefined ? undefined : 'pipe',
     stdout: 'pipe',
     stderr: 'pipe',
@@ -371,6 +381,126 @@ async function spawnTmux(
     proc.exited,
   ]);
   return { code, stdout: stdout.bytes, stderr, overflow: stdout.overflow };
+}
+
+async function observePaneOutput(
+  socket: string,
+  paneId: string,
+  signal: AbortSignal,
+): Promise<PaneOutputSubscription> {
+  const proc = spawnTmuxProcess(socket, ['-C', 'attach-session', '-t', paneId], {
+    stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
+  });
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffered = '';
+  let queued = 0;
+  let closed = false;
+  let readyResolve!: () => void;
+  let readyReject!: (error: Error) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
+  const waiters: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    signal: AbortSignal;
+    abort: () => void;
+  }> = [];
+
+  const fail = (error: Error) => {
+    if (closed) return;
+    closed = true;
+    readyReject(error);
+    for (const waiter of waiters.splice(0)) {
+      waiter.signal.removeEventListener('abort', waiter.abort);
+      waiter.reject(error);
+    }
+  };
+  const emit = () => {
+    const waiter = waiters.shift();
+    if (!waiter) {
+      queued += 1;
+      return;
+    }
+    waiter.signal.removeEventListener('abort', waiter.abort);
+    waiter.resolve();
+  };
+
+  void (async () => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffered += decoder.decode(value, { stream: true });
+        let newline = buffered.indexOf('\n');
+        while (newline !== -1) {
+          const line = buffered.slice(0, newline).replace(/\r$/, '');
+          buffered = buffered.slice(newline + 1);
+          if (line.startsWith('%session-changed ')) readyResolve();
+          if (line.startsWith(`%output ${paneId} `)) emit();
+          newline = buffered.indexOf('\n');
+        }
+      }
+      fail(new Error('tmux control client exited'));
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error('tmux control client failed'));
+    } finally {
+      reader.releaseLock();
+    }
+  })();
+
+  const abortReady = new Promise<never>((_, reject) => {
+    if (signal.aborted) reject(new Error('pane output observation timed out'));
+    else signal.addEventListener('abort', () => reject(new Error('pane output observation timed out')), { once: true });
+  });
+  try {
+    await Promise.race([ready, abortReady]);
+  } catch (error) {
+    closed = true;
+    proc.stdin!.end();
+    proc.kill();
+    await reader.cancel();
+    throw error;
+  }
+
+  return {
+    next(nextSignal) {
+      if (queued > 0) {
+        queued -= 1;
+        return Promise.resolve();
+      }
+      if (closed) return Promise.reject(new Error('tmux control client exited'));
+      return new Promise<void>((resolve, reject) => {
+        const waiter = {
+          resolve,
+          reject,
+          signal: nextSignal,
+          abort: () => {
+            const index = waiters.indexOf(waiter);
+            if (index !== -1) waiters.splice(index, 1);
+            reject(new Error('pane output observation timed out'));
+          },
+        };
+        if (nextSignal.aborted) waiter.abort();
+        else {
+          nextSignal.addEventListener('abort', waiter.abort, { once: true });
+          waiters.push(waiter);
+        }
+      });
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      for (const waiter of waiters.splice(0)) {
+        waiter.signal.removeEventListener('abort', waiter.abort);
+        waiter.reject(new Error('tmux control client closed'));
+      }
+      proc.stdin!.write('detach-client\n');
+      proc.stdin!.end();
+    },
+  };
 }
 
 async function run(socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> {
@@ -389,6 +519,8 @@ export class RealTmux implements TmuxControlPlane {
   private binaryRunner: TmuxBinaryRunner;
   private writeClient: WriteClient;
   private machine: string | undefined;
+  private outputObserver: PaneOutputObserver;
+  private composerObserveTimeoutMs: number;
 
   constructor(
     private socket: string,
@@ -398,6 +530,8 @@ export class RealTmux implements TmuxControlPlane {
       writeClient?: WriteClient;
       audit?: AuditSink;
       machine?: string;
+      observePaneOutput?: PaneOutputObserver;
+      composerObserveTimeoutMs?: number;
     } = {},
   ) {
     this.runner = options.run ?? run;
@@ -412,6 +546,8 @@ export class RealTmux implements TmuxControlPlane {
       }
     });
     this.machine = options.machine;
+    this.outputObserver = options.observePaneOutput ?? observePaneOutput;
+    this.composerObserveTimeoutMs = options.composerObserveTimeoutMs ?? 10_000;
   }
 
   private paneEnvironment(seatId: string): string[] {
@@ -1413,18 +1549,42 @@ export class RealTmux implements TmuxControlPlane {
   async sendVerifiedToSeat(seatId: string, correlationId: string, text: string) {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
-    const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
-    if (literal.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const bytes = Buffer.byteLength(text, 'utf8');
-    const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
-    if (captured.code !== 0) return { bytes, verdict: 'seat_unresolved' as const };
-    const verdict = text.includes(`tx comm ${correlationId}`)
-      ? RealTmux.composerVerdict(captured.stdout, correlationId, text)
-      : RealTmux.inputVerdict(captured.stdout, text);
-    if (verdict === 'absent') return { bytes, verdict: 'frame_absent' as const };
-    if (verdict === 'corrupted') return { bytes, verdict: 'composer_corrupted' as const };
-    const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-    return enter.code === 0 ? { bytes, verdict: 'staged' as const } : { bytes, verdict: 'seat_unresolved' as const };
+    const signal = AbortSignal.timeout(this.composerObserveTimeoutMs);
+    let output: PaneOutputSubscription;
+    try {
+      // Arm the control-mode client before mutation. Its %output facts are the
+      // terminal's acknowledgement that the interactive engine repainted;
+      // capture is driven by those facts, never by a sleep or polling loop.
+      output = await this.outputObserver(this.socket, paneId, signal);
+    } catch {
+      return { bytes: 0, verdict: 'seat_unresolved' as const };
+    }
+    let lastVerdict: ComposerVerdict = 'absent';
+    try {
+      const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
+      if (literal.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      while (!signal.aborted) {
+        try {
+          await output.next(signal);
+        } catch {
+          break;
+        }
+        const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
+        if (captured.code !== 0) return { bytes, verdict: 'seat_unresolved' as const };
+        lastVerdict = text.includes(`tx comm ${correlationId}`)
+          ? RealTmux.composerVerdict(captured.stdout, correlationId, text)
+          : RealTmux.inputVerdict(captured.stdout, text);
+        if (lastVerdict !== 'intact') continue;
+        const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
+        return enter.code === 0 ? { bytes, verdict: 'staged' as const } : { bytes, verdict: 'seat_unresolved' as const };
+      }
+      return lastVerdict === 'absent'
+        ? { bytes, verdict: 'frame_absent' as const }
+        : { bytes, verdict: 'composer_corrupted' as const };
+    } finally {
+      output.close();
+    }
   }
 
   // A posed plan is a vendor approval dialog, not a footer state. Claude poses

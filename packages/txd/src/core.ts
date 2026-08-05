@@ -1139,6 +1139,10 @@ export class Daemon {
       await this.store.append({ entity_type: 'message', entity_id: prepared.correlationId, event_type: 'act.agent_input_injected',
         payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict, input_class: 'machine_feed' },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+      // The HTTP success is lifecycled's acknowledgement boundary. Anything
+      // short of a verified Enter must fail the request so its durable bus
+      // subscription retains the event for event-driven redelivery.
+      if (sent.verdict !== 'staged') throw new Error(`machine_feed_not_staged: ${sent.verdict}`);
       return { ok: true as const, target_agent_id: req.target_agent_id, deferred: true as const };
     });
   }
