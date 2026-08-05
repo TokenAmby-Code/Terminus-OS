@@ -150,12 +150,11 @@ test('a live engine refuses gracefully; force overrides for a hung agent', async
   expect(forced.verdicts[0]).toMatchObject({ closed: true, agent_id: 'w-1' });
 });
 
-// THE DEATH SCENARIO, pinned. `awaiting_input` is the resting state of every
-// healthy agent between turns, and a message parked in a composer never
-// produces act.prompt_submitted — so an agent commed back into work still reads
-// `awaiting_input` while it works. The old guard read that fold as permission
-// and closed live workers. The probe is what stops it.
-test('an awaiting_input agent with a live engine is NOT closed', async () => {
+// An explicit overseer target paired with the latest durable stop is the
+// intended close boundary. The engine remains alive at the prompt between
+// turns, so process liveness must not turn that ordinary close into a no-op.
+// Filter selectors name no agent and therefore retain the liveness guard.
+test('an explicitly targeted stopped agent closes while filtered close remains graceful', async () => {
   const { store, tmux, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'reservists:W', 'w-1');
@@ -163,15 +162,16 @@ test('an awaiting_input agent with a live engine is NOT closed', async () => {
   tmux.markAgentAlive('reservists:W', 'w-1');
 
   const targeted = await d.close(req({ targets: ['w-1'] }));
-  expect(targeted.ok).toBe(false);
-  expect(targeted.verdicts[0]!.reason).toContain('live_engine');
-  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('w-1');
+  expect(targeted.ok).toBe(true);
+  expect(targeted.verdicts[0]).toMatchObject({ closed: true, agent_id: 'w-1' });
 
-  // And a filtered close, which names no seat and so carries no authorization
-  // to end a live agent, must not reap it either.
+  await bind(d, store, 'reservists:S', 'w-2');
+  await stopped(store, 'w-2');
+  tmux.markAgentAlive('reservists:S', 'w-2');
+
   const filtered = await d.close(req({ page: 'reservists' }));
   expect(filtered.closed_count).toBe(0);
-  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('w-1');
+  expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('w-2');
 });
 
 // SCAR: emperors-children at somnium:S was verified healthy while its pane's
@@ -188,7 +188,7 @@ test('a remote seat is never reported dead merely because its child is a tunnel'
   const { store, tmux, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'somnium:S', 'remote-1');
-  await stopped(store, 'remote-1');
+  await working(store, 'remote-1');
   tmux.markSeatUnobservable('somnium:S');
 
   const targeted = await d.close(req({ targets: ['remote-1'] }));
@@ -217,7 +217,7 @@ test('an observation failure refuses the close and is distinguishable from death
   const { store, tmux, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'reservists:W', 'blind-1');
-  await stopped(store, 'blind-1');
+  await working(store, 'blind-1');
   tmux.markSeatUnobservable('reservists:W');
 
   const refused = await d.close(req({ targets: ['blind-1'] }));
