@@ -1564,6 +1564,19 @@ export class RealTmux implements TmuxControlPlane {
     try {
       const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
       if (literal.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      // The editor consumes send-keys into its own composer state. If the
+      // output-driven verifier cannot prove that exact insertion intact, undo
+      // exactly the codepoints this call appended before returning refusal.
+      // Retrying may then type once against the same pre-call composer; it can
+      // never accumulate another copy of this frame.
+      const restoreComposer = async () => {
+        const count = [...text].length;
+        if (count === 0) return true;
+        const restored = await this.command('restore_input_composer', seatId, [
+          'send-keys', '-t', paneId, '-N', String(count), 'BSpace',
+        ]);
+        return restored.code === 0;
+      };
       while (!signal.aborted) {
         try {
           await output.next(signal);
@@ -1571,14 +1584,21 @@ export class RealTmux implements TmuxControlPlane {
           break;
         }
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
-        if (captured.code !== 0) return { bytes, verdict: 'seat_unresolved' as const };
+        if (captured.code !== 0) {
+          await restoreComposer();
+          return { bytes, verdict: 'seat_unresolved' as const };
+        }
         lastVerdict = text.includes(`tx comm ${correlationId}`)
           ? RealTmux.composerVerdict(captured.stdout, correlationId, text)
           : RealTmux.inputVerdict(captured.stdout, text);
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-        return enter.code === 0 ? { bytes, verdict: 'staged' as const } : { bytes, verdict: 'seat_unresolved' as const };
+        if (enter.code === 0) return { bytes, verdict: 'staged' as const };
+        await restoreComposer();
+        return { bytes, verdict: 'seat_unresolved' as const };
       }
+      const restored = await restoreComposer();
+      if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
       return lastVerdict === 'absent'
         ? { bytes, verdict: 'frame_absent' as const }
         : { bytes, verdict: 'composer_corrupted' as const };

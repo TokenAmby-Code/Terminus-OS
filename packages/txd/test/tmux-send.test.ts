@@ -175,3 +175,52 @@ test('verified send never submits when output settles without the expected frame
   expect(outcome.verdict).toBe('composer_corrupted');
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
+
+test('behavioral pin: a failed verified send restores the composer byte-for-byte', async () => {
+  const before = 'operator draft: keep $ and unicode Ω';
+  const injected = '[lcd event lane2.transport_proof seq=227817]\n{"nonce":"one-event"}';
+  let composer = before;
+  const calls: string[][] = [];
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'send-keys' && args.includes('-l')) {
+      composer += args.at(-1)!;
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'send-keys' && args.includes('BSpace')) {
+      const count = Number(args[args.indexOf('-N') + 1]);
+      composer = [...composer].slice(0, -count).join('');
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'capture-pane') {
+      // The terminal repainted before the last inserted codepoint. This is the
+      // live `composer_corrupted` exhibit, while the editor still owns every
+      // byte that send-keys inserted and can undo exactly that suffix.
+      return { code: 0, stdout: `> ${composer.slice(0, -1)}\n`, stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observation complete');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat('palace:S', 'correlation', injected);
+
+  expect(outcome.verdict).toBe('composer_corrupted');
+  expect(composer).toBe(before);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('-l'))).toHaveLength(1);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(1);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
+});
