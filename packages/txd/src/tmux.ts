@@ -138,7 +138,7 @@ export interface TmuxControlPlane {
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
-  sendVerifiedToSeat(seatId: string, correlationId: string, text: string): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
   /** Observe whether the live engine composer is painted without pane input. */
   observeComposerInteractive(seatId: string): Promise<boolean>;
   /**
@@ -1574,7 +1574,9 @@ export class RealTmux implements TmuxControlPlane {
       'capture-pane', '-p', '-J', '-t', paneId,
     ]);
     if (captured.code !== 0) return 'seat_unresolved';
-    const verdict = RealTmux.composerVerdict(captured.stdout, messageId, expectedFrame);
+    const verdict = expectedFrame.includes(`tx comm ${messageId}`)
+      ? RealTmux.composerVerdict(captured.stdout, messageId, expectedFrame)
+      : RealTmux.inputVerdict(captured.stdout, expectedFrame);
     if (verdict === 'absent') return 'frame_absent';
     if (verdict === 'corrupted') return 'composer_corrupted';
     const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
@@ -1597,7 +1599,7 @@ export class RealTmux implements TmuxControlPlane {
     return { bytes, verdict: 'staged' };
   }
 
-  async sendVerifiedToSeat(seatId: string, correlationId: string, text: string) {
+  async sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string) {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const bytes = Buffer.byteLength(text, 'utf8');
@@ -1613,8 +1615,24 @@ export class RealTmux implements TmuxControlPlane {
     }
     let lastVerdict: ComposerVerdict = 'absent';
     try {
-      const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
+      const prefix = tabAfterPrefix ?? text;
+      const suffix = tabAfterPrefix === undefined ? '' : text.slice(tabAfterPrefix.length);
+      const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', prefix]);
       if (literal.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      if (tabAfterPrefix !== undefined) {
+        const tab = await this.command('commit_surface_name', seatId, ['send-keys', '-t', paneId, 'Tab']);
+        if (tab.code !== 0) {
+          await this.command('restore_input_composer', seatId, ['send-keys', '-t', paneId, '-N', String([...prefix].length), 'BSpace']);
+          return { bytes, verdict: 'seat_unresolved' as const };
+        }
+        if (suffix.length > 0) {
+          const argsLiteral = await this.command('send_literal_args', seatId, ['send-keys', '-t', paneId, '-l', suffix]);
+          if (argsLiteral.code !== 0) {
+            await this.command('restore_input_composer', seatId, ['send-keys', '-t', paneId, '-N', String([...prefix].length), 'BSpace']);
+            return { bytes, verdict: 'seat_unresolved' as const };
+          }
+        }
+      }
       // The editor consumes send-keys into its own composer state. If the
       // output-driven verifier cannot prove that exact insertion intact, undo
       // exactly the codepoints this call appended before returning refusal.
@@ -2153,7 +2171,7 @@ export class FakeTmux implements TmuxControlPlane {
     this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' };
   }
-  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string) {
+  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string) {
     const sent = await this.sendToSeat(seatId, text);
     return sent;
   }
@@ -2171,7 +2189,9 @@ export class FakeTmux implements TmuxControlPlane {
   async redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') return 'seat_unresolved';
-    const verdict = RealTmux.composerVerdict(this.paneTexts.get(seatId) ?? '', messageId, expectedFrame);
+    const verdict = expectedFrame.includes(`tx comm ${messageId}`)
+      ? RealTmux.composerVerdict(this.paneTexts.get(seatId) ?? '', messageId, expectedFrame)
+      : RealTmux.inputVerdict(this.paneTexts.get(seatId) ?? '', expectedFrame);
     if (verdict === 'absent') return 'frame_absent';
     if (verdict === 'corrupted') return 'composer_corrupted';
     this.redriveEnterCounts.set(seatId, (this.redriveEnterCounts.get(seatId) ?? 0) + 1);

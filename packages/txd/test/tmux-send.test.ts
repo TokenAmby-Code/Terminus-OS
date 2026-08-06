@@ -272,3 +272,45 @@ test('behavioral pin: a failed verified send restores the composer byte-for-byte
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(1);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
+
+for (const profile of [
+  { engine: 'claude', prefix: '/compact', suffix: ' hard', chrome: '╭─ commands ─╮\n│ /compact     │\n╰───────────────╯' },
+  { engine: 'codex', prefix: '$openai-docs', suffix: ' models', chrome: 'skills\n  $openai-docs\n  $skill-creator' },
+] as const) {
+  test(`behavioral pin: ${profile.engine} palette chrome cannot corrupt or complete a full-name intent`, async () => {
+    const calls: string[][] = [];
+    let composer = '';
+    const expected = profile.prefix + profile.suffix;
+    const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'send-keys' && args.includes('-l')) {
+        composer += args.at(-1)!;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'send-keys' && args.at(-1) === 'Tab') {
+        // The real-profile hypothesis being pinned: after the complete name,
+        // Tab commits/collapses selection without changing editor bytes.
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'capture-pane') return { code: 0, stdout: `${profile.chrome}\n› ${composer}\n`, stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const tmux = new RealTmux('scratch', {
+      run,
+      composerObserveTimeoutMs: 10_000,
+      observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
+    });
+
+    const outcome = await tmux.sendVerifiedToSeat('palace:S', 'correlation', expected, profile.prefix);
+
+    expect(outcome).toEqual({ bytes: Buffer.byteLength(expected), verdict: 'staged' });
+    expect(composer).toBe(expected);
+    expect(calls.filter((args) => args[0] === 'send-keys')).toEqual([
+      ['send-keys', '-t', '%7', '-l', profile.prefix],
+      ['send-keys', '-t', '%7', 'Tab'],
+      ['send-keys', '-t', '%7', '-l', profile.suffix],
+      ['send-keys', '-t', '%7', 'Enter'],
+    ]);
+  });
+}

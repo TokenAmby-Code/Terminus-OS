@@ -100,6 +100,28 @@ test('redrive on an intact parked frame drives Enter once and attests it', async
   expect(attempts[0]!.payload.outcome).toBe('enter_redriven');
 });
 
+test('behavioral pin: a composer-quiet fact may redrive one intact rendered intent without retyping', async () => {
+  const { store, tmux, d, events } = await fixture();
+  const id = '11111111-1111-4111-8111-111111111111';
+  await store.append({
+    entity_type: 'message', entity_id: id, event_type: 'reg.comm_accepted',
+    payload: {
+      source_agent_id: 'sender', target_agent_ids: ['worker'], targets: [], ask_id: null,
+      kind: 'skill', name: 'openai-docs', rendered_frame: '$openai-docs models',
+      message: '$openai-docs models', intent: { kind: 'skill', name: 'openai-docs', args: ['models'] },
+    },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: '2026-08-06T00:00:00.000Z',
+  });
+  tmux.setPaneText('palace:W', 'skills palette chrome\n› $openai-docs models');
+
+  const result = await d.commRedrive({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'worker' });
+
+  expect(result.outcome).toBe('enter_redriven');
+  expect(tmux.redriveEnters('palace:W')).toBe(1);
+  expect((await events('act.comm_redrive_attempted'))[0]?.payload.outcome).toBe('enter_redriven');
+});
+
 test('redrive after the assertion already exists is a no-op that never touches the pane', async () => {
   const { tmux, d, send, events } = await fixture();
   const id = await send('already home');

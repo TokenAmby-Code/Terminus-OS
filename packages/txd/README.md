@@ -60,7 +60,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` / page-less `pane-killed` ingress; repairs each faulted seat alone, rebuilding a page only when no tagged pane survives on it |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Remote close (`tx close`, overseer-gated): reap N processes individually, keep estate panes, seats → freelist; explicit stopped targets are intended closes, other live/unobservable targets refuse absent force, palace:N hard-refused |
-| POST   | `/agents/comm`          | Typed one-way/ask/reply communication admission |
+| POST   | `/agents/comm`          | Typed message or engine-neutral command/skill admission |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
 | POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost) and `hook.user_prompt_submit`; acks everything else |
@@ -68,6 +68,16 @@ each route is the ruled daemon behavior, unchanged.
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
+- `tx comm <identity> command=<name> [-- args]` invokes the named slash
+  command. `tx comm <identity> skill=<name> [-- args]` invokes a target skill.
+  Callers never supply `/`, `$`, or an engine flag: txd resolves the target's
+  registrationd-minted binding engine and renders `/name` for Claude skills,
+  `$name` for Codex skills, and `/name` for commands on both engines. Txd types
+  the complete name, presses one Tab to commit/collapse the engine palette,
+  then types any arguments and submits through the existing verified-send
+  gate. V1 deliberately performs no skill-name preflight; the engine owns
+  validation. Any future preflight must consume Token-Fleet's canonical skill
+  configuration rather than create a txd-local registry.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an

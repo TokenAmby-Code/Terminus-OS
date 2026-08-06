@@ -636,23 +636,49 @@ export const TmuxLifecycleEventResponseSchema = z.object({
 });
 export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventResponseSchema>;
 
-// Communications are admitted as one atomic request.  `message` is opaque;
-// txd never parses or normalizes it.  Pages are resolved to an immutable list
-// before the accepted event is appended.
+// Communications are admitted as one atomic request. A caller either supplies
+// opaque message bytes OR one engine-neutral surface intent. Syntax rendering
+// belongs to txd after it resolves the target binding's engine.
 export const MAX_COMM_MESSAGE_BYTES = 64 * 1024;
 export const COMM_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
+export const CommIntentSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('command'),
+    name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+    args: z.array(z.string()).default([]),
+  }).strict(),
+  z.object({
+    kind: z.literal('skill'),
+    name: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+    args: z.array(z.string()).default([]),
+  }).strict(),
+]);
+export type CommIntent = z.infer<typeof CommIntentSchema>;
 export const CommRequestSchema = z.object({
   schema_version: z.number().int(),
   source_agent_id: CanonicalIdSchema,
   target: CanonicalIdSchema.optional(),
   page: CanonicalIdSchema.optional(),
-  message: z.string().refine((value) => new TextEncoder().encode(value).length <= MAX_COMM_MESSAGE_BYTES, 'message exceeds maximum encoded size'),
+  message: z.string().refine((value) => new TextEncoder().encode(value).length <= MAX_COMM_MESSAGE_BYTES, 'message exceeds maximum encoded size').optional(),
+  intent: CommIntentSchema.optional(),
   ask: z.boolean().default(false),
   reply: z.boolean().default(false),
-}).superRefine((value, ctx) => {
+}).strict().superRefine((value, ctx) => {
   const modes = Number(value.target !== undefined) + Number(value.page !== undefined) + Number(value.reply);
   if (modes !== 1) ctx.addIssue({ code: 'custom', message: 'exactly one of target, page, or reply is required' });
   if (value.reply && value.ask) ctx.addIssue({ code: 'custom', message: 'reply cannot also ask' });
+  if (Number(value.message !== undefined) + Number(value.intent !== undefined) !== 1) {
+    ctx.addIssue({ code: 'custom', message: 'exactly one of message or intent is required' });
+  }
+  if (value.intent && (value.page !== undefined || value.reply || value.ask)) {
+    ctx.addIssue({ code: 'custom', message: 'command and skill intents require one direct target' });
+  }
+  if (value.intent) {
+    const logical = `${value.intent.name}${value.intent.args.length > 0 ? ` ${value.intent.args.join(' ')}` : ''}`;
+    if (new TextEncoder().encode(logical).length > MAX_COMM_MESSAGE_BYTES) {
+      ctx.addIssue({ code: 'custom', message: 'intent exceeds maximum encoded size' });
+    }
+  }
 });
 export type CommRequest = z.infer<typeof CommRequestSchema>;
 export const AgentInjectRequestSchema = z.object({

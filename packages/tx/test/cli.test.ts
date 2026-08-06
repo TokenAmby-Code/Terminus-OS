@@ -30,6 +30,8 @@ test('help is deterministic and lists extension points', async () => {
   const h = harness();
   expect(await runCli([], h.deps)).toBe(0);
   expect(h.stdout.join('\n')).toContain('tx health');
+  expect(h.stdout.join('\n')).toContain('command=<name>|skill=<name> [-- args]');
+  expect(h.stdout.join('\n')).toContain('caller supplies no /, $, or engine flag');
 });
 
 test('raw tmux identifiers are rejected before CLI output', async () => {
