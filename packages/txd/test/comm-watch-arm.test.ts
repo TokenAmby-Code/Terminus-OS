@@ -1,8 +1,8 @@
 // The pre-send comm watch: the committed obligation in lifecycled's contract
 // (its `context` field names txd's send path as the live caller) made true.
 // txd arms a one-shot prompt_submitted subscription carrying the comm
-// message_id BEFORE the bytes go to the pane, so lifecycled's absence edge
-// can redrive or fail loud when the submit fact never arrives.
+// message_id BEFORE the bytes go to the pane, so named composer-quiet facts
+// can permit verified redrives when the submit fact has not arrived.
 //
 // Arming failure is loud and leaves the pane untouched: once the gate is the
 // safety boundary, bypassing it would restore the newborn dead-zone race.
@@ -24,14 +24,54 @@ async function registered(d: Daemon, store: EventStore, seat: string, identity: 
   });
 }
 
-async function fixture(arm: ((input: CommWatchArmInput) => Promise<void>) | null) {
+async function fixture(
+  arm: ((input: CommWatchArmInput) => Promise<void>) | null,
+  physical: ConstructorParameters<typeof Daemon>[4] = null,
+) {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
-  const d = new Daemon(store, tmux, undefined, undefined, null, null, arm);
+  const d = new Daemon(store, tmux, undefined, undefined, physical, null, arm);
   await registered(d, store, 'council:custodes', 'sender');
   await registered(d, store, 'palace:W', 'worker');
   return { store, tmux, d };
 }
+
+test('behavioral pin: a painted newborn backfills durable composer interactivity before its comm gate', async () => {
+  const order: string[] = [];
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const physical = {
+    machine: 'test',
+    configuration: { generation: 'g', digest: 'd' },
+    agentWrapper: '/wrapper',
+    perpetual: {},
+    commStreams: {},
+    publish: async (type: string, payload: Record<string, unknown>) => {
+      order.push(`publish:${type}`);
+      published.push({ type, payload });
+    },
+  };
+  const { store, tmux, d } = await fixture(async () => { order.push('gate'); }, physical);
+  tmux.setPaneText('palace:W', '› Write tests for @filename\n\n  gpt-5.6-sol medium');
+
+  await d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'newborn control',
+    ask: false,
+    reply: false,
+  });
+
+  expect(order).toEqual(['publish:agent.composer_interactive', 'gate']);
+  expect(published[0]?.payload).toMatchObject({
+    schema_version: SCHEMA_VERSION,
+    agent_id: 'worker',
+    seat_id: 'palace:W',
+  });
+  const events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'reg.composer_observation_prepared')).toHaveLength(1);
+  expect(events.filter((event) => event.event_type === 'act.composer_interactive_announced')).toHaveLength(1);
+});
 
 test('behavioral pin: an unpainted newborn receives no bytes before lcd releases its composer-interactive gate', async () => {
   const order: string[] = [];

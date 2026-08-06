@@ -139,6 +139,8 @@ export interface TmuxControlPlane {
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   sendVerifiedToSeat(seatId: string, correlationId: string, text: string): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
+  /** Observe whether the live engine composer is painted without pane input. */
+  observeComposerInteractive(seatId: string): Promise<boolean>;
   /**
    * Re-drive a parked comm frame with a single Enter — never by retyping.
    * Enter fires only when the visible composer holds the frame AND its text
@@ -1504,13 +1506,62 @@ export class RealTmux implements TmuxControlPlane {
     // its own lines (capture -J rejoins only terminal wraps), so the raw pane
     // may split the very header the absence gate looks for.
     const normalized = normalize(pane);
-    if (!normalized.includes(normalize(`tx comm ${messageId}`))) return 'absent';
-    return normalized.includes(normalize(expectedFrame)) ? 'intact' : 'corrupted';
+    const expected = normalize(expectedFrame);
+    if (normalized.includes(normalize(`tx comm ${messageId}`))) {
+      return normalized.includes(expected) ? 'intact' : 'corrupted';
+    }
+
+    // Codex's multiline composer is a viewport. Narrow panes can clip the
+    // frame's first rows after extra TUI chrome (for example the background
+    // terminal status) reduces the textarea height. The last prompt-marked
+    // region is still the editor, and an exact, substantial visible suffix is
+    // enough to prove that the editor owns the intended bytes. Chrome below
+    // the textarea is deliberately ignored by taking only the longest prefix
+    // of that region which is an expected-frame suffix.
+    const lines = pane.split('\n');
+    let promptLine = -1;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (/^\s*[›>]\s?/.test(lines[index]!)) {
+        promptLine = index;
+        break;
+      }
+    }
+    if (promptLine < 0) return 'absent';
+    const visibleRegion = normalize(lines.slice(promptLine).join('\n'));
+    const minimumProofLength = 32;
+    for (let length = visibleRegion.length; length >= minimumProofLength; length -= 1) {
+      if (expected.endsWith(visibleRegion.slice(0, length))) return 'intact';
+    }
+    return 'corrupted';
   }
 
   static inputVerdict(pane: string, expected: string): ComposerVerdict {
     const normalize = (text: string) => text.replace(/[│┃›>]/g, '').replace(/\s+/g, '');
     return normalize(pane).includes(normalize(expected)) ? 'intact' : 'corrupted';
+  }
+
+  static composerInteractive(pane: string): boolean {
+    const lines = pane.split('\n');
+    const lastContent = lines.reduce((last, line, index) => line.trim() ? index : last, -1);
+    if (lastContent < 0) return false;
+    const lastPrompt = lines.reduce(
+      (last, line, index) => /^\s*[›❯>]\s/.test(line) ? index : last,
+      -1,
+    );
+    const lastAssistantOutput = lines.reduce(
+      (last, line, index) => /^\s*[•●⏺]\s/.test(line) ? index : last,
+      -1,
+    );
+    return lastPrompt >= Math.max(0, lastContent - 6) && lastPrompt > lastAssistantOutput;
+  }
+
+  async observeComposerInteractive(seatId: string): Promise<boolean> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return false;
+    const captured = await this.command('observe_composer_interactive', seatId, [
+      'capture-pane', '-p', '-J', '-t', paneId,
+    ]);
+    return captured.code === 0 && RealTmux.composerInteractive(captured.stdout);
   }
 
   async redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
@@ -2105,6 +2156,11 @@ export class FakeTmux implements TmuxControlPlane {
   async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string) {
     const sent = await this.sendToSeat(seatId, text);
     return sent;
+  }
+  async observeComposerInteractive(seatId: string): Promise<boolean> {
+    const s = this.seats.get(seatId);
+    return !!s && s.pane === 'live'
+      && RealTmux.composerInteractive(this.paneTexts.get(seatId) ?? '');
   }
   /** Test observation: every text staged into this seat, in order. */
   sends(seatId: string): string[] { return [...(this.sentLines.get(seatId) ?? [])]; }

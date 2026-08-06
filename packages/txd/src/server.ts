@@ -43,7 +43,6 @@ import {
   CommRequestSchema,
   AgentInjectRequestSchema,
   CommRedriveRequestSchema,
-  CommFailLoudRequestSchema,
   CommWaitRequestSchema,
   DispatchRequestedSchema,
   EstateRotateRequestSchema,
@@ -294,21 +293,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           return json({ ok: false, error: 'comm_redrive_refused', detail }, 422);
-        }
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/agents/comm/fail-loud'),
-      label: 'POST /agents/comm/fail-loud',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, CommFailLoudRequestSchema, 'invalid_comm_fail_loud_request');
-        if (parsed instanceof Response) return parsed;
-        try {
-          return json(await daemon.commFailLoud(parsed, receipt(req)));
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          return json({ ok: false, error: 'comm_fail_loud_refused', detail }, 422);
         }
       },
     },

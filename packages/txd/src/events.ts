@@ -16,7 +16,8 @@ export type TxdPublishedEventType =
   | 'agent.perpetual_seat_vacant'
   | 'agent.retired'
   | 'agent.unregistered_closed'
-  | 'agent.headless_consumed';
+  | 'agent.headless_consumed'
+  | 'agent.composer_interactive';
 
 export function makeBusPublisher(
   busUrl: string,

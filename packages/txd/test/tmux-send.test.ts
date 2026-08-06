@@ -147,6 +147,54 @@ test('verified send waits for a pane-output event before observing the composer'
   expect(calls).toEqual(['list-panes', 'arm:%7', 'send-keys', 'capture-pane', 'send-keys', 'close']);
 });
 
+test('behavioral pin: verified comm accepts an intact frame clipped inside the Codex composer viewport', () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n`
+    + 'A long operational brief whose header scrolls above the visible textarea.\n'
+    + 'The final lines remain visible and are the exact suffix the editor owns.';
+  const pane = [
+    '• earlier transcript remains above the composer',
+    '',
+    '  1 background terminal running · /ps',
+    '',
+    '› n visible and are the exact suffix',
+    '  the editor owns.',
+    '',
+    '  gpt-5.6-sol medium · ~/.local/share…',
+  ].join('\n');
+
+  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('intact');
+});
+
+test('behavioral pin: clipped Codex composer suffix must still match exactly', () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n`
+    + 'A long operational brief whose header scrolls above the visible textarea.\n'
+    + 'The final lines remain visible and are the exact suffix the editor owns.';
+  const pane = [
+    '  1 background terminal running · /ps',
+    '',
+    '› n visible and are the exact suffix',
+    '  the editor is corrupted.',
+    '',
+    '  gpt-5.6-sol medium · ~/.local/share…',
+  ].join('\n');
+
+  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('corrupted');
+});
+
+test('behavioral pin: a transcript prompt above active assistant output is not an interactive composer', () => {
+  const pane = [
+    '› prior operator prompt',
+    '',
+    '• still working on the current turn',
+    '',
+    '  gpt-5.6-sol medium · ~/.local/share…',
+  ].join('\n');
+
+  expect(RealTmux.composerInteractive(pane)).toBe(false);
+});
+
 test('verified send never submits when output settles without the expected frame', async () => {
   const calls: string[][] = [];
   const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {

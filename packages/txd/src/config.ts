@@ -28,9 +28,8 @@ export type DaemonConfig = {
    */
   lifecycledSocket: string;
   /**
-   * Bound on the arm await. Mirrors lifecycled's DELIVERY_TIMEOUT_MS — the
-   * one transport contract both sides of the watch derive their deadlines
-   * from; change them together.
+   * Bound on the arm await. Mirrors lifecycled's delivery contract; change
+   * them together.
    */
   commWatchTimeoutMs: number;
   /** Generated physical-only view of Token-Fleet's canonical pane allocation. */

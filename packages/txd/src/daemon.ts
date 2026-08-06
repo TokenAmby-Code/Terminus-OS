@@ -42,8 +42,8 @@ const physicalRegistration = cfg.physicalRegistration
     }
   : null;
 // The pre-send comm watch, armed against lifecycled's local ingress socket.
-// The await is bounded by the same transport contract lifecycled derives its
-// own deadlines from (its DELIVERY_TIMEOUT_MS); a refusal or timeout surfaces
+// The await is bounded by the same transport contract as lifecycled's delivery
+// awaits; a refusal or timeout surfaces
 // as act.comm_watch_unarmed and leaves the target pane untouched.
 const commWatchArm = cfg.lifecycledSocket
   ? async (input: { message_id: string; target_agent_id: string; source_agent_id: string; stream_class: 'interactive' | 'headless' }) => {
