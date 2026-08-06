@@ -52,14 +52,30 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
       break;
     }
   }
+  const intentToken = !reply && !page ? positional[1] : undefined;
+  const intentMatch = intentToken?.match(/^(command|skill)=(.*)$/);
+  let intent: { kind: 'command' | 'skill'; name: string; args: string[] } | undefined;
+  if ((page || reply) && positional.some((value) => /^(command|skill)=/.test(value))) {
+    throw new Error('command and skill intents require one direct target');
+  }
+  if (intentMatch) {
+    if (ask || positional.length > 2 && positional[2] !== '--') {
+      throw new Error('usage: tx comm <identity> command=<name> [-- args] | tx comm <identity> skill=<name> [-- args]');
+    }
+    const name = intentMatch[2]!;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(name)) {
+      throw new Error('command and skill names never include /, $, whitespace, or an engine selector');
+    }
+    intent = { kind: intentMatch[1] as 'command' | 'skill', name, args: positional.slice(3) };
+  }
   if (reply) {
     if (page || ask || positional.length !== 1) throw new Error('usage: tx comm --reply <message>');
   } else if (page) {
     if (positional.length !== 1) throw new Error('usage: tx comm [--ask] --page <page> <message>');
-  } else if (positional.length !== 2) throw new Error('usage: tx comm [--ask] <identity> <message>');
-  const message = positional.at(-1)!;
+  } else if (!intent && positional.length !== 2) throw new Error('usage: tx comm [--ask] <identity> <message>');
   const accepted = await request('POST', '/agents/comm', {
-    schema_version: SCHEMA_VERSION, source_agent_id: agentSource('comm'), message, ask, reply,
+    schema_version: SCHEMA_VERSION, source_agent_id: agentSource('comm'),
+    ...(intent ? { intent } : { message: positional.at(-1)! }), ask, reply,
     ...(page ? { page } : {}), ...(!page && !reply ? { target: positional[0] } : {}),
   }) as { ask_id: string | null };
   write(accepted);
@@ -85,7 +101,7 @@ function decodedPush(response: ClipboardPushResponse): string {
 
 /** The single extension point: subcommands add one declarative entry here. */
 export const COMMANDS: readonly Command[] = [
-  { path: ['comm'], summary: 'Send, ask, page, or reply through txd event truth', run: comm },
+  { path: ['comm'], summary: '<identity> command=<name>|skill=<name> [-- args]; caller supplies no /, $, or engine flag', run: comm },
   {
     // The second phase of a comm, asked for rather than waited on. `tx comm`
     // still quick-releases; this redeems the message_id it returned for the

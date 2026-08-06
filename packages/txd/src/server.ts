@@ -132,7 +132,7 @@ function promptHookInput(payload: Record<string, unknown>): unknown {
     agent_id: payload.agent_id,
     schema_version: payload.schema_version ?? SCHEMA_VERSION,
     message_ids: commFrameMessageIds(prompt),
-    content: stringField(payload, 'content'),
+    content: prompt,
     stop_event_id: stringField(payload, 'stop_event_id'),
   };
 }

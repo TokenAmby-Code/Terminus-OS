@@ -120,9 +120,23 @@ describe("txd lifecycle vocabulary", () => {
 
   test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
     const base = { schema_version: 11, source_agent_id: "source", target: "target", ask: false, reply: false };
-    expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message.length).toBe(MAX_COMM_MESSAGE_BYTES);
+    expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message!.length).toBe(MAX_COMM_MESSAGE_BYTES);
     expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
+  });
+
+  test("behavioral pin: comm intent is exactly one engine-neutral command or skill", () => {
+    const base = { schema_version: 11, source_agent_id: "source", target: "target", ask: false, reply: false };
+    expect(CommRequestSchema.parse({ ...base, intent: { kind: "command", name: "compact", args: ["hard"] } }).intent)
+      .toEqual({ kind: "command", name: "compact", args: ["hard"] });
+    expect(CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [] } }).intent)
+      .toEqual({ kind: "skill", name: "openai-docs", args: [] });
+    expect(() => CommRequestSchema.parse({ ...base, message: "hello", intent: { kind: "command", name: "compact", args: [] } })).toThrow();
+    for (const name of ["/compact", "$openai-docs", "two words", ""]) {
+      expect(() => CommRequestSchema.parse({ ...base, intent: { kind: "skill", name, args: [] } })).toThrow();
+    }
+    expect(() => CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [], engine: "codex" } })).toThrow();
+    expect(() => CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [] }, engine: "codex" })).toThrow();
   });
 
   test("health names the service txd — nothing k12-named survives of the daemon", () => {

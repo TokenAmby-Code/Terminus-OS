@@ -26,6 +26,7 @@ import {
   type CommCallback,
   type CommDeliveryReadResponse,
   type CommHook,
+  type CommIntent,
   type CommRequest,
   type CommRedriveRequest,
   type CommRedriveResponse,
@@ -96,6 +97,12 @@ export type ComposerGateInput = { correlation_id: string; target_agent_id: strin
 // silently diverge and turn every redrive into a false `composer_corrupted`.
 function commFrame(messageId: string, sourceAgentId: string, askId: string | null, message: string): string {
   return `[tx comm ${messageId} from ${sourceAgentId}${askId ? ` ask ${askId}` : ''}]\n${message}`;
+}
+
+function renderCommIntent(intent: CommIntent, engine: 'claude' | 'codex'): { frame: string; tabAfter: string } {
+  const prefix = intent.kind === 'command' || engine === 'claude' ? '/' : '$';
+  const tabAfter = `${prefix}${intent.name}`;
+  return { tabAfter, frame: intent.args.length > 0 ? `${tabAfter} ${intent.args.join(' ')}` : tabAfter };
 }
 
 export type PhysicalRegistrationRuntime = {
@@ -1128,16 +1135,26 @@ export class Daemon {
       const pendingResetSeats = this.pendingScopedResetSeats(events);
       const fenced = targets.find((target) => pendingResetSeats.has(target.seat_id));
       if (fenced) throw new Error(`scoped_reset_pending: ${fenced.seat_id}`);
+      const intentBinding = req.intent
+        ? proj.currentBindings.find((binding) => binding.registered && binding.agent_id === targets[0]?.agent_id)
+        : null;
+      if (req.intent && !intentBinding?.engine) throw new Error(`target_engine_unresolved: ${targets[0]?.agent_id}`);
+      const renderedIntent = req.intent ? renderCommIntent(req.intent, intentBinding!.engine!) : null;
       const messageId = crypto.randomUUID();
       const askId = req.ask ? crypto.randomUUID() : null;
       const occurred_at = this.now();
       const accepted = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted', payload: {
         source_agent_id: req.source_agent_id, target_agent_ids: targets.map((t) => t.agent_id), targets,
-        ask_id: askId, reply_to_ask_id: replyingToAsk, message: req.message,
+        ask_id: askId, reply_to_ask_id: replyingToAsk,
+        kind: req.intent?.kind ?? 'message',
+        name: req.intent?.name ?? null,
+        rendered_frame: renderedIntent?.frame ?? null,
+        message: req.message ?? renderedIntent!.frame,
+        ...(req.intent ? { intent: req.intent } : {}),
       }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
       const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
-      return { messageId, askId, replyingToAsk, targets, eventIds: [accepted.seq, snapshot.seq] };
+      return { messageId, askId, replyingToAsk, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
     });
 
     await Promise.all(prepared.targets.map((target) => {
@@ -1160,12 +1177,18 @@ export class Daemon {
       let allStaged = true;
       for (const target of prepared.targets) {
         const streamClass = this.physicalRegistration?.commStreams?.[target.seat_id] ?? 'interactive';
-        const frame = commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message);
+        if (prepared.renderedIntent && streamClass !== 'interactive') throw new Error('intent_requires_interactive_stream');
+        const frame = prepared.renderedIntent?.frame
+          ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
         const sent = streamClass === 'headless'
           ? await this.tmux.sendToSeat(target.seat_id, frame)
-          : await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame);
+          : await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame, prepared.renderedIntent?.tabAfter);
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
-          payload: { target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+          payload: {
+            target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes,
+            submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
+            name: req.intent?.name ?? null, rendered_frame: frame,
+          }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
         allStaged &&= sent.verdict === 'staged';
         if (streamClass === 'headless' && sent.verdict === 'staged') {
@@ -1178,7 +1201,7 @@ export class Daemon {
           });
         }
       }
-      if (prepared.replyingToAsk) await this.assertCallback(prepared.replyingToAsk, req.source_agent_id, req.message, 'reply', null, transportReceipt);
+      if (prepared.replyingToAsk) await this.assertCallback(prepared.replyingToAsk, req.source_agent_id, req.message!, 'reply', null, transportReceipt);
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
         targets: prepared.targets, staged: allStaged, event_ids };
     });
@@ -1324,7 +1347,17 @@ export class Daemon {
       const asserted: string[] = [];
       const confirmations = new Map<string, string[]>();
       let matched = false;
-      for (const messageId of hook.message_ids) {
+      const intentMessage = hook.content === undefined ? undefined : events.find((event) =>
+        event.event_type === 'reg.comm_accepted'
+        && (event.payload.kind === 'command' || event.payload.kind === 'skill')
+        && event.payload.rendered_frame === hook.content
+        && Array.isArray(event.payload.target_agent_ids)
+        && event.payload.target_agent_ids.includes(hook.agent_id)
+        && !events.some((candidate) => candidate.event_type === 'act.comm_delivery_asserted'
+          && candidate.payload.message_id === event.entity_id
+          && candidate.payload.target_agent_id === hook.agent_id));
+      const messageIds = [...new Set([...hook.message_ids, ...(intentMessage ? [intentMessage.entity_id] : [])])];
+      for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
         matched = true;
@@ -1373,7 +1406,9 @@ export class Daemon {
       const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
       if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
       const askId = typeof accepted.payload.ask_id === 'string' ? accepted.payload.ask_id : null;
-      const frame = commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
+      const frame = accepted.payload.kind === 'command' || accepted.payload.kind === 'skill'
+        ? String(accepted.payload.rendered_frame)
+        : commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
       const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
       await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
         payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },

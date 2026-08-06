@@ -24,6 +24,21 @@ async function registered(d: Daemon, store: EventStore, seat: string, identity: 
   });
 }
 
+async function bindEngine(store: EventStore, seat: string, identity: string, engine: 'claude' | 'codex'): Promise<void> {
+  await store.append({
+    entity_type: 'seat', entity_id: seat, event_type: 'reg.bound',
+    payload: { agent_id: identity, persona: 'p', rank: 'astartes', commander: null, tint: '#111111', pane_generation: 'fake-generation', engine },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: '2026-08-01T00:00:00.000Z',
+  });
+  await store.append({
+    entity_type: 'agent', entity_id: identity, event_type: 'reg.agent_registered',
+    payload: { persona: 'p', rank: 'astartes', commander: null },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: '2026-08-01T00:00:00.000Z',
+  });
+}
+
 async function fixture(
   arm: ((input: CommWatchArmInput) => Promise<void>) | null,
   physical: ConstructorParameters<typeof Daemon>[4] = null,
@@ -115,6 +130,28 @@ test('a dead readiness plane fails loud before bytes and attests the unarmed gap
   expect(unarmed[0]!.payload.target_agent_id).toBe('worker');
 });
 
+test('behavioral pin: every new ordinary message receipt is typed while historical payloads remain readable', async () => {
+  const { store, d } = await fixture(async () => undefined);
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    message: 'typed receipt', ask: false, reply: false,
+  });
+  const events = await store.readAll();
+  expect(events.find((event) => event.event_type === 'act.comm_bytes_sent')?.payload).toMatchObject({
+    kind: 'message', name: null,
+    rendered_frame: `[tx comm ${accepted.message_id} from sender]\ntyped receipt`,
+  });
+  // Journal payloads are open dumb facts: old immutable rows with no new
+  // typing fields remain readable instead of being rewritten or rejected.
+  await store.append({
+    entity_type: 'message', entity_id: 'historical', event_type: 'act.comm_bytes_sent',
+    payload: { target_agent_id: 'worker', bytes: 3, submit_verdict: 'staged' },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: '2026-07-01T00:00:00.000Z',
+  });
+  expect((await store.readAll()).find((event) => event.entity_id === 'historical')?.payload.kind).toBeUndefined();
+});
+
 test('behavioral pin: a declared headless stream asserts delivery without prompt_submitted', async () => {
   const { store, tmux } = await fixture(null);
   const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
@@ -195,3 +232,41 @@ test('machine-feed injection refuses a non-staged composer verdict so the bus ev
     .toBe('composer_corrupted');
   expect(events.some((event) => event.event_type.startsWith('reg.comm_'))).toBe(false);
 });
+
+for (const profile of [
+  { engine: 'claude', kind: 'command', name: 'compact', args: ['hard'], rendered: '/compact hard', tabAfter: '/compact' },
+  { engine: 'codex', kind: 'skill', name: 'openai-docs', args: ['models'], rendered: '$openai-docs models', tabAfter: '$openai-docs' },
+] as const) {
+  test(`behavioral pin: ${profile.engine} intent renders in txd, types Tab, and writes a typed receipt`, async () => {
+    const { store, tmux, d } = await fixture(async () => undefined);
+    await bindEngine(store, 'palace:W', 'worker', profile.engine);
+    const observed: unknown[] = [];
+    const instrumented = tmux as unknown as {
+      sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
+    };
+    instrumented.sendVerifiedToSeat = async (seat, id, text, tabAfter) => {
+      observed.push({ seat, id, text, tabAfter });
+      return { bytes: Buffer.byteLength(text), verdict: 'staged' };
+    };
+
+    const accepted = await d.comm({
+      schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+      intent: { kind: profile.kind, name: profile.name, args: [...profile.args] }, ask: false, reply: false,
+    } as never);
+    expect(observed).toEqual([{ seat: 'palace:W', id: accepted.message_id, text: profile.rendered, tabAfter: profile.tabAfter }]);
+    const events = await store.readAll();
+    expect(events.find((event) => event.event_type === 'act.comm_bytes_sent')?.payload).toMatchObject({
+      kind: profile.kind, name: profile.name, rendered_frame: profile.rendered, submit_verdict: 'staged',
+    });
+
+    // Command surfaces may complete without a model turn, but the literal
+    // prompt_submitted hook must still correlate the rendered frame and create
+    // one terminal assertion without a comm envelope message id.
+    await d.promptSubmitted({
+      schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: profile.rendered,
+    });
+    const delivery = await d.commDelivery(accepted.message_id);
+    expect(delivery.complete).toBe(true);
+    expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+  });
+}
