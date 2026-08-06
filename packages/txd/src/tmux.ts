@@ -390,7 +390,18 @@ async function observePaneOutput(
   paneId: string,
   signal: AbortSignal,
 ): Promise<PaneOutputSubscription> {
-  const proc = spawnTmuxProcess(socket, ['-C', 'attach-session', '-t', paneId], {
+  // A pane-targeted attach selects that pane globally in its window, stealing
+  // focus from every existing client. Attach the observer to the containing
+  // session instead; control mode still emits pane-qualified %output facts,
+  // which we filter against paneId below.
+  const session = await spawnTmux(socket, [
+    'display-message', '-p', '-t', paneId, '#{session_id}',
+  ]);
+  const sessionId = new TextDecoder().decode(session.stdout).trim();
+  if (session.code !== 0 || session.overflow || !sessionId) {
+    throw new Error('tmux pane session could not be resolved');
+  }
+  const proc = spawnTmuxProcess(socket, ['-C', 'attach-session', '-t', sessionId], {
     stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
   });
   const reader = proc.stdout.getReader();
@@ -1498,8 +1509,15 @@ export class RealTmux implements TmuxControlPlane {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return false;
     const style = tint === null ? 'default' : `bg=${tint}`;
-    const applied = await this.command('set_seat_tint', seatId, ['select-pane', '-t', paneId, '-P', style]);
-    return applied.code === 0 && await this.seatTint(seatId) === tint;
+    const [inactive, active] = await Promise.all([
+      this.command('set_seat_tint', seatId, [
+        'set-option', '-p', '-t', paneId, 'window-style', style,
+      ]),
+      this.command('set_seat_active_tint', seatId, [
+        'set-option', '-p', '-t', paneId, 'window-active-style', style,
+      ]),
+    ]);
+    return inactive.code === 0 && active.code === 0 && await this.seatTint(seatId) === tint;
   }
 
   /**
