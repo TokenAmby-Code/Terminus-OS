@@ -194,6 +194,7 @@ export const REG_EVENT_NAMES = [
   'bound',
   'comm_accepted',
   'comm_target_snapshotted',
+  'composer_observation_prepared',
   'contradiction_flagged',
   'teardown_started',
   'process_reaped',
@@ -213,6 +214,7 @@ export const ACT_EVENT_NAMES = [
   'comm_redrive_attempted',
   'comm_delivery_failed',
   'comm_watch_unarmed',
+  'composer_interactive_announced',
   'comm_callback_asserted',
   'mode_transition_requested',
   'mode_transition_attested',
@@ -246,6 +248,7 @@ export const EVENT_TYPES = [
   'reg.bound',
   'reg.comm_accepted',
   'reg.comm_target_snapshotted',
+  'reg.composer_observation_prepared',
   'reg.contradiction_flagged',
   'reg.teardown_started',
   'reg.process_reaped',
@@ -261,6 +264,7 @@ export const EVENT_TYPES = [
   'act.comm_redrive_attempted',
   'act.comm_delivery_failed',
   'act.comm_watch_unarmed',
+  'act.composer_interactive_announced',
   'act.comm_callback_asserted',
   'act.mode_transition_requested',
   'act.mode_transition_attested',
@@ -698,13 +702,11 @@ export const CommDeliveryReadResponseSchema = z.object({
 });
 export type CommDeliveryReadResponse = z.infer<typeof CommDeliveryReadResponseSchema>;
 
-// The remedial half of the two-phase comm contract. Both are deliberate pane
-// actions: lifecycled (or an operator) decides WHEN, txd is the only mechanism.
+// The remedial half of the two-phase comm contract is a deliberate pane
+// action: lifecycled decides WHEN, txd is the only mechanism.
 // Redrive submits a parked frame with a single Enter — never by retyping —
 // and only after the visible composer text verifies byte-honest against the
 // payload that was staged; a corrupted composer is refused, not submitted.
-// Fail-loud converts an unconfirmed delivery into a durable failure fact and a
-// line in the SENDER's composer, so silence stops being the failure mode.
 export const CommRedriveRequestSchema = z.object({
   schema_version: z.number().int(),
   message_id: z.string().min(1),
@@ -717,14 +719,6 @@ export const CommRedriveResponseSchema = z.object({
   outcome: z.enum(COMM_REDRIVE_OUTCOMES),
 });
 export type CommRedriveResponse = z.infer<typeof CommRedriveResponseSchema>;
-
-export const CommFailLoudRequestSchema = CommRedriveRequestSchema;
-export type CommFailLoudRequest = CommRedriveRequest;
-export const CommFailLoudResponseSchema = z.object({
-  ok: z.literal(true), message_id: z.string(), target_agent_id: z.string(),
-  outcome: z.enum(['failed_loud', 'already_delivered']),
-});
-export type CommFailLoudResponse = z.infer<typeof CommFailLoudResponseSchema>;
 
 export const CommWaitRequestSchema = z.object({
   schema_version: z.number().int(), ask_id: CanonicalIdSchema, subscriber_agent_id: CanonicalIdSchema,

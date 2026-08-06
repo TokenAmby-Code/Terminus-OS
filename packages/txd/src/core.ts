@@ -29,8 +29,6 @@ import {
   type CommRequest,
   type CommRedriveRequest,
   type CommRedriveResponse,
-  type CommFailLoudRequest,
-  type CommFailLoudResponse,
   type CommTarget,
   type CommWaitRequest,
   type CommWaitResponse,
@@ -89,7 +87,7 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 
 type Now = () => string;
 // What txd hands lifecycled to arm one comm watch: enough to name the
-// subscription's agent stream and the message the absence edge will redrive.
+// subscription's agent stream and the message a composer-quiet fact may redrive.
 export type CommWatchArmInput = { message_id: string; target_agent_id: string; source_agent_id: string; stream_class: 'interactive' | 'headless' };
 export type ComposerGateInput = { correlation_id: string; target_agent_id: string; stream_class: 'interactive' | 'headless' };
 
@@ -1021,6 +1019,7 @@ export class Daemon {
   ): Promise<void> {
     if (!this.commWatchArm) return;
     try {
+      if (streamClass === 'interactive') await this.backfillComposerInteractivity(targetAgentId, transportReceipt);
       await this.commWatchArm({ message_id: messageId, target_agent_id: targetAgentId, source_agent_id: sourceAgentId, stream_class: streamClass });
     } catch (error) {
       await this.locked(() => this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
@@ -1028,6 +1027,74 @@ export class Daemon {
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() }));
       throw error;
     }
+  }
+
+  private async backfillComposerInteractivity(
+    targetAgentId: string,
+    transportReceipt: string | null,
+  ): Promise<void> {
+    if (!this.physicalRegistration) return;
+    const observation = await this.locked(async () => {
+      const events = await this.store.readAll();
+      const binding = buildProjections(events).currentBindings.find((row) =>
+        row.registered && row.agent_id === targetAgentId,
+      );
+      if (!binding?.pane_generation) return null;
+      const observationId = `${targetAgentId}:${binding.pane_generation}`;
+      if (events.some((event) => event.entity_id === observationId
+        && event.event_type === 'act.composer_interactive_announced')) return null;
+      return {
+        observationId,
+        seatId: binding.seat_id,
+        paneGeneration: binding.pane_generation,
+      };
+    });
+    if (!observation || !await this.tmux.observeComposerInteractive(observation.seatId)) return;
+    const occurredAt = this.now();
+    await this.locked(async () => {
+      const events = await this.store.readAll();
+      if (events.some((event) => event.entity_id === observation.observationId
+        && event.event_type === 'act.composer_interactive_announced')) return;
+      if (!events.some((event) => event.entity_id === observation.observationId
+        && event.event_type === 'reg.composer_observation_prepared')) {
+        await this.store.append({
+          entity_type: 'agent',
+          entity_id: observation.observationId,
+          event_type: 'reg.composer_observation_prepared',
+          payload: {
+            agent_id: targetAgentId,
+            seat_id: observation.seatId,
+            pane_generation: observation.paneGeneration,
+          },
+          provenance: this.prov('observer', transportReceipt),
+          occurred_at: occurredAt,
+        });
+      }
+    });
+    await this.physicalRegistration.publish('agent.composer_interactive', {
+      schema_version: SCHEMA_VERSION,
+      agent_id: targetAgentId,
+      seat_id: observation.seatId,
+      pane_generation: observation.paneGeneration,
+      observed_at: occurredAt,
+    });
+    await this.locked(async () => {
+      const events = await this.store.readAll();
+      if (events.some((event) => event.entity_id === observation.observationId
+        && event.event_type === 'act.composer_interactive_announced')) return;
+      await this.store.append({
+        entity_type: 'agent',
+        entity_id: observation.observationId,
+        event_type: 'act.composer_interactive_announced',
+        payload: {
+          agent_id: targetAgentId,
+          seat_id: observation.seatId,
+          pane_generation: observation.paneGeneration,
+        },
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: this.now(),
+      });
+    });
   }
 
   async comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
@@ -1282,10 +1349,9 @@ export class Daemon {
     });
   }
 
-  // The remedial half of the two-phase comm contract. Both methods are
-  // deliberate pane actions: something else (lifecycled's absence edge, or an
-  // operator) decides WHEN; this is mechanism only, and both are idempotent
-  // against the race they exist to lose gracefully — a late organic submit.
+  // The remedial half of the two-phase comm contract is a deliberate pane
+  // action. Lifecycled's named fact edge decides WHEN; this is mechanism only
+  // and remains idempotent against a late organic submit.
   private async commRemedialContext(messageId: string, targetAgentId: string) {
     const events = await this.store.readAll();
     const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
@@ -1313,26 +1379,6 @@ export class Daemon {
         payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
       return { ...base, outcome };
-    });
-  }
-
-  commFailLoud(req: CommFailLoudRequest, transportReceipt: string | null = null): Promise<CommFailLoudResponse> {
-    return this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const { events, accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
-      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
-      // A delivery that happened is never buried under a failure fact.
-      if (delivered) return { ...base, outcome: 'already_delivered' };
-      const failureId = `${req.message_id}:${req.target_agent_id}`;
-      if (!events.some((e) => e.entity_id === failureId && e.event_type === 'act.comm_delivery_failed')) {
-        await this.store.append({ entity_type: 'assertion', entity_id: failureId, event_type: 'act.comm_delivery_failed',
-          payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, source_agent_id: accepted.payload.source_agent_id },
-          provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
-      }
-      const proj = await this.projections();
-      const sender = proj.currentBindings.find((b) => b.registered && b.agent_id === accepted.payload.source_agent_id);
-      if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery FAILED ${req.message_id} target ${req.target_agent_id}]`);
-      return { ...base, outcome: 'failed_loud' };
     });
   }
 

@@ -156,36 +156,3 @@ test('redrive refuses an unknown message or a non-target', async () => {
   await expect(d.commRedrive({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'sender' }))
     .rejects.toThrow('target_mismatch');
 });
-
-// ── the loud failure ─────────────────────────────────────────────────────────
-
-test('fail-loud records the failure and tells the SENDER, in its own pane', async () => {
-  const { tmux, d, send, events } = await fixture();
-  const id = await send('never landed');
-
-  const result = await d.commFailLoud({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'worker' });
-
-  expect(result.outcome).toBe('failed_loud');
-  const failures = await events('act.comm_delivery_failed');
-  expect(failures.length).toBe(1);
-  expect(failures[0]!.payload.message_id).toBe(id);
-  expect(failures[0]!.payload.target_agent_id).toBe('worker');
-  const senderLines = tmux.sends('council:custodes');
-  expect(senderLines.some((line) => line.includes(`delivery FAILED ${id}`) && line.includes('worker'))).toBe(true);
-});
-
-test('fail-loud is idempotent and refuses to bury a delivery that already happened', async () => {
-  const { d, send, events } = await fixture();
-  const id = await send('actually made it');
-  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [id] });
-
-  const result = await d.commFailLoud({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'worker' });
-  expect(result.outcome).toBe('already_delivered');
-  expect((await events('act.comm_delivery_failed')).length).toBe(0);
-
-  const first = await d.commFailLoud({ schema_version: SCHEMA_VERSION, message_id: (await (async () => {
-    const second = await d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'gone', ask: false, reply: false });
-    return second.message_id;
-  })()), target_agent_id: 'worker' });
-  expect(first.outcome).toBe('failed_loud');
-});
