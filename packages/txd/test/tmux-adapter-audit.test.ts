@@ -54,18 +54,18 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
   expect(await tmux.resetSeat('palace:N')).toBe(true);
   expect(operations).toEqual([
     'list-panes', 'show-options', 'clear-history', 'respawn-pane', 'display-message',
-    'list-panes', 'select-pane', 'list-panes', 'show-options', 'show-options',
+    'list-panes', 'set-option', 'set-option', 'list-panes', 'show-options', 'show-options',
   ]);
 });
 
-test('persona tint writes both pane-local styles and accepts only exact read-back', async () => {
+test('persona tint writes both pane-local styles without selecting the pane and accepts only exact read-back', async () => {
   let tint = 'default';
   const calls: string[][] = [];
   const tmux = new RealTmux('scratch', {
     run: async (_socket, args) => {
       calls.push(args);
       if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
-      if (args[0] === 'select-pane') {
+      if (args[0] === 'set-option') {
         tint = args.at(-1) ?? '';
         return { code: 0, stdout: '', stderr: '' };
       }
@@ -79,7 +79,13 @@ test('persona tint writes both pane-local styles and accepts only exact read-bac
   expect(await tmux.seatTint('palace:N')).toBe('#302800');
   expect(await tmux.setSeatTint('palace:N', null)).toBe(true);
   expect(await tmux.seatTint('palace:N')).toBeNull();
-  expect(calls.some((args) => args[0] === 'select-pane' && args.at(-1) === 'bg=#302800')).toBe(true);
+  expect(calls.some((args) => args[0] === 'select-pane')).toBe(false);
+  expect(calls.filter((args) => args[0] === 'set-option')).toEqual([
+    ['set-option', '-p', '-t', '%17', 'window-style', 'bg=#302800'],
+    ['set-option', '-p', '-t', '%17', 'window-active-style', 'bg=#302800'],
+    ['set-option', '-p', '-t', '%17', 'window-style', 'default'],
+    ['set-option', '-p', '-t', '%17', 'window-active-style', 'default'],
+  ]);
 });
 
 test('absent pane-local style options attest an untinted seat', async () => {
@@ -106,7 +112,7 @@ test('failed reap restores the exact observed pane styles when the caller omits 
       if (args[0] === 'show-options') {
         return { code: 0, stdout: `${styles.get(args.at(-1)!) ?? ''}\n`, stderr: '' };
       }
-      if (args[0] === 'select-pane') {
+      if (args[0] === 'set-option') {
         styles.set('window-style', args.at(-1) ?? '');
         styles.set('window-active-style', args.at(-1) ?? '');
         return { code: 0, stdout: '', stderr: '' };
