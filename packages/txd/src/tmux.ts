@@ -1153,7 +1153,16 @@ export class RealTmux implements TmuxControlPlane {
       }
       const divergence = this.canonicalDivergence(await this.estateRows());
       if (divergence) throw new Error(`txd canonical estate recovery could not converge: ${divergence}`);
-      for (const seat of TXD_ESTATE) await this.ensureSeatGeneration(seat);
+      for (const seat of TXD_ESTATE) {
+        try {
+          await this.ensureSeatGeneration(seat);
+        } catch {
+          const page = seat.split(':', 1)[0]!;
+          throw new Error(
+            `txd could not drive canonical page ${page} to canonical shape: ${this.describePage(page, await this.estateRows())}`,
+          );
+        }
+      }
       return { state: 'existing', rebuilt_pages };
     }
 
