@@ -16,7 +16,7 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { MemoryEventStore, type EventStore } from '../src/store.ts';
-import { FakeTmux } from '../src/tmux.ts';
+import { FakeTmux, type TmuxControlPlane } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { commFrameMessageIds } from '../src/server.ts';
 
@@ -113,6 +113,53 @@ test('re-delivery of the same flush adds nothing — the assertion is idempotent
 
   expect(again.asserted).toEqual([]);
   expect(await asserted()).toEqual([first, second]);
+});
+
+test('a busy sender leaves no parked confirmation and hook replay retries the verified injection', async () => {
+  const store = new MemoryEventStore();
+  const fakeTmux = new FakeTmux();
+  const tmux: TmuxControlPlane = fakeTmux;
+  const verified = fakeTmux.sendVerifiedToSeat.bind(fakeTmux);
+  let senderInteractive = false;
+  let confirmationAttempts = 0;
+  tmux.sendVerifiedToSeat = async (seatId, correlationId, text, tabAfterPrefix) => {
+    if (seatId === 'council:custodes') {
+      confirmationAttempts += 1;
+      if (!senderInteractive) return { bytes: 0, verdict: 'frame_absent' as const };
+    }
+    return verified(seatId, correlationId, text, tabAfterPrefix);
+  };
+  const d = new Daemon(store, tmux);
+  await registered(d, store, 'council:custodes', 'sender');
+  await registered(d, store, 'palace:W', 'worker');
+  const messageId = (await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'brief', ask: false, reply: false,
+  })).message_id;
+
+  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [messageId] }))
+    .rejects.toThrow('delivery_confirmation_not_staged:frame_absent');
+
+  let events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+  expect(events.find((event) => event.event_type === 'act.agent_input_injected'
+    && event.payload.input_class === 'delivery_confirmation')?.payload).toMatchObject({
+    submit_verdict: 'frame_absent', target_agent_id: 'sender', message_ids: [messageId],
+  });
+  expect(fakeTmux.sends('council:custodes')).toEqual([]);
+
+  senderInteractive = true;
+  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [messageId] }))
+    .resolves.toMatchObject({ asserted: [] });
+
+  events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+  expect(events.filter((event) => event.event_type === 'act.agent_input_injected'
+    && event.payload.input_class === 'delivery_confirmation').map((event) => event.payload.submit_verdict))
+    .toEqual(['frame_absent', 'staged']);
+  expect(confirmationAttempts).toBe(2);
+  expect(fakeTmux.sends('council:custodes')).toEqual([
+    `[tx comm delivery confirmed ${messageId} target worker]`,
+  ]);
 });
 
 test("a frame addressed to someone else is skipped in silence, and does not cost the flush its real delivery", async () => {

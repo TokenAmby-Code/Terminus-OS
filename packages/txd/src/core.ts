@@ -1362,12 +1362,21 @@ export class Daemon {
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
         matched = true;
         const assertionId = `${messageId}:${hook.agent_id}`;
-        if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) continue;
-        await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
-          payload: { message_id: messageId, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
-        asserted.push(messageId);
+        if (!events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) {
+          await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+            payload: { message_id: messageId, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
+          asserted.push(messageId);
+        }
         const sourceAgentId = String(accepted.payload.source_agent_id);
-        confirmations.set(sourceAgentId, [...(confirmations.get(sourceAgentId) ?? []), messageId]);
+        const confirmationStaged = events.some((event) => event.event_type === 'act.agent_input_injected'
+          && event.payload.input_class === 'delivery_confirmation'
+          && event.payload.submit_verdict === 'staged'
+          && event.payload.target_agent_id === sourceAgentId
+          && Array.isArray(event.payload.message_ids)
+          && event.payload.message_ids.includes(messageId));
+        if (!confirmationStaged) {
+          confirmations.set(sourceAgentId, [...(confirmations.get(sourceAgentId) ?? []), messageId]);
+        }
       }
       if (!matched) throw new Error('message_target_mismatch');
       // One line per sender, not one per message: the confirmation lands in a
@@ -1376,7 +1385,17 @@ export class Daemon {
       const proj = await this.projections();
       for (const [sourceAgentId, messageIds] of confirmations) {
         const sender = proj.currentBindings.find((b) => b.agent_id === sourceAgentId);
-        if (sender) await this.tmux.sendToSeat(sender.seat_id, `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`);
+        if (!sender) continue;
+        const correlationId = crypto.randomUUID();
+        const renderedFrame = `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`;
+        const sent = await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame);
+        await this.store.append({ entity_type: 'message', entity_id: correlationId, event_type: 'act.agent_input_injected',
+          payload: {
+            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: sent.bytes,
+            submit_verdict: sent.verdict, input_class: 'delivery_confirmation',
+            message_ids: messageIds, rendered_frame: renderedFrame,
+          }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
+        if (sent.verdict !== 'staged') throw new Error(`delivery_confirmation_not_staged:${sent.verdict}`);
       }
       return { ok: true, asserted };
     });
