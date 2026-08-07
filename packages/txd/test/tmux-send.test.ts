@@ -8,9 +8,11 @@ import { RealTmux, type TmuxCommandResult } from '../src/tmux.ts';
 // use a word that means received.
 test('sendToSeat stages the text with one discrete Enter and claims only staging', async () => {
   const calls: string[][] = [];
-  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+  const payloads: string[] = [];
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
     calls.push(args);
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'load-buffer') payloads.push(new TextDecoder().decode(stdin));
     return { code: 0, stdout: '', stderr: '' };
   };
   const tmux = new RealTmux('scratch', { run });
@@ -19,16 +21,40 @@ test('sendToSeat stages the text with one discrete Enter and claims only staging
 
   expect(outcome.verdict).toBe('staged');
   expect(outcome.bytes).toBe(19);
-  expect(calls.filter((args) => args[0] === 'send-keys')).toEqual([
-    ['send-keys', '-t', '%7', '-l', 'dispatch the worker'],
-    ['send-keys', '-t', '%7', 'Enter'],
-  ]);
+  expect(payloads).toEqual(['dispatch the worker']);
+  expect(calls.some((args) => args[0] === 'load-buffer' && args.at(-1) === '-')).toBe(true);
+  expect(calls.some((args) => args[0] === 'paste-buffer' && args.includes('-p') && args.includes('-d'))).toBe(true);
+  expect(calls.filter((args) => args[0] === 'send-keys')).toEqual([['send-keys', '-t', '%7', 'Enter']]);
+});
+
+test('behavioral pin: headless delivery preserves a multi-KB multiline Unicode payload past 523 characters', async () => {
+  const payload = `opening “quote” Ω🔥\n${'x'.repeat(4096)}\nclosing 'quote' $HOME \\ literal`;
+  let loaded = '';
+  let composer = '';
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'load-buffer') {
+      loaded = new TextDecoder().decode(stdin);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'paste-buffer') composer += loaded;
+    // Model the live failure: send-keys accepts success but parks only the
+    // first 523 characters in the interactive engine's composer.
+    if (args[0] === 'send-keys' && args.includes('-l')) composer += [...args.at(-1)!].slice(0, 523).join('');
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', { run });
+
+  const outcome = await tmux.sendToSeat('palace:S', payload);
+
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(payload), verdict: 'staged' });
+  expect(composer).toBe(payload);
 });
 
 test('a pane that cannot take the literal delivers nothing and says so', async () => {
   const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    if (args[0] === 'send-keys' && args.includes('-l')) return { code: 1, stdout: '', stderr: 'no such pane' };
+    if (args[0] === 'paste-buffer') return { code: 1, stdout: '', stderr: 'no such pane' };
     return { code: 0, stdout: '', stderr: '' };
   };
   const tmux = new RealTmux('scratch', { run });
@@ -124,7 +150,7 @@ test('verified send waits for a pane-output event before observing the composer'
   const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
     calls.push(args[0]!);
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    if (args[0] === 'send-keys' && args.includes('-l')) literalStarted();
+    if (args[0] === 'paste-buffer') literalStarted();
     if (args[0] === 'capture-pane') return { code: 0, stdout: `> ${frame}\n`, stderr: '' };
     return { code: 0, stdout: '', stderr: '' };
   };
@@ -139,12 +165,14 @@ test('verified send waits for a pane-output event before observing the composer'
 
   const pending = tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', frame);
   await literal;
-  expect(calls).toEqual(['list-panes', 'arm:%7', 'send-keys']);
+  expect(calls).toEqual(['list-panes', 'arm:%7', 'load-buffer', 'paste-buffer']);
   expect(calls).not.toContain('capture-pane');
 
   releaseOutput();
   expect((await pending).verdict).toBe('staged');
-  expect(calls).toEqual(['list-panes', 'arm:%7', 'send-keys', 'capture-pane', 'send-keys', 'close']);
+  expect(calls).toEqual([
+    'list-panes', 'arm:%7', 'load-buffer', 'paste-buffer', 'capture-pane', 'send-keys', 'close',
+  ]);
 });
 
 test('behavioral pin: verified comm accepts an intact frame clipped inside the Codex composer viewport', () => {
@@ -224,16 +252,158 @@ test('verified send never submits when output settles without the expected frame
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
 
+test('behavioral pin: verified send transports an adversarial multi-KB frame as one bracketed paste', async () => {
+  const calls: Array<{ args: string[]; stdin?: Uint8Array }> = [];
+  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n'
+    + `${'0123456789'.repeat(700)}\nquotes: 'single' "double" $dollar \\ slash\nUnicode: Ω 漢字 🛡️`;
+  let composer = '';
+  let loaded = '';
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    calls.push(stdin === undefined ? { args } : { args, stdin });
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'load-buffer') {
+      loaded = new TextDecoder().decode(stdin);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'paste-buffer') {
+      composer += loaded;
+      loaded = '';
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    // This models the live Codex failure: one send-keys literal burst loses
+    // everything after codepoint 523 while tmux itself exits zero.
+    if (args[0] === 'send-keys' && args.includes('-l')) {
+      composer += [...args.at(-1)!].slice(0, 523).join('');
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'capture-pane') return { code: 0, stdout: `› ${composer}\n`, stderr: '' };
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observation complete');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat(
+    'palace:S',
+    '11111111-1111-4111-8111-111111111111',
+    frame,
+  );
+
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+  expect(composer).toBe(frame);
+  expect(calls.filter(({ args }) => args[0] === 'send-keys' && args.includes('-l'))).toHaveLength(0);
+  const load = calls.find(({ args }) => args[0] === 'load-buffer');
+  expect(new TextDecoder().decode(load?.stdin)).toBe(frame);
+  expect(load?.args).toEqual(['load-buffer', '-b', expect.stringMatching(/^txd-input-/), '-']);
+  expect(calls.find(({ args }) => args[0] === 'paste-buffer')?.args).toEqual([
+    'paste-buffer', '-p', '-r', '-d', '-b', expect.stringMatching(/^txd-input-/), '-t', '%7',
+  ]);
+  expect(calls.filter(({ args }) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
+});
+
+for (const length of [522, 523, 524, 4096]) {
+  test(`behavioral pin: exact ${length}-codepoint verified frame is never prefix-truncated`, async () => {
+    const frame = 'x'.repeat(length);
+    let loaded = '';
+    let composer = '';
+    const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'load-buffer') {
+        loaded = new TextDecoder().decode(stdin);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'paste-buffer') {
+        composer += loaded;
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'send-keys' && args.includes('-l')) {
+        composer += [...args.at(-1)!].slice(0, 523).join('');
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'capture-pane') return { code: 0, stdout: `› ${composer}\n`, stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const tmux = new RealTmux('scratch', {
+      run,
+      composerObserveTimeoutMs: 10_000,
+      observePaneOutput: async () => {
+        let emitted = false;
+        return {
+          next: async () => {
+            if (emitted) throw new Error('observation complete');
+            emitted = true;
+          },
+          close: () => undefined,
+        };
+      },
+    });
+
+    expect((await tmux.sendVerifiedToSeat('palace:S', 'correlation', frame)).verdict).toBe('staged');
+    expect(composer).toBe(frame);
+  });
+}
+
+test('behavioral pin: a failed bulk paste submits no prefix and fails loudly', async () => {
+  const calls: string[][] = [];
+  let composer = '';
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'load-buffer') return { code: 0, stdout: '', stderr: '' };
+    if (args[0] === 'paste-buffer') return { code: 1, stdout: '', stderr: 'target pane vanished' };
+    if (args[0] === 'capture-pane') return { code: 0, stdout: `› ${composer}\n`, stderr: '' };
+    if (args[0] === 'send-keys' && args.includes('-l')) composer += args.at(-1)!;
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observation complete');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat('palace:S', 'correlation', 'x'.repeat(4096));
+
+  expect(outcome).toEqual({ bytes: 0, verdict: 'seat_unresolved' });
+  expect(composer).toBe('');
+  expect(calls.some((args) => args[0] === 'delete-buffer')).toBe(true);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
+});
+
 test('behavioral pin: a failed verified send restores the composer byte-for-byte', async () => {
   const before = 'operator draft: keep $ and unicode Ω';
   const injected = '[lcd event lane2.transport_proof seq=227817]\n{"nonce":"one-event"}';
   let composer = before;
+  let loaded = '';
   const calls: string[][] = [];
-  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
     calls.push(args);
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    if (args[0] === 'send-keys' && args.includes('-l')) {
-      composer += args.at(-1)!;
+    if (args[0] === 'load-buffer') {
+      loaded = new TextDecoder().decode(stdin);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'paste-buffer') {
+      composer += loaded;
       return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'send-keys' && args.includes('BSpace')) {
@@ -242,9 +412,9 @@ test('behavioral pin: a failed verified send restores the composer byte-for-byte
       return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'capture-pane') {
-      // The terminal repainted before the last inserted codepoint. This is the
-      // live `composer_corrupted` exhibit, while the editor still owns every
-      // byte that send-keys inserted and can undo exactly that suffix.
+      // The terminal repainted before the last inserted codepoint. This is a
+      // corrupted-paint exhibit while the editor still owns the complete
+      // atomic paste and can undo exactly that suffix.
       return { code: 0, stdout: `> ${composer.slice(0, -1)}\n`, stderr: '' };
     }
     return { code: 0, stdout: '', stderr: '' };
@@ -268,7 +438,8 @@ test('behavioral pin: a failed verified send restores the composer byte-for-byte
 
   expect(outcome.verdict).toBe('composer_corrupted');
   expect(composer).toBe(before);
-  expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('-l'))).toHaveLength(1);
+  expect(calls.filter((args) => args[0] === 'load-buffer')).toHaveLength(1);
+  expect(calls.filter((args) => args[0] === 'paste-buffer')).toHaveLength(1);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(1);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
@@ -280,12 +451,18 @@ for (const profile of [
   test(`behavioral pin: ${profile.engine} palette chrome cannot corrupt or complete a full-name intent`, async () => {
     const calls: string[][] = [];
     let composer = '';
+    let loaded = '';
     const expected = profile.prefix + profile.suffix;
-    const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
       calls.push(args);
       if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-      if (args[0] === 'send-keys' && args.includes('-l')) {
-        composer += args.at(-1)!;
+      if (args[0] === 'load-buffer') {
+        loaded = new TextDecoder().decode(stdin);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'paste-buffer') {
+        composer += loaded;
+        loaded = '';
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'send-keys' && args.at(-1) === 'Tab') {
@@ -306,11 +483,9 @@ for (const profile of [
 
     expect(outcome).toEqual({ bytes: Buffer.byteLength(expected), verdict: 'staged' });
     expect(composer).toBe(expected);
-    expect(calls.filter((args) => args[0] === 'send-keys')).toEqual([
-      ['send-keys', '-t', '%7', '-l', profile.prefix],
-      ['send-keys', '-t', '%7', 'Tab'],
-      ['send-keys', '-t', '%7', '-l', profile.suffix],
-      ['send-keys', '-t', '%7', 'Enter'],
-    ]);
+    expect(calls.filter((args) => ['load-buffer', 'paste-buffer', 'send-keys'].includes(args[0]!))
+      .map((args) => args[0] === 'send-keys' ? args.at(-1) : args[0])).toEqual([
+        'load-buffer', 'paste-buffer', 'Tab', 'load-buffer', 'paste-buffer', 'Enter',
+      ]);
   });
 }

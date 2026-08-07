@@ -12,6 +12,7 @@
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
 import { open, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import {
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
@@ -601,6 +602,37 @@ export class RealTmux implements TmuxControlPlane {
       stderr_category: this.stderrCategory(result),
     });
     return result;
+  }
+
+  /**
+   * Stage one opaque text segment as a tmux bracketed paste.
+   *
+   * `send-keys -l` translates a string into one terminal key event per
+   * codepoint. Interactive TUIs may consume only a prefix of a sufficiently
+   * large burst even though tmux exits zero. Loading bytes over stdin and
+   * pasting the named buffer writes the complete segment directly to the pane
+   * as one bracketed-paste event. The buffer name is private, unique, and
+   * deleted by the successful paste; a failed paste is cleaned explicitly.
+   */
+  private async pasteLiteral(
+    seatId: string,
+    paneId: string,
+    text: string,
+    operation: string,
+  ): Promise<boolean> {
+    if (text.length === 0) return true;
+    const bufferName = `txd-input-${randomUUID()}`;
+    const bytes = new TextEncoder().encode(text);
+    const loaded = await this.command(`${operation}_load`, seatId, [
+      'load-buffer', '-b', bufferName, '-',
+    ], bytes);
+    if (loaded.code !== 0) return false;
+    const pasted = await this.command(operation, seatId, [
+      'paste-buffer', '-p', '-r', '-d', '-b', bufferName, '-t', paneId,
+    ]);
+    if (pasted.code === 0) return true;
+    await this.command(`${operation}_cleanup`, seatId, ['delete-buffer', '-b', bufferName]);
+    return false;
   }
 
   async reachable(): Promise<boolean> {
@@ -1613,8 +1645,8 @@ export class RealTmux implements TmuxControlPlane {
   async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered' };
-    const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', text]);
-    if (literal.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered' };
+    const literal = await this.pasteLiteral(seatId, paneId, text, 'paste_literal_unverified');
+    if (!literal) return { bytes: 0, verdict: 'failed_none_delivered' };
     const bytes = Buffer.byteLength(text, 'utf8');
 
     // One discrete Enter, outside the literal burst. If tmux accepted both
@@ -1644,8 +1676,8 @@ export class RealTmux implements TmuxControlPlane {
     try {
       const prefix = tabAfterPrefix ?? text;
       const suffix = tabAfterPrefix === undefined ? '' : text.slice(tabAfterPrefix.length);
-      const literal = await this.command('send_literal', seatId, ['send-keys', '-t', paneId, '-l', prefix]);
-      if (literal.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      const literal = await this.pasteLiteral(seatId, paneId, prefix, 'paste_literal');
+      if (!literal) return { bytes: 0, verdict: 'seat_unresolved' as const };
       if (tabAfterPrefix !== undefined) {
         const tab = await this.command('commit_surface_name', seatId, ['send-keys', '-t', paneId, 'Tab']);
         if (tab.code !== 0) {
@@ -1653,8 +1685,8 @@ export class RealTmux implements TmuxControlPlane {
           return { bytes, verdict: 'seat_unresolved' as const };
         }
         if (suffix.length > 0) {
-          const argsLiteral = await this.command('send_literal_args', seatId, ['send-keys', '-t', paneId, '-l', suffix]);
-          if (argsLiteral.code !== 0) {
+          const argsLiteral = await this.pasteLiteral(seatId, paneId, suffix, 'paste_literal_args');
+          if (!argsLiteral) {
             await this.command('restore_input_composer', seatId, ['send-keys', '-t', paneId, '-N', String([...prefix].length), 'BSpace']);
             return { bytes, verdict: 'seat_unresolved' as const };
           }

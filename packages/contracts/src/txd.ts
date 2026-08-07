@@ -639,7 +639,6 @@ export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventRespon
 // Communications are admitted as one atomic request. A caller either supplies
 // opaque message bytes OR one engine-neutral surface intent. Syntax rendering
 // belongs to txd after it resolves the target binding's engine.
-export const MAX_COMM_MESSAGE_BYTES = 64 * 1024;
 export const COMM_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
 export const CommIntentSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -659,7 +658,7 @@ export const CommRequestSchema = z.object({
   source_agent_id: CanonicalIdSchema,
   target: CanonicalIdSchema.optional(),
   page: CanonicalIdSchema.optional(),
-  message: z.string().refine((value) => new TextEncoder().encode(value).length <= MAX_COMM_MESSAGE_BYTES, 'message exceeds maximum encoded size').optional(),
+  message: z.string().optional(),
   intent: CommIntentSchema.optional(),
   ask: z.boolean().default(false),
   reply: z.boolean().default(false),
@@ -672,12 +671,6 @@ export const CommRequestSchema = z.object({
   }
   if (value.intent && (value.page !== undefined || value.reply || value.ask)) {
     ctx.addIssue({ code: 'custom', message: 'command and skill intents require one direct target' });
-  }
-  if (value.intent) {
-    const logical = `${value.intent.name}${value.intent.args.length > 0 ? ` ${value.intent.args.join(' ')}` : ''}`;
-    if (new TextEncoder().encode(logical).length > MAX_COMM_MESSAGE_BYTES) {
-      ctx.addIssue({ code: 'custom', message: 'intent exceeds maximum encoded size' });
-    }
   }
 });
 export type CommRequest = z.infer<typeof CommRequestSchema>;

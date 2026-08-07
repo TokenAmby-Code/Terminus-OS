@@ -78,6 +78,12 @@ each route is the ruled daemon behavior, unchanged.
   gate. V1 deliberately performs no skill-name preflight; the engine owns
   validation. Any future preflight must consume Token-Fleet's canonical skill
   configuration rather than create a txd-local registry.
+- Ordinary comm payloads are opaque and have no caller-visible length mode or
+  size ceiling. Txd loads every verified text segment into a private,
+  one-use tmux buffer over stdin and injects it as one bracketed paste before
+  exact composer verification and Enter. Callers never split, spill, encode,
+  or select a transport; a buffer/paste failure refuses loudly without
+  submitting a prefix.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an
