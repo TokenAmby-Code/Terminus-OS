@@ -1586,6 +1586,19 @@ export class RealTmux implements TmuxControlPlane {
       }
     }
     if (promptLine < 0) return 'absent';
+
+    // Codex deliberately collapses a bracketed multi-KB paste into one native
+    // composer receipt instead of painting the payload. tmux has already
+    // proven the exact stdin-loaded buffer and atomic paste-buffer operation;
+    // this receipt is the engine-side acknowledgement that it accepted that
+    // paste. Accept only the whole, otherwise-empty active prompt line and an
+    // exact Unicode-scalar count. A lookalike embedded in ordinary payload
+    // text, or any count mismatch, remains corruption.
+    const collapsedPaste = normalize(lines[promptLine]!).match(/^\[PastedContent(\d+)chars\]$/);
+    if (collapsedPaste) {
+      return Number(collapsedPaste[1]) === [...expectedFrame].length ? 'intact' : 'corrupted';
+    }
+
     const visibleRegion = normalize(lines.slice(promptLine).join('\n'));
     const minimumProofLength = 32;
     for (let length = visibleRegion.length; length >= minimumProofLength; length -= 1) {

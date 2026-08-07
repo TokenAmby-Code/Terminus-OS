@@ -211,6 +211,27 @@ test('behavioral pin: clipped Codex composer suffix must still match exactly', (
   expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('corrupted');
 });
 
+test('behavioral pin: Codex collapsed-paste receipt verifies an exact multi-KB frame count', () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n`
+    + `${'0123456789'.repeat(450)}\nquotes: 'single' "double" $dollar \\ slash\nUnicode: Ω 漢字 🛡️`;
+  const scalarCount = [...frame].length;
+  const pane = [
+    '• earlier transcript remains above the composer',
+    '',
+    `› [Pasted Content ${scalarCount} chars]`,
+    '',
+    '  gpt-5.6-sol medium · ~/.local/share…',
+  ].join('\n');
+
+  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('intact');
+  expect(RealTmux.composerVerdict(
+    pane.replace(`${scalarCount} chars`, `${scalarCount - 1} chars`),
+    messageId,
+    frame,
+  )).toBe('corrupted');
+});
+
 test('behavioral pin: a transcript prompt above active assistant output is not an interactive composer', () => {
   const pane = [
     '› prior operator prompt',
