@@ -1,6 +1,5 @@
 -- Typed desktop observations from the WSL operator-input machine. The table is
--- append-only event truth; enforcement consumers subscribe to the PostgreSQL
--- notification emitted by each first-seen event.
+-- append-only event truth.
 
 CREATE SCHEMA IF NOT EXISTS telemetry;
 
@@ -36,15 +35,3 @@ CREATE OR REPLACE TRIGGER desktop_events_no_delete
 CREATE OR REPLACE TRIGGER desktop_events_no_truncate
     BEFORE TRUNCATE ON telemetry.desktop_events
     FOR EACH STATEMENT EXECUTE FUNCTION telemetry.desktop_events_immutable();
-
-CREATE OR REPLACE FUNCTION telemetry.publish_desktop_event() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    PERFORM pg_notify('desktop_telemetry', NEW.payload::text);
-    RETURN NEW;
-END;
-$$;
-
-CREATE OR REPLACE TRIGGER desktop_events_publish
-    AFTER INSERT ON telemetry.desktop_events
-    FOR EACH ROW EXECUTE FUNCTION telemetry.publish_desktop_event();
