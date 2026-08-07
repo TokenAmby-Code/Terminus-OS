@@ -233,6 +233,7 @@ export class Daemon {
         agent_id: composition?.agent_id ?? null,
         wrapper_pid: hook.wrapper_pid,
         configuration: this.physicalRegistration.configuration,
+        worktree: composition?.worktree ?? null,
         process_witnesses: {
           pane_root_pid: observed.pane_root_pid,
           ancestry: observed.ancestry,
@@ -367,6 +368,7 @@ export class Daemon {
           launch_nonce: launchNonce,
           target_machine: sshTarget ?? null,
           engine: request.engine,
+          worktree: request.worktree ?? null,
         },
         provenance: this.prov('observer', null),
         occurred_at: this.now(),

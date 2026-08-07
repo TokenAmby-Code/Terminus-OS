@@ -13,7 +13,7 @@
 //   reg.retired        (agent) turn → 'retired'
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
-import { PANE_STATES, PhysicalDeclarationSchema } from '@terminus-os/contracts';
+import { PANE_STATES, PhysicalDeclarationSchema, WorktreeBindingSchema } from '@terminus-os/contracts';
 import type {
   SeatBoardRow,
   TurnState,
@@ -23,6 +23,7 @@ import type {
   OpenContradiction,
   PaneState,
   PhysicalDeclaration,
+  WorktreeBinding,
 } from '@terminus-os/contracts';
 
 export type Projections = {
@@ -55,6 +56,7 @@ export type LaunchComposition = {
   agent_id: string;
   launch_nonce: string;
   target_machine: string | null;
+  worktree: WorktreeBinding | null;
 };
 
 export type TransportClaim = {
@@ -137,12 +139,14 @@ export function buildProjections(events: EventRecord[]): Projections {
         const agentId = str(e.payload.agent_id);
         const nonce = str(e.payload.launch_nonce);
         if (paneGeneration && agentId && nonce) {
+          const worktree = WorktreeBindingSchema.safeParse(e.payload.worktree);
           launchCompositions.set(e.entity_id, {
             seat_id: e.entity_id,
             pane_generation: paneGeneration,
             agent_id: agentId,
             launch_nonce: nonce,
             target_machine: str(e.payload.target_machine),
+            worktree: worktree.success ? worktree.data : null,
           });
         }
         break;

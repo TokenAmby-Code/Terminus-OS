@@ -4,7 +4,7 @@
 import { z } from "zod";
 
 // AGENT_CONTRACT_MIRROR_START
-export const AGENT_SCHEMA_VERSION = 5;
+export const AGENT_SCHEMA_VERSION = 6;
 
 export const AgentIdSchema = z.string().uuid();
 export const BirthGenerationSchema = z.string().uuid();
@@ -12,6 +12,16 @@ export const PaneGenerationSchema = z.string().uuid();
 export const EngineSchema = z.enum(["claude", "codex"]);
 export type Engine = z.infer<typeof EngineSchema>;
 export const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+export const GitHeadSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+
+export const WorktreeBindingSchema = z.object({
+  repository: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+  branch: z.string().min(1),
+  replay_id: z.string().uuid(),
+  path: z.string().startsWith("/"),
+  head_sha: GitHeadSchema,
+}).strict();
+export type WorktreeBinding = z.infer<typeof WorktreeBindingSchema>;
 
 export const InstructionSourceSchema = z.object({
   kind: z.enum(["file", "inline", "continuity"]),
@@ -27,14 +37,19 @@ export const PersonaPackageSchema = z.object({
   // The persona's synth voice_identity; null for a silent persona. Voice is
   // persona-level identity, so it lives in the package, never beside it.
   voice: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
-  workspace: z.string().startsWith("/"),
+  working_directory: z.string().startsWith("/").optional(),
   continuity_references: z.array(z.string().min(1)),
   instruction_package: z.object({
     digest: Sha256Schema,
     sources: z.array(InstructionSourceSchema),
-    rendered_path: z.string().startsWith("/"),
+    cache_path: z.string().startsWith("/"),
   }).strict(),
-}).strict();
+}).strict().superRefine((persona, context) => {
+  const durableRank = persona.rank === "overseer" || persona.rank === "primarch";
+  if (!durableRank && persona.working_directory !== undefined) {
+    context.addIssue({ code: "custom", path: ["working_directory"], message: "cattle packages do not own a working directory" });
+  }
+});
 export type PersonaPackage = z.infer<typeof PersonaPackageSchema>;
 
 export const PlacementSchema = z.object({
@@ -123,6 +138,7 @@ export const PaneAttestedSchema = z.object({
     generation: z.string().min(1),
     digest: Sha256Schema,
   }).strict(),
+  worktree: WorktreeBindingSchema.nullable(),
   process_witnesses: z.record(z.string(), z.unknown()),
 }).strict();
 export type PaneAttested = z.infer<typeof PaneAttestedSchema>;
@@ -155,7 +171,7 @@ export const WrapperLaunchReplySchema = z.object({
   working_directory: z.string().startsWith("/"),
   instruction_package: z.object({
     digest: Sha256Schema,
-    rendered_path: z.string().startsWith("/"),
+    cache_path: z.string().startsWith("/"),
   }).strict().nullable(),
 }).strict();
 export type WrapperLaunchReply = z.infer<typeof WrapperLaunchReplySchema>;
@@ -231,6 +247,7 @@ export const DispatchRequestedSchema = z.object({
   machine: z.string().min(1),
   target: DispatchTargetSchema,
   engine: EngineSchema,
+  worktree: WorktreeBindingSchema.optional(),
   // The orders the agent is born with. Absent for a bodiless dispatch; never
   // empty, because empty orders are not orders. Carried byte-for-byte: a brief
   // that arrives subtly altered is worse than one that fails to arrive.
@@ -374,6 +391,7 @@ export type PlacementRefused = z.infer<typeof PlacementRefusedSchema>;
 
 export const REGISTRATION_ABORT_REASONS = [
   "pane_refused",
+  "worktree_refused",
   "wrapper_reply_expired",
   "placement_refused",
   "unregistered_closed",

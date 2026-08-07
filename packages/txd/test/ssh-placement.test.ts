@@ -342,12 +342,11 @@ function registeredAgent(
       commander: null,
       tint: '#111111',
       voice: null,
-      workspace: '/home/tokenamby/.local/share/token-fleet/agent-workspaces/black-shields',
       continuity_references: [],
       instruction_package: {
         digest: 'd'.repeat(64),
         sources: [],
-        rendered_path: '/home/tokenamby/.local/share/token-fleet/agent-workspaces/black-shields/CLAUDE.md',
+        cache_path: '/home/tokenamby/.local/share/token-fleet/agent-workspaces/black-shields/CLAUDE.md',
       },
     },
     resources: [],
