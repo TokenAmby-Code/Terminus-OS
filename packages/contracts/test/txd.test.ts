@@ -9,7 +9,6 @@ import {
   EventInputSchema,
   EventTypeSchema,
   HealthSchema,
-  MAX_COMM_MESSAGE_BYTES,
   ModeTransitionRequestSchema,
   REG_EVENT_NAMES,
   SCHEMA_VERSION,
@@ -118,10 +117,10 @@ describe("txd lifecycle vocabulary", () => {
     expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 11, event: 'pane-exited' })).toThrow();
   });
 
-  test("comm payload boundary is UTF-8 byte exact and format agnostic", () => {
+  test("behavioral pin: comm payloads are opaque and have no caller-visible length boundary", () => {
     const base = { schema_version: 11, source_agent_id: "source", target: "target", ask: false, reply: false };
-    expect(CommRequestSchema.parse({ ...base, message: "x".repeat(MAX_COMM_MESSAGE_BYTES) }).message!.length).toBe(MAX_COMM_MESSAGE_BYTES);
-    expect(() => CommRequestSchema.parse({ ...base, message: "λ".repeat(MAX_COMM_MESSAGE_BYTES / 2 + 1) })).toThrow();
+    const large = `start\n${"λ quoted='yes' 🛡️\n".repeat(16_384)}end`;
+    expect(CommRequestSchema.parse({ ...base, message: large }).message).toBe(large);
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
   });
 

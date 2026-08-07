@@ -152,6 +152,41 @@ test('behavioral pin: every new ordinary message receipt is typed while historic
   expect((await store.readAll()).find((event) => event.entity_id === 'historical')?.payload.kind).toBeUndefined();
 });
 
+test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on its submit hook', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  const message = `first line\n${"quoted='yes' Unicode Ω 漢字 🛡️\n".repeat(256)}last line`;
+
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message,
+    ask: false,
+    reply: false,
+  });
+
+  const expectedFrame = `[tx comm ${accepted.message_id} from sender]\n${message}`;
+  expect(tmux.sends('palace:W')).toEqual([expectedFrame]);
+  expect((await store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
+    .toMatchObject({
+      bytes: Buffer.byteLength(expectedFrame),
+      rendered_frame: expectedFrame,
+      submit_verdict: 'staged',
+    });
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(false);
+
+  await d.promptSubmitted({
+    schema_version: SCHEMA_VERSION,
+    agent_id: 'worker',
+    message_ids: [accepted.message_id],
+    content: expectedFrame,
+  });
+
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted'))
+    .toHaveLength(1);
+});
+
 test('behavioral pin: a declared headless stream asserts delivery without prompt_submitted', async () => {
   const { store, tmux } = await fixture(null);
   const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
