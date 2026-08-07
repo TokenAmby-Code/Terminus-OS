@@ -219,14 +219,15 @@ test('behavioral pin: Codex collapsed-paste receipt verifies an exact multi-KB f
   const pane = [
     '• earlier transcript remains above the composer',
     '',
-    `› [Pasted Content ${scalarCount} chars]`,
+    `› [Pasted Content ${scalarCount}`,
+    '  chars]',
     '',
     '  gpt-5.6-sol medium · ~/.local/share…',
   ].join('\n');
 
   expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('intact');
   expect(RealTmux.composerVerdict(
-    pane.replace(`${scalarCount} chars`, `${scalarCount - 1} chars`),
+    pane.replace(String(scalarCount), String(scalarCount - 1)),
     messageId,
     frame,
   )).toBe('corrupted');
