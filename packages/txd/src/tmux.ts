@@ -1594,7 +1594,10 @@ export class RealTmux implements TmuxControlPlane {
     // paste. Accept only the whole, otherwise-empty active prompt line and an
     // exact Unicode-scalar count. A lookalike embedded in ordinary payload
     // text, or any count mismatch, remains corruption.
-    const collapsedPaste = normalize(lines[promptLine]!).match(/^\[PastedContent(\d+)chars\]$/);
+    let promptBlockEnd = promptLine + 1;
+    while (promptBlockEnd < lines.length && lines[promptBlockEnd]!.trim() !== '') promptBlockEnd += 1;
+    const collapsedPaste = normalize(lines.slice(promptLine, promptBlockEnd).join('\n'))
+      .match(/^\[PastedContent(\d+)chars\]$/);
     if (collapsedPaste) {
       return Number(collapsedPaste[1]) === [...expectedFrame].length ? 'intact' : 'corrupted';
     }
