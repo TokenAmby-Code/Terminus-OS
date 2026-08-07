@@ -62,12 +62,11 @@ async function launched() {
       commander: null,
       tint: '#111111',
       voice: null,
-      workspace: '/personas/black-shields',
       continuity_references: [],
       instruction_package: {
         digest: 'd'.repeat(64),
         sources: [],
-        rendered_path: '/personas/black-shields/CLAUDE.md',
+        cache_path: '/personas/black-shields/CLAUDE.md',
       },
     },
     resources: [],

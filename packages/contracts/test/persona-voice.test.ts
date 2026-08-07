@@ -1,6 +1,6 @@
 // Behavioral pin on the mirrored Agent contract: the persona package carries
 // its voice — a synth voice_identity for speaking personas, null for silent
-// ones — and the contract speaks schema 4.
+// ones — and the contract speaks schema 6.
 import { describe, expect, test } from "bun:test";
 import {
   AGENT_SCHEMA_VERSION,
@@ -19,12 +19,11 @@ const personaPackage = (voice: string | null) => ({
   commander: null,
   tint: "#302800",
   voice,
-  workspace: "/personas/custodes",
   continuity_references: [],
   instruction_package: {
     digest: "b".repeat(64),
     sources: [],
-    rendered_path: "/personas/custodes/CLAUDE.md",
+    cache_path: "/personas/custodes/CLAUDE.md",
   },
 });
 
@@ -44,11 +43,11 @@ describe("persona voice in the mirrored contract", () => {
 });
 
 describe("agent schema version in the mirrored contract", () => {
-  test("the mirror speaks schema 4", () => {
-    expect(AGENT_SCHEMA_VERSION).toBe(5);
+  test("the mirror speaks schema 6", () => {
+    expect(AGENT_SCHEMA_VERSION).toBe(6);
   });
 
-  test("agent.retired is pinned to schema 4 and schema 3 stays dead", () => {
+  test("agent.retired is pinned to schema 6 and schema 5 stays dead", () => {
     const retired = {
       schema_version: AGENT_SCHEMA_VERSION,
       agent_id: AGENT_ID,
@@ -59,11 +58,11 @@ describe("agent schema version in the mirrored contract", () => {
       cause: "close",
       retired_at: "2026-08-01T12:00:00.000Z",
     };
-    expect(AgentRetiredSchema.parse(retired).schema_version).toBe(5);
-    expect(AgentRetiredSchema.safeParse({ ...retired, schema_version: 3 }).success).toBe(false);
+    expect(AgentRetiredSchema.parse(retired).schema_version).toBe(6);
+    expect(AgentRetiredSchema.safeParse({ ...retired, schema_version: 5 }).success).toBe(false);
   });
 
-  test("registration_aborted is pinned to schema 4 and schema 3 stays dead", () => {
+  test("registration_aborted is pinned to schema 6 and schema 5 stays dead", () => {
     const aborted = {
       schema_version: AGENT_SCHEMA_VERSION,
       agent_id: AGENT_ID,
@@ -74,7 +73,7 @@ describe("agent schema version in the mirrored contract", () => {
       reason: "pane_refused",
       aborted_at: "2026-08-01T12:00:00.000Z",
     };
-    expect(RegistrationAbortedSchema.parse(aborted).schema_version).toBe(5);
-    expect(RegistrationAbortedSchema.safeParse({ ...aborted, schema_version: 3 }).success).toBe(false);
+    expect(RegistrationAbortedSchema.parse(aborted).schema_version).toBe(6);
+    expect(RegistrationAbortedSchema.safeParse({ ...aborted, schema_version: 5 }).success).toBe(false);
   });
 });

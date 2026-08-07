@@ -66,12 +66,12 @@ async function bindUnregistered(tmux: FakeTmux, d: Daemon, seatId: string): Prom
 const ofType = (published: Array<{ type: string; payload: Record<string, unknown> }>, type: string) =>
   published.filter((event) => event.type === type);
 
-// The schema-4 ruling: this event was born inside the schema-4 literal window,
-// so it must never publish under literal 3 — literal 3 is spent. The pin goes
+// The schema-6 ruling: this event was born inside the schema-6 literal window,
+// so it must never publish under literal 5 — literal 5 is spent. The pin goes
 // red on any base whose contract still carries the pre-window version, which
 // is exactly the merge ordering the ruling demands.
-test('the contract literal rides schema 4, never 3', () => {
-  expect(AGENT_SCHEMA_VERSION).toBe(5);
+test('the contract literal rides schema 6, never 5', () => {
+  expect(AGENT_SCHEMA_VERSION).toBe(6);
 });
 
 test('a bound-but-unregistered seat\'s pane death publishes agent.unregistered_closed and no agent.retired', async () => {
@@ -144,12 +144,11 @@ test('a registered agent\'s close publishes agent.retired and never the unregist
       tint: '#111111',
       // A Black Shield is silent: no chapter, no voice.
       voice: null,
-      workspace: '/personas/black-shields',
       continuity_references: [],
       instruction_package: {
         digest: 'c'.repeat(64),
         sources: [],
-        rendered_path: '/personas/black-shields/CLAUDE.md',
+        cache_path: '/personas/black-shields/CLAUDE.md',
       },
     },
     resources: [],

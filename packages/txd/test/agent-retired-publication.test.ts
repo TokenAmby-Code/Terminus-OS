@@ -74,12 +74,11 @@ async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): P
       commander: 'council:custodes',
       tint: '#111111',
       voice: null,
-      workspace: '/personas/black-shields',
       continuity_references: [],
       instruction_package: {
         digest: 'c'.repeat(64),
         sources: [],
-        rendered_path: '/personas/black-shields/CLAUDE.md',
+        cache_path: '/personas/black-shields/CLAUDE.md',
       },
     },
     resources: [],

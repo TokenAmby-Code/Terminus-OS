@@ -227,12 +227,11 @@ test('physical signoff precedes registration and routing activation', async () =
         commander: null,
         tint: '#111111',
         voice: null,
-        workspace: '/workspace',
         continuity_references: [],
         instruction_package: {
           digest: 'd'.repeat(64),
           sources: [],
-          rendered_path: '/workspace/CLAUDE.md',
+          cache_path: '/workspace/CLAUDE.md',
         },
       },
       resources: [],
