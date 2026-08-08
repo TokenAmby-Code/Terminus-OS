@@ -10,7 +10,7 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { EnvelopeInventoryError } from '../src/envelopes.ts';
-import { buildRoutes, makeServer } from '../src/server.ts';
+import { buildRoutes, deferredJson, makeServer } from '../src/server.ts';
 
 function daemon() {
   return new Daemon(new MemoryEventStore(), new FakeTmux());
@@ -131,6 +131,20 @@ test('comm ask sends response headers before the callback wait completes', async
   } finally {
     release({ ask_id: 'ask-1', complete: true, callbacks: [], outstanding: [] });
     srv.stop(true);
+  }
+});
+
+test('comm ask stream emits legal JSON whitespace while awaiting its callback event', async () => {
+  const pending = new Promise<unknown>(() => {});
+  const reader = deferredJson(pending, 10).body!.getReader();
+  try {
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe(' ');
+    expect(await Promise.race([
+      reader.read().then((chunk) => new TextDecoder().decode(chunk.value)),
+      Bun.sleep(50).then(() => 'blocked'),
+    ])).toBe(' ');
+  } finally {
+    await reader.cancel();
   }
 });
 

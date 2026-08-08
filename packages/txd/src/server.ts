@@ -146,19 +146,38 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-function deferredJson(body: Promise<unknown>): Response {
+export function deferredJson(body: Promise<unknown>, keepaliveMs = 30_000): Response {
   const encoder = new TextEncoder();
+  let keepalive: ReturnType<typeof setInterval> | undefined;
+  let open = true;
   return new Response(new ReadableStream<Uint8Array>({
     start(controller) {
       // A single legal JSON whitespace byte commits the response headers. The
       // stream then sleeps entirely on the callback event; there is no poll or
       // heartbeat loop.
       controller.enqueue(encoder.encode(' '));
+      // Bun's fetch client independently abandons a response body after about
+      // one minute without bytes. Whitespace is legal before a JSON value, so
+      // keep the transport active while callback completion remains entirely
+      // event-driven. This interval observes no state and performs no poll.
+      keepalive = setInterval(() => {
+        if (open) controller.enqueue(encoder.encode(' '));
+      }, keepaliveMs);
       void body.then((value) => {
+        if (!open) return;
         assertNoTmuxIdInIdentifiers(value, 'http_response');
         controller.enqueue(encoder.encode(JSON.stringify(value)));
         controller.close();
-      }).catch((error) => controller.error(error));
+      }).catch((error) => {
+        if (open) controller.error(error);
+      }).finally(() => {
+        open = false;
+        if (keepalive) clearInterval(keepalive);
+      });
+    },
+    cancel() {
+      open = false;
+      if (keepalive) clearInterval(keepalive);
     },
   }), { headers: { 'content-type': 'application/json' } });
 }
