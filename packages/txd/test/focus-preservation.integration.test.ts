@@ -22,6 +22,9 @@ async function estatePair(label: string): Promise<{
   tmux(socket, 'split-window', '-d', '-t', 'main:0');
   const [foreground, target] = tmux(socket, 'list-panes', '-t', 'main:0', '-F', '#{pane_id}').split('\n');
   if (!foreground || !target) throw new Error('two panes required');
+  const ready = `focus-composer-${process.pid}-${label}`;
+  tmux(socket, 'send-keys', '-t', target, `PS1='> '; tmux -L ${socket} wait-for -S ${ready}`, 'Enter');
+  tmux(socket, 'wait-for', ready);
   tmux(socket, 'set-option', '-p', '-t', foreground, '@canonical_id', 'proof:foreground');
   tmux(socket, 'set-option', '-p', '-t', target, '@canonical_id', 'proof:target');
   tmux(socket, 'select-pane', '-t', foreground);
