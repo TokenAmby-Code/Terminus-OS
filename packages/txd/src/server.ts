@@ -57,6 +57,7 @@ import {
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
+import { EnvelopeInventoryError } from './envelopes.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 
 export type BuildInfo = { version: string; git_sha: string; bun: string };
@@ -588,8 +589,15 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       handler: async () => {
         // On-demand join of remote envelopes against live bindings; derived,
         // never stored. Session names carry no raw tmux %ids by construction.
-        const zombies = await daemon.zombieEnvelopes();
-        return json({ schema_version: SCHEMA_VERSION, zombies });
+        try {
+          const zombies = await daemon.zombieEnvelopes();
+          return json({ schema_version: SCHEMA_VERSION, zombies });
+        } catch (error) {
+          if (error instanceof EnvelopeInventoryError) {
+            return json({ ok: false, error: 'envelope_inventory_failed' }, 502);
+          }
+          throw error;
+        }
       },
     },
   ];
