@@ -220,6 +220,10 @@ for (const profile of [
     baseline: 'transcript\n\n› Summarize recent commits\n\n  gpt-5.6-sol medium',
   },
   {
+    engine: 'codex' as const,
+    baseline: 'transcript\n\n› Use /skills to list available skills\n\n  gpt-5.6-sol medium',
+  },
+  {
     engine: 'claude' as const,
     baseline: 'transcript\n\n❯ Try "how does <filepath> work?"\n\n  ? for shortcuts',
   },
