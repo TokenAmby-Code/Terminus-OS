@@ -1552,23 +1552,41 @@ export class RealTmux implements TmuxControlPlane {
     return inactive.code === 0 && active.code === 0 && await this.seatTint(seatId) === tint;
   }
 
-  /**
-   * The composer verdict, pure and pinned: does the visible pane hold this
-   * frame, and does it hold it UNCORRUPTED? Chrome glyphs and wrapping are
-   * presentation, not payload — both sides are stripped of prompt/border
-   * characters and whitespace-collapsed before comparison, so a wrapped frame
-   * still verifies while a frame the send-keys race mangled does not.
-   */
-  static composerVerdict(pane: string, messageId: string, expectedFrame: string): ComposerVerdict {
-    const normalize = (text: string) => text.replace(/[│┃›>]/g, '').replace(/\s+/g, '');
-    // Both gates read the SAME normalized text: a bordered composer re-flows
-    // its own lines (capture -J rejoins only terminal wraps), so the raw pane
-    // may split the very header the absence gate looks for.
-    const normalized = normalize(pane);
-    const expected = normalize(expectedFrame);
-    if (normalized.includes(normalize(`tx comm ${messageId}`))) {
-      return normalized.includes(expected) ? 'intact' : 'corrupted';
+  private static activeComposer(pane: string): string | null {
+    const lines = pane.split('\n');
+    let promptLine = -1;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (/^\s*[│┃]?\s*[›❯>]\s?/.test(lines[index]!)) {
+        promptLine = index;
+        break;
+      }
     }
+    if (promptLine < 0) return null;
+
+    let promptBlockEnd = promptLine + 1;
+    while (promptBlockEnd < lines.length && lines[promptBlockEnd]!.trim() !== '') promptBlockEnd += 1;
+    const promptBlock = lines.slice(promptLine, promptBlockEnd);
+    promptBlock[0] = promptBlock[0]!.replace(/^\s*[│┃]?\s*[›❯>]\s?/, '');
+    return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
+  }
+
+  static composerEmpty(pane: string): boolean {
+    const composer = RealTmux.activeComposer(pane);
+    return composer !== null && composer.replace(/\s+/g, '') === '';
+  }
+
+  /**
+   * The composer verdict, pure and pinned: does the ACTIVE prompt hold exactly
+   * this frame (or an exact engine-native receipt for it)? Chrome glyphs and
+   * wrapping are presentation, not payload. A matching substring inside a
+   * larger painted composer is never sufficient evidence.
+   */
+  static composerVerdict(pane: string, _messageId: string, expectedFrame: string): ComposerVerdict {
+    const normalize = (text: string) => text.replace(/[│┃]/g, '').replace(/\s+/g, '');
+    const expected = normalize(expectedFrame);
+    const composer = RealTmux.activeComposer(pane);
+    if (composer === null) return 'absent';
+    const visibleRegion = normalize(composer);
 
     // Codex's multiline composer is a viewport. Narrow panes can clip the
     // frame's first rows after extra TUI chrome (for example the background
@@ -1577,16 +1595,6 @@ export class RealTmux implements TmuxControlPlane {
     // enough to prove that the editor owns the intended bytes. Chrome below
     // the textarea is deliberately ignored by taking only the longest prefix
     // of that region which is an expected-frame suffix.
-    const lines = pane.split('\n');
-    let promptLine = -1;
-    for (let index = lines.length - 1; index >= 0; index -= 1) {
-      if (/^\s*[›>]\s?/.test(lines[index]!)) {
-        promptLine = index;
-        break;
-      }
-    }
-    if (promptLine < 0) return 'absent';
-
     // Codex deliberately collapses a bracketed multi-KB paste into one native
     // composer receipt instead of painting the payload. tmux has already
     // proven the exact stdin-loaded buffer and atomic paste-buffer operation;
@@ -1594,25 +1602,20 @@ export class RealTmux implements TmuxControlPlane {
     // paste. Accept only the whole, otherwise-empty active prompt line and an
     // exact Unicode-scalar count. A lookalike embedded in ordinary payload
     // text, or any count mismatch, remains corruption.
-    let promptBlockEnd = promptLine + 1;
-    while (promptBlockEnd < lines.length && lines[promptBlockEnd]!.trim() !== '') promptBlockEnd += 1;
-    const collapsedPaste = normalize(lines.slice(promptLine, promptBlockEnd).join('\n'))
+    const collapsedPaste = visibleRegion
       .match(/^\[PastedContent(\d+)chars\]$/);
     if (collapsedPaste) {
       return Number(collapsedPaste[1]) === [...expectedFrame].length ? 'intact' : 'corrupted';
     }
 
-    const visibleRegion = normalize(lines.slice(promptLine).join('\n'));
+    if (visibleRegion === expected) return 'intact';
     const minimumProofLength = 32;
-    for (let length = visibleRegion.length; length >= minimumProofLength; length -= 1) {
-      if (expected.endsWith(visibleRegion.slice(0, length))) return 'intact';
-    }
+    if (visibleRegion.length >= minimumProofLength && expected.endsWith(visibleRegion)) return 'intact';
     return 'corrupted';
   }
 
   static inputVerdict(pane: string, expected: string): ComposerVerdict {
-    const normalize = (text: string) => text.replace(/[│┃›>]/g, '').replace(/\s+/g, '');
-    return normalize(pane).includes(normalize(expected)) ? 'intact' : 'corrupted';
+    return RealTmux.composerVerdict(pane, '', expected);
   }
 
   static composerInteractive(pane: string): boolean {
@@ -1677,6 +1680,13 @@ export class RealTmux implements TmuxControlPlane {
   async sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string) {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    const baseline = await this.command('observe_input_baseline', seatId, [
+      'capture-pane', '-p', '-J', '-t', paneId,
+    ]);
+    if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (!RealTmux.composerInteractive(baseline.stdout) || !RealTmux.composerEmpty(baseline.stdout)) {
+      return { bytes: 0, verdict: 'composer_corrupted' as const };
+    }
     const bytes = Buffer.byteLength(text, 'utf8');
     const signal = AbortSignal.timeout(this.composerObserveTimeoutMs);
     let output: PaneOutputSubscription;
@@ -1690,20 +1700,38 @@ export class RealTmux implements TmuxControlPlane {
     }
     let lastVerdict: ComposerVerdict = 'absent';
     try {
+      const attestBaseline = async () => {
+        const restored = await this.command('attest_input_baseline', seatId, [
+          'capture-pane', '-p', '-J', '-t', paneId,
+        ]);
+        return restored.code === 0 && restored.stdout === baseline.stdout;
+      };
+      const restoreComposer = async (count: number) => {
+        if (count > 0) {
+          const restored = await this.command('restore_input_composer', seatId, [
+            'send-keys', '-t', paneId, '-N', String(count), 'BSpace',
+          ]);
+          if (restored.code !== 0) return false;
+        }
+        return attestBaseline();
+      };
       const prefix = tabAfterPrefix ?? text;
       const suffix = tabAfterPrefix === undefined ? '' : text.slice(tabAfterPrefix.length);
       const literal = await this.pasteLiteral(seatId, paneId, prefix, 'paste_literal');
-      if (!literal) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      if (!literal) {
+        await attestBaseline();
+        return { bytes: 0, verdict: 'seat_unresolved' as const };
+      }
       if (tabAfterPrefix !== undefined) {
         const tab = await this.command('commit_surface_name', seatId, ['send-keys', '-t', paneId, 'Tab']);
         if (tab.code !== 0) {
-          await this.command('restore_input_composer', seatId, ['send-keys', '-t', paneId, '-N', String([...prefix].length), 'BSpace']);
+          await restoreComposer([...prefix].length);
           return { bytes, verdict: 'seat_unresolved' as const };
         }
         if (suffix.length > 0) {
           const argsLiteral = await this.pasteLiteral(seatId, paneId, suffix, 'paste_literal_args');
           if (!argsLiteral) {
-            await this.command('restore_input_composer', seatId, ['send-keys', '-t', paneId, '-N', String([...prefix].length), 'BSpace']);
+            await restoreComposer([...prefix].length);
             return { bytes, verdict: 'seat_unresolved' as const };
           }
         }
@@ -1713,14 +1741,6 @@ export class RealTmux implements TmuxControlPlane {
       // exactly the codepoints this call appended before returning refusal.
       // Retrying may then type once against the same pre-call composer; it can
       // never accumulate another copy of this frame.
-      const restoreComposer = async () => {
-        const count = [...text].length;
-        if (count === 0) return true;
-        const restored = await this.command('restore_input_composer', seatId, [
-          'send-keys', '-t', paneId, '-N', String(count), 'BSpace',
-        ]);
-        return restored.code === 0;
-      };
       while (!signal.aborted) {
         try {
           await output.next(signal);
@@ -1729,19 +1749,17 @@ export class RealTmux implements TmuxControlPlane {
         }
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
-          await restoreComposer();
+          await restoreComposer([...text].length);
           return { bytes, verdict: 'seat_unresolved' as const };
         }
-        lastVerdict = text.includes(`tx comm ${correlationId}`)
-          ? RealTmux.composerVerdict(captured.stdout, correlationId, text)
-          : RealTmux.inputVerdict(captured.stdout, text);
+        lastVerdict = RealTmux.composerVerdict(captured.stdout, correlationId, text);
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
-        await restoreComposer();
+        await restoreComposer([...text].length);
         return { bytes, verdict: 'seat_unresolved' as const };
       }
-      const restored = await restoreComposer();
+      const restored = await restoreComposer([...text].length);
       if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
       return lastVerdict === 'absent'
         ? { bytes, verdict: 'frame_absent' as const }
