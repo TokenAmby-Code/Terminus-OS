@@ -1187,13 +1187,15 @@ export class Daemon {
       const event_ids = [...prepared.eventIds];
       let allStaged = true;
       for (const target of prepared.targets) {
+        const binding = proj.currentBindings.find((row) => row.registered
+          && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
         const streamClass = this.physicalRegistration?.commStreams?.[target.seat_id] ?? 'interactive';
         if (prepared.renderedIntent && streamClass !== 'interactive') throw new Error('intent_requires_interactive_stream');
         const frame = prepared.renderedIntent?.frame
           ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
         const sent = streamClass === 'headless'
           ? await this.tmux.sendToSeat(target.seat_id, frame)
-          : await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame, prepared.renderedIntent?.tabAfter);
+          : await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame, prepared.renderedIntent?.tabAfter, binding.engine ?? undefined);
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
             target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes,
@@ -1236,7 +1238,7 @@ export class Daemon {
       const binding = proj.currentBindings.find((row) => row.registered
         && row.agent_id === req.target_agent_id && row.seat_id === prepared.binding.seat_id);
       if (!binding) throw new Error(`target_binding_changed: ${req.target_agent_id}`);
-      const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text);
+      const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined);
       await this.store.append({ entity_type: 'message', entity_id: prepared.correlationId, event_type: 'act.agent_input_injected',
         payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict, input_class: 'machine_feed' },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
@@ -1399,7 +1401,7 @@ export class Daemon {
         if (!sender) continue;
         const correlationId = crypto.randomUUID();
         const renderedFrame = `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`;
-        const sent = await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame);
+        const sent = await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined);
         await this.store.append({ entity_type: 'message', entity_id: correlationId, event_type: 'act.agent_input_injected',
           payload: {
             target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: sent.bytes,
