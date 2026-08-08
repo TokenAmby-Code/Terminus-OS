@@ -228,6 +228,10 @@ for (const profile of [
     baseline: 'transcript\n\n› Check recently modified functions for\n  compatibility\n\n  gpt-5.6-sol medium',
   },
   {
+    engine: 'codex' as const,
+    baseline: 'transcript\n\n› Use /skills to list av\n\n  gpt-5.6-sol medium',
+  },
+  {
     engine: 'claude' as const,
     baseline: 'transcript\n\n❯ Try "how does <filepath> work?"\n\n  ? for shortcuts',
   },
