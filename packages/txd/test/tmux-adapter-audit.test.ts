@@ -39,9 +39,11 @@ test('adapter failures expose only a stderr category', async () => {
 
 test('scoped reset clears history, replaces the process, and verifies the canonical pane tag', async () => {
   const operations: string[] = [];
+  const calls: string[][] = [];
   const tmux = new RealTmux('scratch', {
     run: async (_socket, args) => {
       operations.push(args[0]!);
+      calls.push(args);
       if (args[0] === 'list-panes') return { code: 0, stdout: '%17\tpalace:N\n', stderr: '' };
       if (args[0] === 'display-message') return { code: 0, stdout: 'palace:N\n', stderr: '' };
       if (args[0] === 'show-options') {
@@ -53,9 +55,10 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
   });
   expect(await tmux.resetSeat('palace:N')).toBe(true);
   expect(operations).toEqual([
-    'list-panes', 'show-options', 'clear-history', 'respawn-pane', 'display-message',
+    'list-panes', 'show-options', 'clear-history', 'set-environment', 'respawn-pane', 'display-message',
     'list-panes', 'set-option', 'set-option', 'list-panes', 'show-options', 'show-options',
   ]);
+  expect(calls.find((args) => args[0] === 'respawn-pane')).toContain('AGENT_ID');
 });
 
 test('persona tint writes both pane-local styles without selecting the pane and accepts only exact read-back', async () => {

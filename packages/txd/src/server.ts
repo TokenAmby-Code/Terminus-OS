@@ -435,7 +435,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const parsed = await parseMutation(req, CloseRequestSchema, 'invalid_close_request');
         if (parsed instanceof Response) return parsed;
         const res = await daemon.close(parsed, receipt(req));
-        // Any refusal (auth, no binding, mid-turn, palace seat, reap failure —
+        // Any refusal (auth, no binding, mid-turn, reap failure —
         // request-level or any single verdict) is loud: non-2xx so a caller can
         // never read a no-op or a partial bulk close as full success. The body
         // carries the per-target verdicts either way.

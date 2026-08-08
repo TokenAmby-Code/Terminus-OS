@@ -8,6 +8,7 @@ test('failed canonical tag write removes the newly created seat', async () => {
   const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
     calls.push(args);
     if (args[0] === 'show-options') return { code: 0, stdout: 'off\n', stderr: '' };
+    if (args[0] === 'set-environment') return { code: 0, stdout: '', stderr: '' };
     if (args[0] === 'new-session') return { code: 0, stdout: '', stderr: '' };
     if (args[0] === 'list-panes') return { code: 0, stdout: '%41\n', stderr: '' };
     if (args[0] === 'set-option') return { code: 1, stdout: '', stderr: 'tag refused' };

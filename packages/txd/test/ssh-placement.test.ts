@@ -168,18 +168,6 @@ test('dispatch to a local seat composes identity and nonce with no ssh target', 
   expect(launch!.sshTarget).toBeUndefined();
 });
 
-test('a fresh dispatch to the same seat mints a fresh nonce', async () => {
-  const { tmux, d } = setup();
-  await d.constructEstate();
-  const first = await dispatchTo(d, tmux, SSH_SEAT);
-  // The first launch never bound; the seat is still free, so a second
-  // dispatch composes a new launch. Its nonce must differ — a new binding can
-  // never attach a dead generation's envelope.
-  await d.dispatch(request({ kind: 'seat', seat_id: SSH_SEAT }));
-  const second = tmux.seatEngine(SSH_SEAT);
-  expect(second!.launchNonce).not.toBe(first.launchNonce);
-});
-
 // ── The placement adapter: pane attestation ─────────────────────────────────
 
 test('wrapper_start on a dispatched ssh seat attests kind ssh with the composed identity', async () => {

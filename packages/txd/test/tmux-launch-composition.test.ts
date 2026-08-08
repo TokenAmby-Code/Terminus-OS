@@ -46,3 +46,12 @@ test('a bodiless launch ends at the engine, with no empty argument trailing it',
   const respawn = calls.find((args) => args[0] === 'respawn-pane')!;
   expect(respawn.at(-1)!.endsWith("'/fleet/agent-wrapper' 'claude'")).toBe(true);
 });
+
+test('bind stamps AGENT_ID into the pane environment', async () => {
+  const { calls, tmux } = recorder();
+
+  expect(await tmux.startSeatEngine(launch)).toBe(true);
+
+  const respawn = calls.find((args) => args[0] === 'respawn-pane')!;
+  expect(respawn).toContain(`AGENT_ID=${launch.agentId}`);
+});

@@ -191,6 +191,8 @@ export function buildProjections(events: EventRecord[]): Projections {
       }
       case 'reg.seat_cleared':
         bindingBySeat.delete(e.entity_id);
+        launchCompositions.delete(e.entity_id);
+        transportClaims.delete(e.entity_id);
         break;
       case 'reg.seat_decommissioned':
         decommissionedSeats.add(e.entity_id);

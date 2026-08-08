@@ -75,7 +75,7 @@ import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections, type LaunchComposition, type TransportClaim } from './projections.ts';
-import { DECOMMISSIONED_COUNCIL_SEATS, EMPEROR_SEAT, isTxdPage, SSH_SEAT_TARGETS, sshSeatTarget, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import { DECOMMISSIONED_COUNCIL_SEATS, isTxdPage, SSH_SEAT_TARGETS, sshSeatTarget, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
@@ -273,6 +273,13 @@ export class Daemon {
       const pendingResetSeats = this.pendingScopedResetSeats(events);
       const projections = buildProjections(events);
       const bound = new Set(projections.currentBindings.map((binding) => binding.seat_id));
+      // A successful engine start owns the seat immediately. Registration is
+      // asynchronous, so waiting for reg.bound would put the same seat back on
+      // the freelist during the wrapper's startup window and let a later birth
+      // silently replace it. Dispatch itself runs under txd's single-writer
+      // mutex; this durable composition is the occupancy fact the next
+      // acquisition observes after that mutex changes hands.
+      const launching = new Set(projections.launchCompositions.keys());
       const paneBySeat = new Map(projections.seatBoard.map((row) => [row.seat_id, row.pane]));
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
       // One candidate's seat-level truth, first disqualifier in a fixed order.
@@ -280,6 +287,7 @@ export class Daemon {
         if (projections.decommissionedSeats.has(candidate)) return 'decommissioned';
         if (pendingResetSeats.has(candidate)) return 'reset_pending';
         if (bound.has(candidate)) return 'bound';
+        if (launching.has(candidate)) return 'launching';
         const pane = paneBySeat.get(candidate);
         if (pane !== 'live' && pane !== 'empty') return 'dead';
         return null;
@@ -323,6 +331,7 @@ export class Daemon {
         if (state !== null) {
           const reason = ({
             bound: 'seat_bound',
+            launching: 'seat_launching',
             decommissioned: 'seat_decommissioned',
             reset_pending: 'seat_reset_pending',
             dead: 'pane_dead',
@@ -1927,7 +1936,7 @@ export class Daemon {
   // closes under one lock acquisition: each target gets its own verdict and its
   // own facts, a refused sibling never blocks a close, and a page is never
   // rebuilt. No silent no-op: an unbound target, a mid-turn agent (absent
-  // force), the Emperor's seat, an underranked caller, or a failed reap all
+  // force), an underranked caller, or a failed reap all
   // refuse loud.
   close(req: CloseRequest, transportReceipt: string | null = null): Promise<CloseResponse> {
     return this.locked(async () => {
@@ -1982,17 +1991,6 @@ export class Daemon {
           const binding = proj.currentBindings.find(
             (b) => !closedSeats.has(b.seat_id) && (b.seat_id === target || b.agent_id === target),
           );
-          if (target === EMPEROR_SEAT || binding?.seat_id === EMPEROR_SEAT) {
-            // Hard refusal, force included: severing the operator is unspellable.
-            verdicts.push({
-              target,
-              seat_id: binding?.seat_id ?? EMPEROR_SEAT,
-              agent_id: binding?.agent_id ?? null,
-              closed: false,
-              reason: `palace_seat: ${EMPEROR_SEAT} is the Emperor's seat and is never closable`,
-            });
-            continue;
-          }
           if (!binding) {
             // Refuse loud — closing a non-bound target is a no-op the caller
             // must see, never a silent success.
@@ -2029,12 +2027,12 @@ export class Daemon {
         }
       } else {
         // Filtered selection is inherently graceful: recorded-idle (or stopped)
-        // registered agents only — never an overseer, never the Emperor's seat,
-        // never a mid-birth (unregistered) binding, whose death is registration
+        // registered agents only — never an overseer or a mid-birth
+        // (unregistered) binding, whose death is registration
         // abort's story.
         const candidates = proj.currentBindings.filter((b) => {
           if (!b.agent_id || !b.registered) return false;
-          if (b.rank === CLOSE_REQUIRED_RANK || b.seat_id === EMPEROR_SEAT) return false;
+          if (b.rank === CLOSE_REQUIRED_RANK) return false;
           if (turnOf(b.agent_id) === 'working') return false;
           return !req.page || b.seat_id.split(':', 1)[0] === req.page;
         });
