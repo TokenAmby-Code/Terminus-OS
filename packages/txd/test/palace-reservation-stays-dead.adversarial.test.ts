@@ -9,7 +9,7 @@ function runtimeFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      if (entry.name === 'test' || entry.name === 'node_modules') return [];
+      if (entry.name === 'test' || entry.name === 'migrations' || entry.name === 'node_modules') return [];
       return runtimeFiles(path);
     }
     return entry.isFile() ? [path] : [];

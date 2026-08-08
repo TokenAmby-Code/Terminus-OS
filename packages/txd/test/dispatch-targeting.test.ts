@@ -135,6 +135,31 @@ test('a named seat with a composed birth refuses loud while registration is pend
   }]);
 });
 
+test('a scoped reset releases an unbound composed birth for redispatch', async () => {
+  const { tmux, published, d } = setup();
+  await d.constructEstate();
+  await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W' }));
+
+  expect((await d.resetEstateScope({
+    schema_version: 11,
+    force: true,
+    scope: 'pane',
+    pane: 'palace:W',
+  })).ok).toBe(true);
+  published.length = 0;
+  await d.dispatch({
+    ...request({ kind: 'seat', seat_id: 'palace:W' }),
+    dispatch_id: '8e0a0e2e-bae2-4eca-a666-5532509228d1',
+    agent_id: 'd0debb42-d54f-434f-aeb4-345e6b54df91',
+  });
+
+  expect(published).toMatchObject([{
+    type: 'agent.dispatch_attested',
+    payload: { seat_id: 'palace:W' },
+  }]);
+  expect(tmux.seatEngine('palace:W')?.agentId).toBe('d0debb42-d54f-434f-aeb4-345e6b54df91');
+});
+
 test('a page target to an undeclared page is refused, not guessed', async () => {
   const { published, d } = setup();
   await d.constructEstate();

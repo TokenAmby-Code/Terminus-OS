@@ -583,8 +583,8 @@ export class RealTmux implements TmuxControlPlane {
   /** Keep tmux's inherited defaults from supplying an identity to bare panes. */
   private async clearDefaultAgentEnvironment(target?: string): Promise<boolean> {
     const args = target
-      ? ['set-environment', '-t', target, AGENT_ID_ENV, '']
-      : ['set-environment', '-g', AGENT_ID_ENV, ''];
+      ? ['set-environment', '-u', '-t', target, AGENT_ID_ENV]
+      : ['set-environment', '-g', '-u', AGENT_ID_ENV];
     return (await this.command(
       'clear_agent_environment',
       target ?? 'server',

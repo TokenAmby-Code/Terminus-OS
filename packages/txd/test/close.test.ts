@@ -95,6 +95,22 @@ test('close resolves by agent id as well as seat id', async () => {
   expect(res.verdicts[0]).toMatchObject({ seat_id: 'somnium:NE', agent_id: 'w-1', closed: true });
 });
 
+test('palace seats close by seat id and agent id like every other estate seat', async () => {
+  const { store, d } = setup();
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'iron-hands');
+  await bind(d, store, 'palace:N', 'raven-guard');
+
+  const closed = await d.close(req({ targets: ['palace:W', 'raven-guard'], force: true }));
+
+  expect(closed).toMatchObject({ ok: true, closed_count: 2, refused_count: 0 });
+  expect(closed.verdicts).toMatchObject([
+    { target: 'palace:W', seat_id: 'palace:W', agent_id: 'iron-hands', closed: true },
+    { target: 'raven-guard', seat_id: 'palace:N', agent_id: 'raven-guard', closed: true },
+  ]);
+  expect(buildProjections(await store.readAll()).currentBindings.map((binding) => binding.agent_id)).toEqual(['ov-1']);
+});
+
 test('an astartes source is refused and the refusal names the required rank', async () => {
   const { store, d } = setup();
   await bind(d, store, 'reservists:W', 'w-1');

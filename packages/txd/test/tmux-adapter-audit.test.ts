@@ -58,6 +58,9 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
     'list-panes', 'show-options', 'clear-history', 'set-environment', 'respawn-pane', 'display-message',
     'list-panes', 'set-option', 'set-option', 'list-panes', 'show-options', 'show-options',
   ]);
+  expect(calls.find((args) => args[0] === 'set-environment')).toEqual([
+    'set-environment', '-u', '-t', '%17', 'AGENT_ID',
+  ]);
   expect(calls.find((args) => args[0] === 'respawn-pane')).toContain('AGENT_ID');
 });
 
