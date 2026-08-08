@@ -139,7 +139,7 @@ export interface TmuxControlPlane {
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
-  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex'): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
   /** Observe whether the live engine composer is painted without pane input. */
   observeComposerInteractive(seatId: string): Promise<boolean>;
   /**
@@ -209,6 +209,18 @@ const SSH_TARGET_ENV = 'TXD_SSH_TARGET';
 const MACHINE_ENV = 'IMPERIUM_MACHINE';
 const MAX_PROCESS_ANCESTRY = 256;
 type ProcessWitness = { pid: number; parent_pid: number; start_ticks: string };
+
+const ENGINE_IDLE_COMPOSER_PAINTS: Record<'claude' | 'codex', readonly RegExp[]> = {
+  claude: [/^Try ".+"$/],
+  codex: [
+    /^Explain this codebase$/,
+    /^Summarize recent commits$/,
+    /^Implement \{feature\}$/,
+    /^Find and fix a bug in @filename$/,
+    /^Write tests for @filename$/,
+    /^Improve documentation in @filename$/,
+  ],
+};
 
 async function processWitness(pid: number): Promise<ProcessWitness | null> {
   if (!Number.isInteger(pid) || pid < 1) return null;
@@ -1602,9 +1614,13 @@ export class RealTmux implements TmuxControlPlane {
     return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
   }
 
-  static composerEmpty(pane: string): boolean {
+  static composerEmpty(pane: string, engine?: 'claude' | 'codex'): boolean {
     const composer = RealTmux.activeComposer(pane);
-    return composer !== null && composer.replace(/\s+/g, '') === '';
+    if (composer === null) return false;
+    const paint = composer.trim();
+    if (paint === '') return true;
+    return engine !== undefined
+      && ENGINE_IDLE_COMPOSER_PAINTS[engine].some((pattern) => pattern.test(paint));
   }
 
   /**
@@ -1709,14 +1725,14 @@ export class RealTmux implements TmuxControlPlane {
     return { bytes, verdict: 'staged' };
   }
 
-  async sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string) {
+  async sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex') {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const baseline = await this.command('observe_input_baseline', seatId, [
       'capture-pane', '-p', '-J', '-t', paneId,
     ]);
     if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
-    if (!RealTmux.composerInteractive(baseline.stdout) || !RealTmux.composerEmpty(baseline.stdout)) {
+    if (!RealTmux.composerInteractive(baseline.stdout) || !RealTmux.composerEmpty(baseline.stdout, engine)) {
       return { bytes: 0, verdict: 'composer_corrupted' as const };
     }
     const bytes = Buffer.byteLength(text, 'utf8');
@@ -2296,7 +2312,7 @@ export class FakeTmux implements TmuxControlPlane {
     this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' };
   }
-  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string) {
+  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string, _engine?: 'claude' | 'codex') {
     const sent = await this.sendToSeat(seatId, text);
     return sent;
   }

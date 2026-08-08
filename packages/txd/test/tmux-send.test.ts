@@ -203,12 +203,56 @@ for (const existing of [
       'palace:S',
       '11111111-1111-4111-8111-111111111111',
       '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nnew frame',
+      undefined,
+      'codex',
     );
 
     expect(outcome).toEqual({ bytes: 0, verdict: 'composer_corrupted' });
     expect(calls.filter((args) => ['load-buffer', 'paste-buffer', 'send-keys'].includes(args[0]!))).toHaveLength(0);
     expect(calls.filter((args) => args[0] === 'capture-pane')).toHaveLength(1);
     expect(baseline).toBe(`transcript\n\n› ${existing}\n\n  gpt-5.6-sol medium`);
+  });
+}
+
+for (const profile of [
+  {
+    engine: 'codex' as const,
+    baseline: 'transcript\n\n› Summarize recent commits\n\n  gpt-5.6-sol medium',
+  },
+  {
+    engine: 'claude' as const,
+    baseline: 'transcript\n\n❯ Try "how does <filepath> work?"\n\n  ? for shortcuts',
+  },
+]) {
+  test(`behavioral pin: ${profile.engine} idle suggestion paint is a known-empty verified-send baseline`, async () => {
+    const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nnew frame';
+    let capture = 0;
+    const calls: string[][] = [];
+    const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'capture-pane') {
+        capture += 1;
+        return { code: 0, stdout: capture === 1 ? profile.baseline : `› ${frame}\n`, stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    const tmux = new RealTmux('scratch', {
+      run,
+      composerObserveTimeoutMs: 10_000,
+      observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
+    });
+
+    const outcome = await tmux.sendVerifiedToSeat(
+      'palace:S',
+      '11111111-1111-4111-8111-111111111111',
+      frame,
+      undefined,
+      profile.engine,
+    );
+
+    expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+    expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
   });
 }
 
