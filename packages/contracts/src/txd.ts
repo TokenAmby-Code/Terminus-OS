@@ -211,6 +211,7 @@ export const ACT_EVENT_NAMES = [
   'comm_bytes_sent',
   'agent_input_injected',
   'comm_delivery_asserted',
+  'comm_delivery_confirmation_dead_lettered',
   'comm_redrive_attempted',
   'comm_delivery_failed',
   'comm_watch_unarmed',
@@ -261,6 +262,7 @@ export const EVENT_TYPES = [
   'act.comm_bytes_sent',
   'act.agent_input_injected',
   'act.comm_delivery_asserted',
+  'act.comm_delivery_confirmation_dead_lettered',
   'act.comm_redrive_attempted',
   'act.comm_delivery_failed',
   'act.comm_watch_unarmed',
@@ -701,6 +703,7 @@ export const CommHookSchema = z.object({
   schema_version: z.number().int(), agent_id: z.string().min(1),
   message_ids: z.array(z.string().min(1)).default([]),
   content: z.string().optional(), stop_event_id: z.string().min(1).optional(),
+  session_id: z.string().min(1).optional(),
 });
 export type CommHook = z.infer<typeof CommHookSchema>;
 
