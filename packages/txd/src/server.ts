@@ -631,6 +631,11 @@ export function makeServer(opts: { bind: string; port: number; daemon: Daemon; b
   return Bun.serve({
     hostname: opts.bind,
     port: opts.port,
+    // Comm asks deliberately wait on an event for up to seven minutes. Bun's
+    // positive values top out below the Emperor-ruled 300-second sanity floor,
+    // so disable the transport idle timeout instead of installing a shorter,
+    // contradictory deadline.
+    idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
       for (const route of routes) {
