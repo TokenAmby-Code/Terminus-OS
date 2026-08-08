@@ -23,22 +23,30 @@ export function envelopeSessionName(seatId: string, launchNonce: string): string
 /** List tmux session names live on the target machine (by machines.json alias). */
 export type RemoteEnvelopeLister = (target: string) => Promise<string[]>;
 
+export class EnvelopeInventoryError extends Error {
+  constructor(target: string, detail: string) {
+    super(`envelope_inventory_failed:${target}:${detail}`);
+    this.name = 'EnvelopeInventoryError';
+  }
+}
+
 // The estate ssh pattern: alias resolution and the keepalive contract live in
 // the generated ~/.ssh/config; BatchMode keeps an unreachable target a loud,
 // bounded failure instead of a prompt. "no server running" is an empty
 // inventory, not an error — the target simply has no envelopes.
 export const realRemoteEnvelopeLister: RemoteEnvelopeLister = (target) =>
   new Promise((resolve, reject) => {
+    const remoteCommand = "tmux list-sessions -F '#{session_name}'";
     const child = spawn('ssh', [
       '-o', 'BatchMode=yes',
       target,
-      'tmux', 'list-sessions', '-F', '#{session_name}',
+      remoteCommand,
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
     child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.on('error', reject);
+    child.on('error', (error) => reject(new EnvelopeInventoryError(target, error.message)));
     child.on('close', (code) => {
       if (code === 0) {
         resolve(stdout.split('\n').filter(Boolean));
@@ -52,6 +60,6 @@ export const realRemoteEnvelopeLister: RemoteEnvelopeLister = (target) =>
         resolve([]);
         return;
       }
-      reject(new Error(`envelope_inventory_failed:${target}:${stderr.trim() || code}`));
+      reject(new EnvelopeInventoryError(target, stderr.trim() || String(code)));
     });
   });
