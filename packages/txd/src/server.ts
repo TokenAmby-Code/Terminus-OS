@@ -135,6 +135,7 @@ function promptHookInput(payload: Record<string, unknown>): unknown {
     message_ids: commFrameMessageIds(prompt),
     content: prompt,
     stop_event_id: stringField(payload, 'stop_event_id'),
+    session_id: stringField(payload, 'session_id'),
   };
 }
 

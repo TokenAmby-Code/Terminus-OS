@@ -10,7 +10,7 @@
 import { expect, test } from 'bun:test';
 import { AGENT_SCHEMA_VERSION, BUS_SCHEMA_VERSION, SCHEMA_VERSION, type BusDelivery } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
-import { FakeTmux } from '../src/tmux.ts';
+import { FakeTmux, type TmuxControlPlane } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
 import { findTmuxIdDeep } from './tmux-id-probe.ts';
@@ -329,6 +329,100 @@ test('a NATURAL prompt-submit (no comm-message context) is acked-not-consumed â€
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, consumed: false, reason: 'message_target_mismatch' });
     expect(await store.count()).toBe(before);
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('a delayed prompt from a retired delivery target dead-letters its confirmation and releases ordered bus delivery', async () => {
+  const { store, tmux, d, srv, post } = setup();
+  const sender = '889c6bdc-cb4a-45dd-8acc-bcb01fbb98eb';
+  const retiredTarget = 'd2d65cae-6851-4529-a9df-ad7f7e8e8c72';
+  try {
+    for (const [seat, agent] of [
+      ['council:custodes', sender],
+      ['palace:N', retiredTarget],
+    ] as const) {
+      await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity: agent, persona: 'p', tint: '#111111' });
+      await store.append({
+        entity_type: 'agent', entity_id: agent, event_type: 'reg.agent_registered',
+        payload: { persona: 'p', rank: 'astartes', commander: null },
+        provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+        occurred_at: '2026-08-08T18:40:00.000Z',
+      });
+    }
+    const messageId = (await d.comm({
+      schema_version: SCHEMA_VERSION,
+      source_agent_id: sender,
+      target: retiredTarget,
+      message: 'urgent control fact',
+      ask: false,
+      reply: false,
+    })).message_id;
+    const verified = tmux.sendVerifiedToSeat.bind(tmux);
+    const control = tmux as TmuxControlPlane;
+    control.sendVerifiedToSeat = async (seatId, correlationId, text, tabAfterPrefix, engine) =>
+      seatId === 'council:custodes'
+        ? { bytes: 0, verdict: 'composer_corrupted' as const }
+        : verified(seatId, correlationId, text, tabAfterPrefix, engine);
+    const delayed = delivery('hook.user_prompt_submit', {
+      agent_id: retiredTarget,
+      session_id: '019fe2a6-9a2f-7551-b32c-308682057324',
+      prompt: `[tx comm ${messageId} from ${sender}]\nurgent control fact`,
+    }, 173900);
+
+    // While the target generation is still live, genuine painted-composer
+    // refusal remains retryable: no acknowledgement is forged.
+    const first = await post(delayed);
+    expect(first.status).toBe(500);
+    expect((await store.readAll()).filter((event) =>
+      event.event_type === 'act.comm_delivery_confirmation_dead_lettered')).toHaveLength(0);
+
+    await store.appendAll([
+      {
+        entity_type: 'agent', entity_id: retiredTarget, event_type: 'reg.retired', payload: {},
+        provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+        occurred_at: '2026-08-08T18:56:17.121Z',
+      },
+      {
+        entity_type: 'seat', entity_id: 'palace:N', event_type: 'reg.seat_cleared', payload: {},
+        provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+        occurred_at: '2026-08-08T18:56:17.121Z',
+      },
+    ]);
+
+    const replay = await post(delayed);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      ok: true,
+      seq: 173900,
+      consumed: true,
+      reason: null,
+      receipt: { asserted: [], dead_lettered: [messageId] },
+    });
+    const events = await store.readAll();
+    expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+    expect(events.filter((event) => event.event_type === 'act.comm_delivery_confirmation_dead_lettered')).toEqual([
+      expect.objectContaining({
+        entity_id: `${messageId}:${retiredTarget}`,
+        payload: expect.objectContaining({
+          bus_event_seq: 173900,
+          message_id: messageId,
+          source_agent_id: sender,
+          delivery_target_agent_id: retiredTarget,
+          delivery_target_session_id: '019fe2a6-9a2f-7551-b32c-308682057324',
+          delivery_target_seat_id: 'palace:N',
+          delivery_target_pane_generation: expect.any(String),
+          reason: 'delivery_target_retired',
+        }),
+      }),
+    ]);
+    expect(tmux.sends('council:custodes')).toEqual([]);
+
+    // The terminal fact is idempotent under any duplicate delivery.
+    expect((await post(delayed)).status).toBe(200);
+    expect((await store.readAll()).filter((event) =>
+      event.event_type === 'act.comm_delivery_confirmation_dead_lettered')).toHaveLength(1);
   } finally {
     srv.stop(true);
   }

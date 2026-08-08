@@ -1354,10 +1354,11 @@ export class Daemon {
   // of belongs to someone else's correspondence and is skipped in silence; only
   // a flush that matched NOTHING is a refusal, so an ordinary prompt still
   // fails deterministically instead of wedging the lane.
-  promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[] }> {
+  promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[]; dead_lettered: string[] }> {
     return this.locked(async () => {
       const events = await this.store.readAll();
       const asserted: string[] = [];
+      const matchedMessageIds: string[] = [];
       const confirmations = new Map<string, string[]>();
       let matched = false;
       const intentMessage = hook.content === undefined ? undefined : events.find((event) =>
@@ -1374,6 +1375,7 @@ export class Daemon {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
         matched = true;
+        matchedMessageIds.push(messageId);
         const assertionId = `${messageId}:${hook.agent_id}`;
         if (!events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) {
           await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
@@ -1392,10 +1394,46 @@ export class Daemon {
         }
       }
       if (!matched) throw new Error('message_target_mismatch');
+      const proj = await this.projections();
+      const liveDeliveryTarget = proj.currentBindings.some((binding) =>
+        binding.registered && binding.agent_id === hook.agent_id);
+      if (!liveDeliveryTarget) {
+        const retired = proj.turnByAgent.get(hook.agent_id) === 'retired';
+        const historicBinding = [...events].reverse().find((event) =>
+          event.event_type === 'reg.bound' && event.payload.agent_id === hook.agent_id);
+        const deadLettered: string[] = [];
+        for (const messageId of matchedMessageIds) {
+          const deadLetterId = `${messageId}:${hook.agent_id}`;
+          if (events.some((event) => event.entity_id === deadLetterId
+            && event.event_type === 'act.comm_delivery_confirmation_dead_lettered')) continue;
+          const accepted = events.find((event) =>
+            event.entity_id === messageId && event.event_type === 'reg.comm_accepted')!;
+          const busSeq = receipt?.match(/^bus:(\d+)$/)?.[1];
+          await this.store.append({
+            entity_type: 'assertion',
+            entity_id: deadLetterId,
+            event_type: 'act.comm_delivery_confirmation_dead_lettered',
+            payload: {
+              bus_event_seq: busSeq === undefined ? null : Number(busSeq),
+              message_id: messageId,
+              source_agent_id: accepted.payload.source_agent_id,
+              delivery_target_agent_id: hook.agent_id,
+              delivery_target_session_id: hook.session_id ?? null,
+              delivery_target_seat_id: historicBinding?.entity_id ?? null,
+              delivery_target_pane_generation: historicBinding?.payload.pane_generation ?? null,
+              delivery_target_birth_generation: historicBinding?.payload.birth_generation ?? null,
+              reason: retired ? 'delivery_target_retired' : 'delivery_target_unbound',
+            },
+            provenance: this.prov('hook', receipt),
+            occurred_at: this.now(),
+          });
+          deadLettered.push(messageId);
+        }
+        return { ok: true, asserted, dead_lettered: deadLettered };
+      }
       // One line per sender, not one per message: the confirmation lands in a
       // composer that coalesces exactly like the one it is reporting on, and a
       // burst of them is the same defect pointed back at the sender.
-      const proj = await this.projections();
       for (const [sourceAgentId, messageIds] of confirmations) {
         const sender = proj.currentBindings.find((b) => b.agent_id === sourceAgentId);
         if (!sender) continue;
@@ -1410,7 +1448,7 @@ export class Daemon {
           }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
         if (sent.verdict !== 'staged') throw new Error(`delivery_confirmation_not_staged:${sent.verdict}`);
       }
-      return { ok: true, asserted };
+      return { ok: true, asserted, dead_lettered: [] };
     });
   }
 
