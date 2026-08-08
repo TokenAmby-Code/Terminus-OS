@@ -1622,7 +1622,7 @@ export class RealTmux implements TmuxControlPlane {
   static composerEmpty(pane: string, engine?: 'claude' | 'codex'): boolean {
     const composer = RealTmux.activeComposer(pane);
     if (composer === null) return false;
-    const paint = composer.trim();
+    const paint = composer.trim().replace(/\s+/g, ' ');
     if (paint === '') return true;
     return engine !== undefined
       && ENGINE_IDLE_COMPOSER_PAINTS[engine].some((pattern) => pattern.test(paint));
