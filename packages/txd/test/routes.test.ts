@@ -9,6 +9,7 @@ import {
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { EnvelopeInventoryError } from '../src/envelopes.ts';
 import { buildRoutes, makeServer } from '../src/server.ts';
 
 function daemon() {
@@ -78,6 +79,25 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
       observed: '#302800',
       state: 'ready',
     });
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('GET /tmux/read/zombies translates envelope inventory failures', async () => {
+  const d = new Daemon(
+    new MemoryEventStore(),
+    new FakeTmux(),
+    undefined,
+    undefined,
+    null,
+    async () => { throw new EnvelopeInventoryError('k12-work', 'ssh failed'); },
+  );
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/zombies`);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, error: 'envelope_inventory_failed' });
   } finally {
     srv.stop(true);
   }

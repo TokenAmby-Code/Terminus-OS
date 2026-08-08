@@ -39,8 +39,24 @@ test('a running-then-exited server is an empty inventory', async () => {
   expect(await realRemoteEnvelopeLister('k12-work')).toEqual([]);
 });
 
-test('sessions list passes through', async () => {
-  fakeSsh('printf "txd-somnium-W-abc\\ncivic-shell\\n"; exit 0\n');
+test('the tmux format survives ssh remote-shell reconstruction', async () => {
+  const tmux = join(tmp, 'bin', 'tmux');
+  writeFileSync(tmux, `#!/usr/bin/env bash
+if [[ "$#" -ne 3 || "$1" != "list-sessions" || "$2" != "-F" || "$3" != '#{session_name}' ]]; then
+  echo "unexpected tmux argv: $*" >&2
+  exit 64
+fi
+printf "txd-somnium-W-abc\\ncivic-shell\\n"
+`);
+  chmodSync(tmux, 0o755);
+  fakeSsh(`
+if [[ "$1" != "-o" || "$2" != "BatchMode=yes" || "$3" != "k12-work" ]]; then
+  echo "unexpected ssh argv: $*" >&2
+  exit 64
+fi
+shift 3
+exec bash -c "$*"
+`);
   expect(await realRemoteEnvelopeLister('k12-work')).toEqual(['txd-somnium-W-abc', 'civic-shell']);
 });
 
