@@ -146,9 +146,20 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-export function deferredJson(body: Promise<unknown>, keepaliveMs = 30_000): Response {
+type KeepaliveScheduler = (emit: () => void, intervalMs: number) => () => void;
+
+const scheduleKeepalive: KeepaliveScheduler = (emit, intervalMs) => {
+  const timer = setInterval(emit, intervalMs);
+  return () => clearInterval(timer);
+};
+
+export function deferredJson(
+  body: Promise<unknown>,
+  keepaliveMs = 30_000,
+  schedule: KeepaliveScheduler = scheduleKeepalive,
+): Response {
   const encoder = new TextEncoder();
-  let keepalive: ReturnType<typeof setInterval> | undefined;
+  let stopKeepalive: (() => void) | undefined;
   let open = true;
   return new Response(new ReadableStream<Uint8Array>({
     start(controller) {
@@ -160,7 +171,7 @@ export function deferredJson(body: Promise<unknown>, keepaliveMs = 30_000): Resp
       // one minute without bytes. Whitespace is legal before a JSON value, so
       // keep the transport active while callback completion remains entirely
       // event-driven. This interval observes no state and performs no poll.
-      keepalive = setInterval(() => {
+      stopKeepalive = schedule(() => {
         if (open) controller.enqueue(encoder.encode(' '));
       }, keepaliveMs);
       void body.then((value) => {
@@ -172,12 +183,12 @@ export function deferredJson(body: Promise<unknown>, keepaliveMs = 30_000): Resp
         if (open) controller.error(error);
       }).finally(() => {
         open = false;
-        if (keepalive) clearInterval(keepalive);
+        stopKeepalive?.();
       });
     },
     cancel() {
       open = false;
-      if (keepalive) clearInterval(keepalive);
+      stopKeepalive?.();
     },
   }), { headers: { 'content-type': 'application/json' } });
 }

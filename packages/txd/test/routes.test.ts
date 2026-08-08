@@ -136,13 +136,16 @@ test('comm ask sends response headers before the callback wait completes', async
 
 test('comm ask stream emits legal JSON whitespace while awaiting its callback event', async () => {
   const pending = new Promise<unknown>(() => {});
-  const reader = deferredJson(pending, 10).body!.getReader();
+  let emitKeepalive!: () => void;
+  const reader = deferredJson(pending, 30_000, (emit) => {
+    emitKeepalive = emit;
+    return () => {};
+  }).body!.getReader();
   try {
     expect(new TextDecoder().decode((await reader.read()).value)).toBe(' ');
-    expect(await Promise.race([
-      reader.read().then((chunk) => new TextDecoder().decode(chunk.value)),
-      Bun.sleep(50).then(() => 'blocked'),
-    ])).toBe(' ');
+    const keepalive = reader.read();
+    emitKeepalive();
+    expect(new TextDecoder().decode((await keepalive).value)).toBe(' ');
   } finally {
     await reader.cancel();
   }
