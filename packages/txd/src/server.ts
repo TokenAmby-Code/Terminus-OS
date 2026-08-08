@@ -57,6 +57,7 @@ import {
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
+import { makeBusReceipt } from './bus-receipt.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 
@@ -522,7 +523,7 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const { event } = parsed.data;
         // The transport receipt now points into the bus journal row that
         // delivered this event — attributable straight back to bus.events.seq.
-        const busReceipt = `bus:${event.seq}`;
+        const busReceipt = makeBusReceipt(event.seq);
         const ack = (consumed: boolean, reason: string | null, extra: Record<string, unknown> = {}) =>
           json({ ok: true, seq: event.seq, consumed, reason, ...extra });
         const physicalAck = async (operation: () => Promise<void>) => {
