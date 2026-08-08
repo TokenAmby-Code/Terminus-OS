@@ -103,6 +103,37 @@ test('GET /tmux/read/zombies translates envelope inventory failures', async () =
   }
 });
 
+test('comm ask sends response headers before the callback wait completes', async () => {
+  let release!: (value: unknown) => void;
+  const pending = new Promise<unknown>((resolve) => { release = resolve; });
+  const d = daemon();
+  (d as unknown as { waitComm: () => Promise<unknown> }).waitComm = () => pending;
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const response = fetch(`http://127.0.0.1:${srv.port}/agents/comm/wait`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        ask_id: 'ask-1',
+        subscriber_agent_id: 'agent-1',
+      }),
+    });
+    expect(await Promise.race([
+      response.then(() => 'headers'),
+      Bun.sleep(50).then(() => 'blocked'),
+    ])).toBe('headers');
+
+    release({ ask_id: 'ask-1', complete: true, callbacks: [], outstanding: [] });
+    expect(await (await response).json()).toEqual({
+      ask_id: 'ask-1', complete: true, callbacks: [], outstanding: [],
+    });
+  } finally {
+    release({ ask_id: 'ask-1', complete: true, callbacks: [], outstanding: [] });
+    srv.stop(true);
+  }
+});
+
 test('clipboard pull/push preserves opaque UTF-8 without persistence or execution', async () => {
   const content = 'literal %12 @8 $3\n雪 😀\ttrailing  ';
   const store = new MemoryEventStore();

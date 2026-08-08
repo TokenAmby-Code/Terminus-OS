@@ -146,6 +146,23 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
+function deferredJson(body: Promise<unknown>): Response {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      // A single legal JSON whitespace byte commits the response headers. The
+      // stream then sleeps entirely on the callback event; there is no poll or
+      // heartbeat loop.
+      controller.enqueue(encoder.encode(' '));
+      void body.then((value) => {
+        assertNoTmuxIdInIdentifiers(value, 'http_response');
+        controller.enqueue(encoder.encode(JSON.stringify(value)));
+        controller.close();
+      }).catch((error) => controller.error(error));
+    },
+  }), { headers: { 'content-type': 'application/json' } });
+}
+
 function exact(path: string) {
   return (pathname: string) => (pathname === path ? {} : null);
 }
@@ -304,7 +321,11 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
       handler: async (req) => {
         const parsed = await parseMutation(req, CommWaitRequestSchema, 'invalid_comm_wait_request');
         if (parsed instanceof Response) return parsed;
-        return json(await daemon.waitComm(parsed));
+        // Return the response head immediately, then complete the body from the
+        // callback event. Bun's client has a shorter wait-for-headers ceiling
+        // than the ruled seven-minute ask window; awaiting here made that
+        // transport ceiling silently defeat the domain contract.
+        return deferredJson(daemon.waitComm(parsed));
       },
     },
     {
