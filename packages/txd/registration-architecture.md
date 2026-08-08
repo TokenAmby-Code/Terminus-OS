@@ -197,14 +197,18 @@ estate and its configured command is the LOCAL agent-wrapper. An ssh seat is
 declared in `estate.ts` (`SSH_SEAT_TARGETS`) with a target machine named by
 machines.json alias, never by address. txd composes the launch environment on
 the pane: `PANE_ID`, `AGENT_ID` (minted by registrationd at dispatch and
-stamped on `agent.dispatch_requested` — identity never rides the birth
-reply), `TXD_LAUNCH_NONCE` (per-launch correlation, remembered against the
+stamped into tmux's pane environment by txd — identity never rides the birth
+reply and every fresh shell inherits it), `TXD_LAUNCH_NONCE` (per-launch correlation, remembered against the
 pane generation), and `TXD_SSH_TARGET`. The wrapper fires its birth one-shot
 on the loopback proxy exactly as for local birth, verifies the remote
 instruction package digest, then creates and attaches a one-pane
 `tmux new-session -A` envelope on the target named from the seat and the
 nonce; the engine lives in that envelope with `IMPERIUM_MACHINE` naming the
 target machine.
+
+When txd reaps or resets an agent, it clears the tmux session default and removes
+`AGENT_ID` from the replacement process; an unbound seat never inherits the tmux
+server's identity or the identity of its previous binding.
 
 The placement adapter attests the local wrapper through the unchanged `/proc`
 ancestry walk and audits the remote half by correlation at Door 1: the seat

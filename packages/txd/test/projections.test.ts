@@ -42,3 +42,26 @@ test('seat_cleared returns a live seat to the freelist', async () => {
   expect(p.freelist).toEqual([{ seat_id: 'seatR', pane_state: 'live' }]);
   await s.close();
 });
+
+test('seat_cleared releases the launch composition that acquired the seat', async () => {
+  const s = new MemoryEventStore();
+  await s.append(e({ entity_id: 'seatR', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
+  await s.append(e({
+    entity_id: 'seatR',
+    event_type: 'reg.launch_composed',
+    payload: {
+      pane_generation: 'pane-generation-1',
+      agent_id: 'agent-1',
+      launch_nonce: 'nonce-1',
+      target_machine: null,
+      worktree: null,
+    },
+  }));
+  expect(buildProjections(await s.readAll()).launchCompositions.has('seatR')).toBe(true);
+
+  await s.append(e({ entity_id: 'seatR', event_type: 'reg.seat_cleared', payload: {} }));
+  const p = buildProjections(await s.readAll());
+  expect(p.launchCompositions.has('seatR')).toBe(false);
+  expect(p.freelist).toEqual([{ seat_id: 'seatR', pane_state: 'live' }]);
+  await s.close();
+});

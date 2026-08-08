@@ -85,6 +85,81 @@ test('a page target autofills the first free seat in declared order', async () =
   expect(tmux.seatEngine('palace:W')!.launchNonce).toMatch(/^[0-9a-f-]{36}$/);
 });
 
+test('a composed birth owns its freelist seat before the wrapper becomes observable', async () => {
+  const { tmux, published, d } = setup();
+  await d.constructEstate();
+  await d.dispatch(request({ kind: 'page', page: 'palace' }));
+
+  // The wrapper has not become observable yet: tmux still reports the bare
+  // shell. The durable launch composition must nevertheless keep a second
+  // dispatch from silently replacing the first birth.
+  tmux.setCommand('palace:W', 'bash');
+  await d.dispatch({
+    ...request({ kind: 'page', page: 'palace' }),
+    dispatch_id: '8e0a0e2e-bae2-4eca-a666-5532509228d1',
+    agent_id: 'd0debb42-d54f-434f-aeb4-345e6b54df91',
+  });
+
+  expect(published).toMatchObject([
+    { type: 'agent.dispatch_attested', payload: { seat_id: 'palace:W' } },
+    { type: 'agent.dispatch_attested', payload: { seat_id: 'palace:N' } },
+  ]);
+  expect(tmux.seatEngine('palace:W')?.agentId).toBe(AGENT_ID);
+  expect(tmux.seatEngine('palace:N')?.agentId).toBe('d0debb42-d54f-434f-aeb4-345e6b54df91');
+});
+
+test('a named seat with a composed birth refuses loud while registration is pending', async () => {
+  const { tmux, published, d } = setup();
+  await d.constructEstate();
+  await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W' }));
+  tmux.setCommand('palace:W', 'bash');
+  published.length = 0;
+
+  await d.dispatch({
+    ...request({ kind: 'seat', seat_id: 'palace:W' }),
+    dispatch_id: '8e0a0e2e-bae2-4eca-a666-5532509228d1',
+    agent_id: 'd0debb42-d54f-434f-aeb4-345e6b54df91',
+  });
+
+  expect(published).toEqual([{
+    type: 'agent.dispatch_refused',
+    payload: {
+      schema_version: AGENT_SCHEMA_VERSION,
+      dispatch_id: '8e0a0e2e-bae2-4eca-a666-5532509228d1',
+      machine: 'k12-personal',
+      target: { kind: 'seat', seat_id: 'palace:W' },
+      engine: 'claude',
+      reason: 'seat_launching',
+      seats: [{ seat_id: 'palace:W', state: 'launching' }],
+    },
+  }]);
+});
+
+test('a scoped reset releases an unbound composed birth for redispatch', async () => {
+  const { tmux, published, d } = setup();
+  await d.constructEstate();
+  await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W' }));
+
+  expect((await d.resetEstateScope({
+    schema_version: 11,
+    force: true,
+    scope: 'pane',
+    pane: 'palace:W',
+  })).ok).toBe(true);
+  published.length = 0;
+  await d.dispatch({
+    ...request({ kind: 'seat', seat_id: 'palace:W' }),
+    dispatch_id: '8e0a0e2e-bae2-4eca-a666-5532509228d1',
+    agent_id: 'd0debb42-d54f-434f-aeb4-345e6b54df91',
+  });
+
+  expect(published).toMatchObject([{
+    type: 'agent.dispatch_attested',
+    payload: { seat_id: 'palace:W' },
+  }]);
+  expect(tmux.seatEngine('palace:W')?.agentId).toBe('d0debb42-d54f-434f-aeb4-345e6b54df91');
+});
+
 test('a page target to an undeclared page is refused, not guessed', async () => {
   const { published, d } = setup();
   await d.constructEstate();

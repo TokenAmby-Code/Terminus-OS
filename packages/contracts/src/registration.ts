@@ -268,6 +268,7 @@ export type DispatchAttested = z.infer<typeof DispatchAttestedSchema>;
 // One candidate seat's disqualifier, as the estate store and tmux attest it.
 export const SeatDisqualifierSchema = z.enum([
   "bound",
+  "launching",
   "decommissioned",
   "reset_pending",
   "dead",
@@ -289,6 +290,7 @@ export const DispatchRefusedSchema = z.object({
     "seat_absent",
     "no_free_seat",
     "seat_bound",
+    "seat_launching",
     "seat_decommissioned",
     "seat_reset_pending",
     "pane_dead",

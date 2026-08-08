@@ -19,10 +19,6 @@ export const TXD_WINDOWS = {
 
 export type TxdPage = keyof typeof TXD_WINDOWS;
 
-// The Emperor's ssh pane. The remote-close verb hard-refuses this seat
-// regardless of binding state or force — closing it would sever the operator.
-export const EMPEROR_SEAT = 'palace:N';
-
 export function isTxdPage(value: string): value is TxdPage {
   return Object.hasOwn(TXD_WINDOWS, value);
 }

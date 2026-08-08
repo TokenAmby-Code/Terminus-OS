@@ -95,6 +95,22 @@ test('close resolves by agent id as well as seat id', async () => {
   expect(res.verdicts[0]).toMatchObject({ seat_id: 'somnium:NE', agent_id: 'w-1', closed: true });
 });
 
+test('palace seats close by seat id and agent id like every other estate seat', async () => {
+  const { store, d } = setup();
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'iron-hands');
+  await bind(d, store, 'palace:N', 'raven-guard');
+
+  const closed = await d.close(req({ targets: ['palace:W', 'raven-guard'], force: true }));
+
+  expect(closed).toMatchObject({ ok: true, closed_count: 2, refused_count: 0 });
+  expect(closed.verdicts).toMatchObject([
+    { target: 'palace:W', seat_id: 'palace:W', agent_id: 'iron-hands', closed: true },
+    { target: 'raven-guard', seat_id: 'palace:N', agent_id: 'raven-guard', closed: true },
+  ]);
+  expect(buildProjections(await store.readAll()).currentBindings.map((binding) => binding.agent_id)).toEqual(['ov-1']);
+});
+
 test('an astartes source is refused and the refusal names the required rank', async () => {
   const { store, d } = setup();
   await bind(d, store, 'reservists:W', 'w-1');
@@ -117,20 +133,6 @@ test('an unregistered or unknown source is refused loud', async () => {
     expect(res).toMatchObject({ ok: false, verdicts: [] });
     expect(res.reason).toContain('source_not_registered');
   }
-});
-
-test('palace:N is never closable — hard refusal by seat id and by agent id, force included', async () => {
-  const { store, d } = setup();
-  await overseer(d, store);
-  await bind(d, store, 'palace:N', 'emp-adjacent');
-  for (const target of ['palace:N', 'emp-adjacent']) {
-    const res = await d.close(req({ targets: [target], force: true }));
-    expect(res.ok).toBe(false);
-    expect(res.verdicts[0]).toMatchObject({ target, closed: false });
-    expect(res.verdicts[0]!.reason).toContain('palace:N');
-  }
-  const p = buildProjections(await store.readAll());
-  expect(p.currentBindings.map((b) => b.seat_id)).toContain('palace:N');
 });
 
 test('a live engine refuses gracefully; force overrides for a hung agent', async () => {
@@ -327,7 +329,7 @@ test('--page filter closes every closable agent on the page and nothing else', a
   expect(bound).toContain('ov-1');
 });
 
-test('--all-idle sweeps estate-wide but never selects an overseer, an unregistered binding, or palace:N', async () => {
+test('--all-idle sweeps estate-wide but never selects an overseer or an unregistered binding', async () => {
   const { store, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'reservists:W', 'w-1');
@@ -336,7 +338,6 @@ test('--all-idle sweeps estate-wide but never selects an overseer, an unregister
   await bind(d, store, 'somnium:S', 'w-busy');
   await working(store, 'w-busy');
   await bind(d, store, 'reservists:E', 'w-unreg', { registered: false });
-  await bind(d, store, 'palace:N', 'emp-adjacent');
   await bind(d, store, 'council:pax', 'ov-2', { rank: 'overseer', persona: 'pax' });
 
   const res = await d.close(req({ all_idle: true }));
@@ -344,7 +345,7 @@ test('--all-idle sweeps estate-wide but never selects an overseer, an unregister
   expect(res.verdicts.map((v) => v.agent_id).sort()).toEqual(['w-1', 'w-2']);
 
   const bound = buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id).sort();
-  expect(bound).toEqual(['emp-adjacent', 'ov-1', 'ov-2', 'w-busy', 'w-unreg']);
+  expect(bound).toEqual(['ov-1', 'ov-2', 'w-busy', 'w-unreg']);
 });
 
 test('a filter matching nothing refuses loud — no_targets, no events', async () => {

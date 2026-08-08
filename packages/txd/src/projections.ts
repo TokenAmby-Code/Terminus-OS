@@ -191,6 +191,17 @@ export function buildProjections(events: EventRecord[]): Projections {
       }
       case 'reg.seat_cleared':
         bindingBySeat.delete(e.entity_id);
+        launchCompositions.delete(e.entity_id);
+        transportClaims.delete(e.entity_id);
+        break;
+      case 'estate.scoped_reset_completed':
+        if (Array.isArray(e.payload.seats)) {
+          for (const seat of e.payload.seats) {
+            if (typeof seat !== 'string') continue;
+            launchCompositions.delete(seat);
+            transportClaims.delete(seat);
+          }
+        }
         break;
       case 'reg.seat_decommissioned':
         decommissionedSeats.add(e.entity_id);

@@ -360,7 +360,13 @@ function spawnTmuxProcess(
   args: string[],
   options: { stdin?: 'pipe' | undefined; stdout: 'pipe'; stderr: 'pipe' },
 ) {
-  return Bun.spawn(['tmux', '-L', socket, ...args], options);
+  // The control client is infrastructure, never an agent. Do not let the
+  // daemon's invoking shell donate its identity to tmux's global/session
+  // environment; bind is the only path that may add AGENT_ID, explicitly via
+  // respawn-pane -e below.
+  const environment = { ...process.env };
+  delete environment[AGENT_ID_ENV];
+  return Bun.spawn(['tmux', '-L', socket, ...args], { ...options, env: environment });
 }
 
 async function spawnTmux(
@@ -564,10 +570,26 @@ export class RealTmux implements TmuxControlPlane {
     this.composerObserveTimeoutMs = options.composerObserveTimeoutMs ?? 10_000;
   }
 
-  private paneEnvironment(seatId: string): string[] {
+  private paneEnvironment(seatId: string, agentId?: string): string[] {
+    // Pane-local environment is the inheritance boundary for every process and
+    // every fresh shell in this workspace. Bind adds identity explicitly;
+    // server/session defaults and teardown keep bare panes clear below.
     const environment = ['-e', `${PANE_ID_ENV}=${seatId}`];
+    if (agentId !== undefined) environment.push('-e', `${AGENT_ID_ENV}=${agentId}`);
     if (this.machine) environment.push('-e', `${MACHINE_ENV}=${this.machine}`);
     return environment;
+  }
+
+  /** Keep tmux's inherited defaults from supplying an identity to bare panes. */
+  private async clearDefaultAgentEnvironment(target?: string): Promise<boolean> {
+    const args = target
+      ? ['set-environment', '-u', '-t', target, AGENT_ID_ENV]
+      : ['set-environment', '-g', '-u', AGENT_ID_ENV];
+    return (await this.command(
+      'clear_agent_environment',
+      target ?? 'server',
+      args,
+    )).code === 0;
   }
 
   private stderrCategory(result: TmuxCommandResult): TmuxAuditRecord['stderr_category'] {
@@ -1173,6 +1195,9 @@ export class RealTmux implements TmuxControlPlane {
     if (!(await this.reachable())) {
       throw new Error('txd tmux server is not externally owned; tx-estate.service must start it before txd');
     }
+    if (!(await this.clearDefaultAgentEnvironment())) {
+      throw new Error('txd could not clear the tmux server agent environment');
+    }
     const rows = await this.estateRows();
     if (rows.length > 0) {
       const recoverable = rows.every((row) => {
@@ -1180,6 +1205,9 @@ export class RealTmux implements TmuxControlPlane {
         return row.session === TXD_SESSION && seats !== undefined && (row.seat === '' || seats.includes(row.seat));
       });
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      if (!(await this.clearDefaultAgentEnvironment(TXD_SESSION))) {
+        throw new Error('txd could not clear the estate session agent environment');
+      }
       // Canonical recovery is enforcement, not assertion. Every page is driven
       // to canonical shape against the same predicate that later accepts it;
       // a repair trigger weaker than the acceptance predicate leaves drift that
@@ -1281,6 +1309,9 @@ export class RealTmux implements TmuxControlPlane {
     if (!(await this.reachable())) {
       throw new Error('txd tmux server is not externally owned; refusing to spawn it inside txd');
     }
+    if (!(await this.clearDefaultAgentEnvironment())) {
+      throw new Error('txd tmux createSeat could not clear the server agent environment');
+    }
     // Sanitized tmux session name (canonical id may contain `:`); the true id
     // lives in the pane option only.
     const safe = `seat_${seatId.replace(/[^A-Za-z0-9_]/g, '_')}`;
@@ -1335,13 +1366,14 @@ export class RealTmux implements TmuxControlPlane {
     // Clear and attest the identity signal before killing the bound process.
     // If respawn then fails, restore the still-current binding's physical style.
     if (!(await this.setSeatTint(seatId, null))) return false;
+    if (!(await this.clearDefaultAgentEnvironment(paneId))) return false;
     // -k kills the pane's current command while reusing the pane and its
     // @canonical_id option. tmux 3.5a does not preserve the pane-local
     // environment across respawn, so the physical authority must restamp the
     // same canonical PANE_ID on every replacement process.
     const r = await this.command('reap_seat', seatId, [
       'respawn-pane', '-k', ...this.paneEnvironment(seatId), '-t', paneId,
-      '/usr/bin/env', `${PANE_ID_ENV}=${seatId}`, shell,
+      '/usr/bin/env', '-u', AGENT_ID_ENV, `${PANE_ID_ENV}=${seatId}`, shell,
     ]);
     if (r.code === 0) return true;
     const restored = stylesToRestore === undefined
@@ -1359,9 +1391,10 @@ export class RealTmux implements TmuxControlPlane {
     const shell = await this.defaultShell(seatId);
     if (!shell) return false;
     if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return false;
+    if (!(await this.clearDefaultAgentEnvironment(paneId))) return false;
     if ((await this.command('reset_seat_process', seatId, [
       'respawn-pane', '-k', ...this.paneEnvironment(seatId), '-t', paneId,
-      '/usr/bin/env', `${PANE_ID_ENV}=${seatId}`, shell,
+      '/usr/bin/env', '-u', AGENT_ID_ENV, `${PANE_ID_ENV}=${seatId}`, shell,
     ])).code !== 0) return false;
     const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
     return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
@@ -1423,7 +1456,6 @@ export class RealTmux implements TmuxControlPlane {
     if (!paneId) return false;
     const environment = [
       `${PANE_ID_ENV}=${this.shellQuote(launch.seatId)}`,
-      `${AGENT_ID_ENV}=${this.shellQuote(launch.agentId)}`,
       `${LAUNCH_NONCE_ENV}=${this.shellQuote(launch.launchNonce)}`,
       ...(launch.sshTarget ? [`${SSH_TARGET_ENV}=${this.shellQuote(launch.sshTarget)}`] : []),
     ].join(' ');
@@ -1435,7 +1467,7 @@ export class RealTmux implements TmuxControlPlane {
     ].join(' ');
     const result = await this.command('start_seat_engine', launch.seatId, [
       'respawn-pane', '-k',
-      ...this.paneEnvironment(launch.seatId), '-t', paneId, command,
+      ...this.paneEnvironment(launch.seatId, launch.agentId), '-t', paneId, command,
     ]);
     return result.code === 0;
   }

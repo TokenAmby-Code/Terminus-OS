@@ -4,7 +4,19 @@ import { join, relative } from 'node:path';
 import { resolve } from 'node:path';
 
 const root = resolve(import.meta.dir, '../../..');
-const removedIdentity = /TX_INSTANCE_ID|FLEET_INSTANCE_ID|instance_id|wrapper_id|source_instance|subscriber_instance|target_instance|STATIC_PERSONAS|static[_ -]persona|static[_ -]handshake|static[_ -]launch/i;
+const removedIdentity = new RegExp([
+  ['TX', 'INSTANCE', 'ID'].join('_'),
+  'FLEET_INSTANCE_ID',
+  'instance_id',
+  'wrapper_id',
+  'source_instance',
+  'subscriber_instance',
+  'target_instance',
+  'STATIC_PERSONAS',
+  'static[_ -]persona',
+  'static[_ -]handshake',
+  'static[_ -]launch',
+].join('|'), 'i');
 
 function runtimeFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
