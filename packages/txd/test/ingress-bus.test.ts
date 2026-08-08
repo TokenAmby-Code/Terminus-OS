@@ -404,7 +404,7 @@ test('a delayed prompt from a retired delivery target dead-letters its confirmat
     expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
     expect(events.filter((event) => event.event_type === 'act.comm_delivery_confirmation_dead_lettered')).toEqual([
       expect.objectContaining({
-        entity_id: `${messageId}:${retiredTarget}`,
+        entity_id: `delivery-confirmation-dead-letter:${messageId}:${retiredTarget}`,
         payload: expect.objectContaining({
           bus_event_seq: 173900,
           message_id: messageId,
@@ -420,9 +420,72 @@ test('a delayed prompt from a retired delivery target dead-letters its confirmat
     expect(tmux.sends('council:custodes')).toEqual([]);
 
     // The terminal fact is idempotent under any duplicate delivery.
-    expect((await post(delayed)).status).toBe(200);
+    const duplicate = await post(delayed);
+    expect(duplicate.status).toBe(200);
+    expect(await duplicate.json()).toMatchObject({
+      receipt: { asserted: [], dead_lettered: [] },
+    });
     expect((await store.readAll()).filter((event) =>
       event.event_type === 'act.comm_delivery_confirmation_dead_lettered')).toHaveLength(1);
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('a delayed prompt for an unbound target dead-letters without inventing retirement', async () => {
+  const { store, d, srv, post } = setup();
+  const sender = '889c6bdc-cb4a-45dd-8acc-bcb01fbb98eb';
+  const unboundTarget = 'd2d65cae-6851-4529-a9df-ad7f7e8e8c72';
+  try {
+    await d.launch({ seat_id: 'council:custodes', schema_version: SCHEMA_VERSION, identity: sender, persona: 'p', tint: '#111111' });
+    await store.append({
+      entity_type: 'agent', entity_id: sender, event_type: 'reg.agent_registered',
+      payload: { persona: 'p', rank: 'astartes', commander: null },
+      provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-08T18:40:00.000Z',
+    });
+    const messageId = crypto.randomUUID();
+    await store.append({
+      entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted',
+      payload: {
+        source_agent_id: sender,
+        target_agent_ids: [unboundTarget],
+        targets: [{ agent_id: unboundTarget, seat_id: 'palace:N', persona: 'p' }],
+        ask_id: null,
+        reply_to_ask_id: null,
+        kind: 'message',
+        name: null,
+        rendered_frame: null,
+        message: 'orphaned control fact',
+      },
+      provenance: { source: 'wrapper', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-08T18:40:00.000Z',
+    });
+    const res = await post(delivery('hook.user_prompt_submit', {
+      agent_id: unboundTarget,
+      session_id: '019fe2a6-9a2f-7551-b32c-308682057324',
+      prompt: `[tx comm ${messageId} from ${sender}]\norphaned control fact`,
+    }, 173901));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      receipt: { asserted: [messageId], dead_lettered: [messageId] },
+    });
+    const deadLetter = (await store.readAll()).find((event) =>
+      event.event_type === 'act.comm_delivery_confirmation_dead_lettered');
+    expect(deadLetter).toMatchObject({
+      entity_id: `delivery-confirmation-dead-letter:${messageId}:${unboundTarget}`,
+      payload: {
+        bus_event_seq: 173901,
+        delivery_target_agent_id: unboundTarget,
+        delivery_target_seat_id: null,
+        delivery_target_pane_generation: null,
+        delivery_target_birth_generation: null,
+        reason: 'delivery_target_unbound',
+      },
+    });
+    expect((await store.readAll()).some((event) =>
+      event.entity_id === unboundTarget && event.event_type === 'reg.retired')).toBe(false);
   } finally {
     srv.stop(true);
   }

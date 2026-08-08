@@ -71,6 +71,7 @@ import {
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
 } from '@terminus-os/contracts';
+import { busEventSeqFromReceipt } from './bus-receipt.ts';
 import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
@@ -1403,18 +1404,17 @@ export class Daemon {
           event.event_type === 'reg.bound' && event.payload.agent_id === hook.agent_id);
         const deadLettered: string[] = [];
         for (const messageId of matchedMessageIds) {
-          const deadLetterId = `${messageId}:${hook.agent_id}`;
+          const deadLetterId = `delivery-confirmation-dead-letter:${messageId}:${hook.agent_id}`;
           if (events.some((event) => event.entity_id === deadLetterId
             && event.event_type === 'act.comm_delivery_confirmation_dead_lettered')) continue;
           const accepted = events.find((event) =>
             event.entity_id === messageId && event.event_type === 'reg.comm_accepted')!;
-          const busSeq = receipt?.match(/^bus:(\d+)$/)?.[1];
           await this.store.append({
             entity_type: 'assertion',
             entity_id: deadLetterId,
             event_type: 'act.comm_delivery_confirmation_dead_lettered',
             payload: {
-              bus_event_seq: busSeq === undefined ? null : Number(busSeq),
+              bus_event_seq: busEventSeqFromReceipt(receipt),
               message_id: messageId,
               source_agent_id: accepted.payload.source_agent_id,
               delivery_target_agent_id: hook.agent_id,
