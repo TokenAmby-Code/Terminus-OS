@@ -219,6 +219,11 @@ const ENGINE_IDLE_COMPOSER_PAINTS: Record<'claude' | 'codex', readonly RegExp[]>
     /^Find and fix a bug in @filename$/,
     /^Write tests for @filename$/,
     /^Improve documentation in @filename$/,
+    /^Run \/review on my current changes$/,
+    /^Use \/skills to list available skills$/,
+    /^Check recently modified functions for compatibility$/,
+    /^How many files have been modified\?$/,
+    /^Will this algorithm scale well\?$/,
   ],
 };
 
