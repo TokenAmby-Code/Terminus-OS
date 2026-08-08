@@ -210,21 +210,24 @@ const MACHINE_ENV = 'IMPERIUM_MACHINE';
 const MAX_PROCESS_ANCESTRY = 256;
 type ProcessWitness = { pid: number; parent_pid: number; start_ticks: string };
 
-const ENGINE_IDLE_COMPOSER_PAINTS: Record<'claude' | 'codex', readonly RegExp[]> = {
-  claude: [/^Try ".+"$/],
-  codex: [
-    /^Explain this codebase$/,
-    /^Summarize recent commits$/,
-    /^Implement \{feature\}$/,
-    /^Find and fix a bug in @filename$/,
-    /^Write tests for @filename$/,
-    /^Improve documentation in @filename$/,
-    /^Run \/review on my current changes$/,
-    /^Use \/skills to list available skills$/,
-    /^Check recently modified functions for compatibility$/,
-    /^How many files have been modified\?$/,
-    /^Will this algorithm scale well\?$/,
-  ],
+const ENGINE_IDLE_COMPOSER_PAINTS: Record<'claude' | 'codex', {
+  patterns: readonly RegExp[];
+  needles: readonly string[];
+}> = {
+  claude: { patterns: [/^Try ".+"$/], needles: [] },
+  codex: { patterns: [], needles: [
+    'Explain this codebase',
+    'Summarize recent commits',
+    'Implement {feature}',
+    'Find and fix a bug in @filename',
+    'Write tests for @filename',
+    'Improve documentation in @filename',
+    'Run /review on my current changes',
+    'Use /skills to list available skills',
+    'Check recently modified functions for compatibility',
+    'How many files have been modified?',
+    'Will this algorithm scale well?',
+  ] },
 };
 
 async function processWitness(pid: number): Promise<ProcessWitness | null> {
@@ -1624,8 +1627,11 @@ export class RealTmux implements TmuxControlPlane {
     if (composer === null) return false;
     const paint = composer.trim().replace(/\s+/g, ' ');
     if (paint === '') return true;
-    return engine !== undefined
-      && ENGINE_IDLE_COMPOSER_PAINTS[engine].some((pattern) => pattern.test(paint));
+    if (engine === undefined) return false;
+    const profile = ENGINE_IDLE_COMPOSER_PAINTS[engine];
+    return profile.patterns.some((pattern) => pattern.test(paint))
+      || profile.needles.some((needle) => needle === paint
+        || paint.length >= 16 && needle.startsWith(paint));
   }
 
   /**
