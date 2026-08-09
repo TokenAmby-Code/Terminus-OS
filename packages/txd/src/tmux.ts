@@ -105,7 +105,7 @@ export interface TmuxControlPlane {
   listSeats(): Promise<SeatObservation[]>;
   /** Create/repair the declared estate and report every page whose processes were reconstructed. */
   ensureEstate(): Promise<EstateEnsureResult>;
-  /** Classify only exact known generations before any topology mutation. */
+  /** Classify the observed estate; an unrecognized topology is foreign, never repaired blind. */
   estateGeneration(): Promise<EstateGeneration>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
@@ -314,6 +314,7 @@ type EstateRow = {
   windowWidth: number;
   windowHeight: number;
 };
+
 export type TmuxCommandResult = { code: number; stdout: string; stderr: string };
 type TmuxRunner = (socket: string, args: string[], stdin?: Uint8Array) => Promise<TmuxCommandResult>;
 type TmuxBinaryResult = { code: number; stdout: Uint8Array; stderr: string; overflow?: boolean };
