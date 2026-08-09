@@ -324,7 +324,7 @@ export type PerpetualSeatVacant = z.infer<typeof PerpetualSeatVacantSchema>;
 // authority split; lifecycled owns the proactive leg. Consumers terminalize
 // the agent row this identifies; birth_generation and pane_generation are
 // nullable because txd attests what the binding actually carried.
-export const RETIREMENT_CAUSES = ["close", "estate_reset", "topology_migration"] as const;
+export const RETIREMENT_CAUSES = ["close", "estate_reset"] as const;
 export const RetirementCauseSchema = z.enum(RETIREMENT_CAUSES);
 export type RetirementCause = z.infer<typeof RetirementCauseSchema>;
 

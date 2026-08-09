@@ -219,19 +219,6 @@ The units' boundary and directive lines (WorkingDirectory under the box's
 `live/` checkout, ordering, condition guard, NoNewPrivileges split, KillMode,
 ExecStart, and PrivateTmp absence) are pinned in `test/systemd-unit.test.ts`.
 
-### Migrating an existing estate
-
-At boot, txd recognizes only the exact preceding generation: the ruled
-five-seat Council and two-seat Mechanicus windows alongside the unchanged
-estate pages. It persists `estate.topology_migration_requested` before any
-tmux mutation, rebuilds Council as the ruled 2×2 page, retires Mechanicus,
-decommissions the five displaced canonical seats in event truth, and records
-completion. A boot interrupted after the request resumes deterministically.
-Any unrequested partial migration or foreign shape fails before mutation.
-
-The migration is page-scoped: non-Council panes and processes are preserved.
-Do not kill the tmux server or clear the estate socket for this migration.
-
 ## Develop
 
 Bun-native — TypeScript source runs directly, no build step. From the repo root:

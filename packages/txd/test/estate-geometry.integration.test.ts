@@ -254,34 +254,6 @@ describe('disposable canonical estate geometry', () => {
     expect(failure).not.toMatch(/canonical estate recovery postcondition failed/);
   });
 
-  test('recognizes the exact live five-seat Council plus two-seat Mechanicus generation', async () => {
-    const socket = `txd-geometry-previous-${process.pid}`;
-    sockets.push(socket);
-    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
-    const adapter = new RealTmux(socket);
-    await adapter.ensureEstate();
-
-    const seed = (await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{pane_id}')).split('\n')[0]!;
-    await tmux(socket, 'kill-pane', '-a', '-t', seed);
-    const councilSeats = [
-      'council:custodes', 'council:pax', 'council:malcador',
-      'council:true-terminal', 'council:administratum',
-    ];
-    const councilPanes = [seed];
-    for (let index = 1; index < councilSeats.length; index += 1) {
-      councilPanes.push(await tmux(socket, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', seed));
-    }
-    for (const [index, pane] of councilPanes.entries()) {
-      await tmux(socket, 'set-option', '-p', '-t', pane, '@canonical_id', councilSeats[index]!);
-    }
-    const mechanicus = await tmux(socket, 'new-window', '-d', '-P', '-F', '#{pane_id}', '-t', 'main', '-n', 'mechanicus');
-    const orchestrator = await tmux(socket, 'split-window', '-h', '-d', '-P', '-F', '#{pane_id}', '-t', mechanicus);
-    await tmux(socket, 'set-option', '-p', '-t', mechanicus, '@canonical_id', 'mechanicus:fabricator-general');
-    await tmux(socket, 'set-option', '-p', '-t', orchestrator, '@canonical_id', 'mechanicus:orchestrator');
-
-    expect(await adapter.estateGeneration()).toBe('council-mechanicus');
-  });
-
   test('starts every canonical estate pane in the user home directory', async () => {
     const socket = `txd-cwd-${process.pid}`;
     sockets.push(socket);

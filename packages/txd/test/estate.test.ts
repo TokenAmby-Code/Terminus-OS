@@ -61,18 +61,6 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(board).toHaveLength(TXD_ESTATE.length);
   expect(board.map((r) => r.seat_id).sort()).toEqual([...TXD_ESTATE].sort());
   expect(board.every((r) => r.binding === 'unbound')).toBe(true);
-  expect((await store.readAll()).filter((event) => event.event_type === 'reg.seat_decommissioned')).toHaveLength(5);
-
-  const before = await store.count();
-  const oldSeat = await d.launch({
-    seat_id: 'mechanicus:fabricator-general',
-    schema_version: SCHEMA_VERSION,
-    identity: 'forged-old-fg',
-    persona: 'fabricator-general',
-    tint: '#1',
-  });
-  expect(oldSeat.reason).toContain('seat_decommissioned');
-  expect(await store.count()).toBe(before);
 });
 
 test('canonical seat ids pin the four-seat Council generation', () => {
@@ -170,7 +158,7 @@ test('keeps attested seats and backfills missing facts for an existing canonical
   expect(res.backfilled).toEqual(TXD_ESTATE.filter((s) => !pre.includes(s)));
   expect(res.failed).toEqual([]);
   // Only the absent seats appended a new event.
-  expect(await store.count()).toBe(before + (TXD_ESTATE.length - pre.length) + 5);
+  expect(await store.count()).toBe(before + (TXD_ESTATE.length - pre.length));
 });
 
 test('backfills the torn state — pane present but its pane_created fact was lost', async () => {

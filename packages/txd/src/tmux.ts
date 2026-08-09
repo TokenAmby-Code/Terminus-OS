@@ -28,7 +28,7 @@ export type EstateEnsureResult = {
   state: 'created' | 'existing';
   rebuilt_pages: TxdPage[];
 };
-export type EstateGeneration = 'empty' | 'canonical' | 'council-mechanicus' | 'migration-interrupted' | 'recoverable' | 'foreign';
+export type EstateGeneration = 'empty' | 'canonical' | 'recoverable' | 'foreign';
 export type SeatEngineLaunch = {
   seatId: string;
   engine: 'claude' | 'codex';
@@ -105,10 +105,8 @@ export interface TmuxControlPlane {
   listSeats(): Promise<SeatObservation[]>;
   /** Create/repair the declared estate and report every page whose processes were reconstructed. */
   ensureEstate(): Promise<EstateEnsureResult>;
-  /** Classify only exact known generations before any topology mutation. */
+  /** Classify the observed estate; an unrecognized topology is foreign, never repaired blind. */
   estateGeneration(): Promise<EstateGeneration>;
-  /** Execute/resume the one approved Council topology migration. */
-  migrateCouncil(pending: boolean): Promise<boolean>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
   /** Kill the seat's pane (teardown). Idempotent. */
@@ -316,13 +314,6 @@ type EstateRow = {
   windowWidth: number;
   windowHeight: number;
 };
-const PREVIOUS_WINDOWS = {
-  reservists: ['reservists:W', 'reservists:N', 'reservists:S', 'reservists:E'],
-  palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
-  somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
-  council: ['council:custodes', 'council:pax', 'council:malcador', 'council:true-terminal', 'council:administratum'],
-  mechanicus: ['mechanicus:fabricator-general', 'mechanicus:orchestrator'],
-} as const;
 
 export type TmuxCommandResult = { code: number; stdout: string; stderr: string };
 type TmuxRunner = (socket: string, args: string[], stdin?: Uint8Array) => Promise<TmuxCommandResult>;
@@ -965,16 +956,6 @@ export class RealTmux implements TmuxControlPlane {
     return true;
   }
 
-  private exactShape(rows: EstateRow[], windows: Record<string, readonly string[]>): boolean {
-    const expected = Object.entries(windows)
-      .flatMap(([window, seats]) => seats.map((seat) => `${TXD_SESSION}\t${window}\t${seat}`))
-      .sort();
-    const actual = rows.map((row) => `${row.session}\t${row.window}\t${row.seat}`).sort();
-    return actual.length === expected.length
-      && actual.every((row, index) => row === expected[index])
-      && Object.entries(windows).every(([window, seats]) => this.pageGeometryMatches(window, seats, rows));
-  }
-
   private isCanonicalEstate(rows: EstateRow[]): boolean {
     return this.canonicalDivergence(rows) === null;
   }
@@ -1022,23 +1003,11 @@ export class RealTmux implements TmuxControlPlane {
     const rows = await this.estateRows();
     if (rows.length === 0) return 'empty';
     if (this.isCanonicalEstate(rows)) return 'canonical';
-    if (this.exactShape(rows, PREVIOUS_WINDOWS)) return 'council-mechanicus';
-    if (this.exactShape(rows, { ...TXD_WINDOWS, mechanicus: PREVIOUS_WINDOWS.mechanicus })) return 'migration-interrupted';
     const recoverable = rows.every((row) => {
       const seats = TXD_WINDOWS[row.window as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
       return row.session === TXD_SESSION && seats !== undefined && (row.seat === '' || seats.includes(row.seat));
     });
     return recoverable ? 'recoverable' : 'foreign';
-  }
-
-  async migrateCouncil(pending: boolean): Promise<boolean> {
-    const generation = await this.estateGeneration();
-    if (generation === 'canonical') return pending;
-    if (generation !== 'council-mechanicus' && !(pending && generation === 'migration-interrupted')) return false;
-    if (generation === 'council-mechanicus' && !(await this.rebuildPage('council'))) return false;
-    const mechanicus = await this.command('retire_page', 'mechanicus', ['kill-window', '-t', `${TXD_SESSION}:mechanicus`]);
-    if (mechanicus.code !== 0 && this.stderrCategory(mechanicus) !== 'not_found') return false;
-    return this.isCanonicalEstate(await this.estateRows());
   }
 
   private async tag(paneId: string, seatId: string): Promise<void> {
@@ -2090,22 +2059,11 @@ export class FakeTmux implements TmuxControlPlane {
   async estateGeneration(): Promise<EstateGeneration> {
     if (this.shape.sessions.length === 0) return 'empty';
     if (JSON.stringify(this.shape.windows) === JSON.stringify(TXD_WINDOWS)) return 'canonical';
-    if (JSON.stringify(this.shape.windows) === JSON.stringify(PREVIOUS_WINDOWS)) return 'council-mechanicus';
-    if (JSON.stringify(this.shape.windows) === JSON.stringify({ ...TXD_WINDOWS, mechanicus: [...PREVIOUS_WINDOWS.mechanicus] })) return 'migration-interrupted';
     const recoverable = Object.entries(this.shape.windows).every(([page, seats]) => {
       const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
       return expected !== undefined && seats.every((seat) => expected.includes(seat));
     });
     return recoverable ? 'recoverable' : 'foreign';
-  }
-  async migrateCouncil(pending: boolean): Promise<boolean> {
-    const generation = await this.estateGeneration();
-    if (generation === 'canonical') return pending;
-    if (generation !== 'council-mechanicus' && !(pending && generation === 'migration-interrupted')) return false;
-    if (generation === 'council-mechanicus' && !(await this.rebuildPage('council'))) return false;
-    delete this.shape.windows.mechanicus;
-    for (const seat of PREVIOUS_WINDOWS.mechanicus) this.seats.delete(seat);
-    return (await this.estateGeneration()) === 'canonical';
   }
   estateShape(): { sessions: string[]; windows: Record<string, string[]> } {
     return structuredClone(this.shape);
@@ -2113,46 +2071,6 @@ export class FakeTmux implements TmuxControlPlane {
   seedNonCanonicalEstate(): void {
     this.shape = { sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } };
     this.seats.set('palace:W', { pane: 'live', generation: crypto.randomUUID() });
-  }
-  seedLegacyEstate(): void {
-    this.shape = {
-      sessions: [TXD_SESSION],
-      windows: {
-        palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
-        somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
-        'council:custodes': ['council:custodes'],
-        'council:pax': ['council:pax'],
-        'council:malcador': ['council:malcador'],
-        'council:true-terminal': ['council:true-terminal'],
-        'council:administratum': ['council:administratum'],
-        'mechanicus:fabricator-general': ['mechanicus:fabricator-general'],
-        'mechanicus:orchestrator': ['mechanicus:orchestrator'],
-      },
-    };
-    for (const seats of Object.values(this.shape.windows)) {
-      for (const seat of seats) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
-    }
-  }
-  seedCouncilMechanicusEstate(): void {
-    this.shape = {
-      sessions: [TXD_SESSION],
-      windows: Object.fromEntries(Object.entries(PREVIOUS_WINDOWS).map(([page, seats]) => [page, [...seats]])),
-    };
-    for (const seats of Object.values(this.shape.windows)) {
-      for (const seat of seats) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
-    }
-  }
-  seedInterruptedCouncilMigration(): void {
-    this.shape = {
-      sessions: [TXD_SESSION],
-      windows: {
-        ...Object.fromEntries(Object.entries(TXD_WINDOWS).map(([page, seats]) => [page, [...seats]])),
-        mechanicus: [...PREVIOUS_WINDOWS.mechanicus],
-      },
-    };
-    for (const seats of Object.values(this.shape.windows)) {
-      for (const seat of seats) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
-    }
   }
   async createSeat(seatId: string): Promise<void> {
     // Test control: a configured seat throws (simulates a below-membrane tmux
