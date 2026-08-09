@@ -43,11 +43,13 @@ into journal provenance.
 - **Subscribers MUST 2xx events they do not care about** (ack ≠ consume).
   Delivery is head-of-line per subscription — busd never skips — so a non-2xx
   on an irrelevant event wedges that subscriber's own lane (and only its own).
-- At-least-once: replay subscribers dedupe by `event_id`; legacy `bus.events`
-  subscribers dedupe by `seq`. Every replay delivery attempt is durable and
-  the projection is rebuildable. Protected local consumers may use an
-  `http+unix://<percent-encoded-absolute-socket>/path` delivery URL instead of
-  opening a TCP listener.
+- At-least-once on both planes: bus-journal (`bus.events`) subscribers dedupe
+  by `seq`, which is global and monotonic across the journal; replay-stream
+  (`replay.events`) subscribers dedupe by `event_id`, because ordering there is
+  per replay stream rather than global. Every delivery attempt on either plane
+  is durable and the projection is rebuildable. Protected local consumers may
+  use an `http+unix://<percent-encoded-absolute-socket>/path` delivery URL
+  instead of opening a TCP listener.
 - A failed delivery records `externally_blocked`; it is not followed by a sleep
   or repeated API request. A later event, explicit reconciliation wake, or
   startup reconciliation continues the durable intent.

@@ -16,7 +16,7 @@ function busEvent(eventType = "hook.stop"): BusEventInput {
   };
 }
 
-test("legacy bus delivery is ordered and an outage becomes blocked until the backoff deadline", async () => {
+test("bus-journal delivery is ordered and an outage becomes blocked until the backoff deadline", async () => {
   const store = new MemoryBusStore();
   store.setSubscription({ name: "consumer", delivery_url: DELIVERY_URL, event_pattern: "hook.%", active: true });
   store.seedCursor("consumer", 0);
