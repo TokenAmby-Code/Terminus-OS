@@ -24,7 +24,7 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(44);
+    expect(EVENT_TYPES).toHaveLength(42);
     expect(EVENT_TYPES).toContain('act.agent_input_injected');
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('reg.placement_attested');
@@ -43,7 +43,6 @@ describe("txd lifecycle vocabulary", () => {
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
       'scoped_reset_refused', 'scoped_reset_requested', 'scoped_reset_completed', 'scoped_reset_failed',
-      'topology_migration_requested', 'topology_migration_completed',
     ]);
     for (const t of EVENT_TYPES) {
       const domain = eventDomain(t);

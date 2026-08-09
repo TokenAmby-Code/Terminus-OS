@@ -68,11 +68,3 @@ export const SSH_SEAT_TARGETS: Readonly<Record<string, string>> = {
 export function sshSeatTarget(seatId: string): string | undefined {
   return SSH_SEAT_TARGETS[seatId];
 }
-
-export const DECOMMISSIONED_COUNCIL_SEATS = [
-  'council:malcador',
-  'council:true-terminal',
-  'council:administratum',
-  'mechanicus:fabricator-general',
-  'mechanicus:orchestrator',
-] as const;

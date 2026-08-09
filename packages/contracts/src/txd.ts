@@ -229,8 +229,6 @@ export const ESTATE_EVENT_NAMES = [
   'scoped_reset_requested',
   'scoped_reset_completed',
   'scoped_reset_failed',
-  'topology_migration_requested',
-  'topology_migration_completed',
 ] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
@@ -278,8 +276,6 @@ export const EVENT_TYPES = [
   'estate.scoped_reset_requested',
   'estate.scoped_reset_completed',
   'estate.scoped_reset_failed',
-  'estate.topology_migration_requested',
-  'estate.topology_migration_completed',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const EventTypeSchema = z.enum(EVENT_TYPES);

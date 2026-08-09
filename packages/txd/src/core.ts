@@ -76,7 +76,7 @@ import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections, type LaunchComposition, type TransportClaim } from './projections.ts';
-import { DECOMMISSIONED_COUNCIL_SEATS, isTxdPage, SSH_SEAT_TARGETS, sshSeatTarget, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import { isTxdPage, SSH_SEAT_TARGETS, sshSeatTarget, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
@@ -117,8 +117,6 @@ export type PhysicalRegistrationRuntime = {
     payload: Record<string, unknown>,
   ) => Promise<unknown>;
 };
-
-const COUNCIL_MIGRATION_ID = 'council-four-seat-layout';
 
 // A persona name addresses one agent only while one agent wears it. Several
 // agents may share a worker persona at once, so the caller is told the two
@@ -1752,87 +1750,8 @@ export class Daemon {
   async constructEstate(): Promise<{ created: string[]; existing: string[]; backfilled: string[]; failed: string[] }> {
     const result = await this.locked(async () => {
       await this.recoverBindingPreparations();
-      const before = await this.store.readAll();
-      const lastMigrationRequest = before.findLast((event) =>
-        event.entity_id === COUNCIL_MIGRATION_ID && event.event_type === 'estate.topology_migration_requested',
-      );
-      const lastMigrationCompletion = before.findLast((event) =>
-        event.entity_id === COUNCIL_MIGRATION_ID && event.event_type === 'estate.topology_migration_completed',
-      );
-      let pendingMigration = lastMigrationRequest !== undefined
-        && (lastMigrationCompletion === undefined || lastMigrationRequest.seq > lastMigrationCompletion.seq);
       const generation = await this.tmux.estateGeneration();
-      if (generation === 'council-mechanicus' && !pendingMigration) {
-        await this.store.append({
-          entity_type: 'estate',
-          entity_id: COUNCIL_MIGRATION_ID,
-          event_type: 'estate.topology_migration_requested',
-          payload: { from: 'council-mechanicus', to: 'council' },
-          provenance: this.prov('observer', null),
-          occurred_at: this.now(),
-        });
-        pendingMigration = true;
-      }
-      if (generation === 'migration-interrupted' && !pendingMigration) {
-        throw new Error('txd refused unrequested interrupted Council topology migration');
-      }
-      if (pendingMigration) {
-        const bindings = (await this.projections()).currentBindings.filter((binding) =>
-          binding.seat_id.startsWith('council:') || binding.seat_id.startsWith('mechanicus:'),
-        );
-        if (!(await this.tmux.migrateCouncil(true))) throw new Error('txd failed Council topology migration');
-        const occurred_at = this.now();
-        const provenance = this.prov('observer', null);
-        const inputs: EventInput[] = [];
-        for (const binding of bindings) {
-          if (binding.agent_id) {
-            inputs.push({
-              entity_type: 'agent',
-              entity_id: binding.agent_id,
-              event_type: 'reg.retired',
-              payload: {},
-              provenance,
-              occurred_at,
-            });
-          }
-          inputs.push({
-            entity_type: 'seat',
-            entity_id: binding.seat_id,
-            event_type: 'reg.process_reaped',
-            payload: { agent_id: binding.agent_id },
-            provenance,
-            occurred_at,
-          });
-          inputs.push({
-            entity_type: 'seat',
-            entity_id: binding.seat_id,
-            event_type: 'reg.seat_cleared',
-            payload: {},
-            provenance,
-            occurred_at,
-          });
-        }
-        for (const seat of DECOMMISSIONED_COUNCIL_SEATS) {
-          inputs.push({
-            entity_type: 'seat',
-            entity_id: seat,
-            event_type: 'reg.seat_decommissioned',
-            payload: { migration_id: COUNCIL_MIGRATION_ID },
-            provenance,
-            occurred_at,
-          });
-        }
-        inputs.push({
-          entity_type: 'estate',
-          entity_id: COUNCIL_MIGRATION_ID,
-          event_type: 'estate.topology_migration_completed',
-          payload: { canonical_seats: TXD_ESTATE.length },
-          provenance,
-          occurred_at,
-        });
-        await this.store.appendAll(inputs);
-        await this.publishRetirements(bindings, 'topology_migration', occurred_at);
-      } else if (generation === 'foreign') {
+      if (generation === 'foreign') {
         throw new Error('txd refused non-canonical existing tmux estate');
       }
 
@@ -1945,22 +1864,6 @@ export class Daemon {
         await recordCreated(seat);
         (estate.state === 'created' ? created : backfilled).push(seat);
       }
-
-      // Decommission is declaration-level truth, not a side effect that exists
-      // only on machines which happened to migrate the preceding topology.
-      // Emit missing facts only after the canonical estate postcondition holds.
-      const decommissioned = (await this.projections()).decommissionedSeats;
-      const missingDecommissions = DECOMMISSIONED_COUNCIL_SEATS
-        .filter((seat) => !decommissioned.has(seat))
-        .map((seat): EventInput => ({
-          entity_type: 'seat',
-          entity_id: seat,
-          event_type: 'reg.seat_decommissioned',
-          payload: { migration_id: COUNCIL_MIGRATION_ID },
-          provenance: this.prov('observer', null),
-          occurred_at: this.now(),
-        }));
-      if (missingDecommissions.length > 0) await this.store.appendAll(missingDecommissions);
 
       return { created, existing, backfilled, failed };
     });
