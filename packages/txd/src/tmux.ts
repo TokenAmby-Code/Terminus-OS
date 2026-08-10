@@ -2007,9 +2007,16 @@ export class RealTmux implements TmuxControlPlane {
     const codePath = join(dir, 'code');
     await writeFile(script, `${command}\n`, { mode: 0o700 });
     const channel = `txd-run-${runId}`;
+    // A local scope over the caller's signal, so a refused staging can retire
+    // the armed waiter: no line was typed, so nothing will ever signal its
+    // channel, and an unaborted client would sit on the tmux server forever.
+    const waitScope = new AbortController();
+    const relay = () => waitScope.abort();
+    if (signal.aborted) waitScope.abort();
+    else signal.addEventListener('abort', relay, { once: true });
     // Armed BEFORE the line is staged, so the completion signal can never
     // fire unobserved.
-    const waiter = this.waitFor(this.socket, channel, signal);
+    const waiter = this.waitFor(this.socket, channel, waitScope.signal);
     waiter.catch(() => {});
     // The command itself lives in the script file, so the one staged line
     // carries only fixed paths — no quoting hazard can break the epilogue
@@ -2018,6 +2025,8 @@ export class RealTmux implements TmuxControlPlane {
     const staged = await this.pasteLiteral(seatId, paneId, line, 'run_shell_line');
     const enter = staged ? await this.command('run_shell_submit', seatId, ['send-keys', '-t', paneId, 'Enter']) : null;
     if (!staged || enter?.code !== 0) {
+      signal.removeEventListener('abort', relay);
+      waitScope.abort();
       await rm(dir, { recursive: true, force: true });
       throw new Error(`stage_failed: ${seatId}`);
     }
@@ -2041,6 +2050,7 @@ export class RealTmux implements TmuxControlPlane {
         if (signal.aborted) throw new Error(`pane_lost_mid_run: ${seatId}`);
         throw error;
       } finally {
+        signal.removeEventListener('abort', relay);
         await rm(dir, { recursive: true, force: true });
       }
     })();

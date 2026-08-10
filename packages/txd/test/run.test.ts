@@ -3,6 +3,7 @@
 // `!` shell-escape branch, a bare declared seat takes the pane-shell branch,
 // and everything else refuses loud and typed. Never a process-name sniff.
 import { expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { AGENT_SCHEMA_VERSION, SCHEMA_VERSION, type Agent, type PhysicalDeclaration } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
@@ -111,8 +112,12 @@ test('a registered binding takes the agent branch: the engine shell escape is st
   expect(injected).toHaveLength(1);
   expect(injected[0]!.payload).toMatchObject({
     target_agent_id: agentId, seat_id: 'council:custodes',
-    submit_verdict: 'staged', input_class: 'harness_shell', command: 'echo proof',
+    submit_verdict: 'staged', input_class: 'harness_shell',
+    // The command LINE never enters the append-only stream (it can carry
+    // credentials and cannot be redacted); the digest correlates instead.
+    command_digest: createHash('sha256').update('echo proof').digest('hex'),
   });
+  expect(JSON.stringify(injected[0]!.payload)).not.toContain('echo proof');
 });
 
 test('a codex binding rides the same branch with its own engine named', async () => {

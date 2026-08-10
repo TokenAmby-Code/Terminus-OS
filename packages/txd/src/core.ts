@@ -1310,10 +1310,14 @@ export class Daemon {
           && row.agent_id === prepared.binding.agent_id && row.seat_id === prepared.binding.seat_id);
         if (!binding) throw new Error(`target_binding_changed: ${req.target}`);
         const sent = await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!);
+        // Payload holds dumb correlation facts only. The command LINE never
+        // enters the append-only stream: like inject's text, it can carry
+        // credentials, and an event cannot be redacted later — the digest
+        // correlates without persisting the bytes.
         const event = await this.store.append({ entity_type: 'message', entity_id: runId, event_type: 'act.agent_input_injected',
           payload: {
             target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
-            submit_verdict: sent.verdict, input_class: 'harness_shell', command: req.command,
+            submit_verdict: sent.verdict, input_class: 'harness_shell', command_digest: sha256(req.command),
           },
           provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         if (sent.verdict !== 'staged') throw new Error(`run_not_staged: ${sent.verdict}`);

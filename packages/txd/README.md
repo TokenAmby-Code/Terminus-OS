@@ -95,6 +95,7 @@ each route is the ruled daemon behavior, unchanged.
   truncation reported). Refusals are loud and typed: `identity_absent`,
   `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
   `seat_binding_pending`, `scoped_reset_pending`, `pane_dead`,
+  `seat_decommissioned`, `engine_unattested`, `stage_failed`,
   `run_not_staged`, and a mid-run pane replacement fails the run with
   `pane_lost_mid_run` instead of hanging on a dead signal.
 - Ordinary comm payloads are opaque and have no caller-visible length mode or

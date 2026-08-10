@@ -73,6 +73,29 @@ test('a pane whose foreground command is not an idle shell refuses pane_busy wit
   expect(state.payloads).toEqual([]);
 });
 
+test('a failed staging retires the armed waiter instead of stranding a wait-for client', async () => {
+  const state: { calls: string[][]; payloads: string[] } = { calls: [], payloads: [] };
+  let waiterAborted = false;
+  const run: Runner = async (_socket, args, stdin) => {
+    const base = await shellPaneRunner(state)(_socket, args, stdin);
+    // The line loads, but the paste refuses: nothing was typed, so nothing
+    // will ever signal the channel.
+    if (args[0] === 'paste-buffer') return { code: 1, stdout: '', stderr: 'no such pane' };
+    return base;
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    waitForSignal: (_socket, _channel, signal) => new Promise((_resolve, reject) => {
+      const fail = () => { waiterAborted = true; reject(new Error('pane_lost_mid_run')); };
+      if (signal.aborted) fail();
+      else signal.addEventListener('abort', fail, { once: true });
+    }),
+  });
+  await expect(tmux.runInShellPane('palace:E', RUN_ID, 'echo x', new AbortController().signal))
+    .rejects.toThrow('stage_failed: palace:E');
+  expect(waiterAborted).toBe(true);
+});
+
 test('an unresolvable seat refuses before staging anything', async () => {
   const run: Runner = async (_socket, args) => {
     if (args[0] === 'list-panes') return { code: 0, stdout: '', stderr: '' };
