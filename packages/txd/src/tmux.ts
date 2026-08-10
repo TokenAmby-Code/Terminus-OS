@@ -11,11 +11,14 @@
 // tmux dependency; on-box acceptance exercises the real plane.
 
 import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
-import { open, readFile } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
+  MAX_RUN_CAPTURE_BYTES,
   type AgentModeState,
   type ModeTransitionIntent,
   type ModeTransitionMechanism,
@@ -96,6 +99,23 @@ export type AgentModeTransitionOutcome = {
   mechanism: ModeTransitionMechanism;
 };
 
+// A pane-shell run's harvest. Streams are captured to files the command's own
+// redirections write, so stdout and stderr come back separated and byte-exact
+// (lossily decoded to UTF-8 for the JSON surface); the exit code is the
+// command's real one, read after the completion signal.
+export type ShellRunOutcome = {
+  exit_code: number;
+  stdout: string;
+  stderr: string;
+  stdout_truncated: boolean;
+  stderr_truncated: boolean;
+};
+
+// Staging is split from completion so the caller can refuse loudly and fast
+// (unresolvable seat, busy pane, failed stage) before anything defers, then
+// await the completion promise for as long as the command actually runs.
+export type ShellRunStaged = { completion: Promise<ShellRunOutcome> };
+
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
   version(): Promise<string | null>;
@@ -138,6 +158,25 @@ export interface TmuxControlPlane {
   /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
   sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex'): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
+  /**
+   * Stage one shell command in an AGENT pane through the engine's own shell
+   * escape: Claude's bash mode is entered by a literal `!` KEYSTROKE on an
+   * empty composer (a bracketed paste of `!` stays text and would submit a
+   * prompt instead of running anything), then the command is pasted and
+   * verified; Codex parses a literal `!`-prefixed composer line at submit, so
+   * the whole `!<command>` line rides the verified send path.
+   */
+  runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex'): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
+  /**
+   * Execute one shell command in a BARE pane's idle shell and harvest its
+   * stdout/stderr/exit code. Refuses loud and typed before staging:
+   * `seat_unresolved` (no such pane), `pane_busy: <command>` (a foreground
+   * workload owns the pane), `stage_failed`. Completion is event-driven — the
+   * staged line signals a per-run `tmux wait-for` channel when the command
+   * exits — no polling loop, no deadline; aborting `signal` (the pane died
+   * mid-run) rejects the completion with `pane_lost_mid_run`.
+   */
+  runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged>;
   /** Observe whether the live engine composer is painted without pane input. */
   observeComposerInteractive(seatId: string): Promise<boolean>;
   /**
@@ -534,6 +573,40 @@ async function observePaneOutput(
   };
 }
 
+type WaitForSignal = (socket: string, channel: string, signal: AbortSignal) => Promise<void>;
+
+// The pane run's completion event: one client blocked on `tmux wait-for`
+// wakes exactly when the staged line signals the channel after the command
+// exits. Nothing here observes state repeatedly — the tmux server holds the
+// client until the signal — and the only exits are the signal itself, the
+// caller's abort (the pane died mid-run), or the tmux server dying. All loud.
+async function waitForSignal(socket: string, channel: string, signal: AbortSignal): Promise<void> {
+  const proc = spawnTmuxProcess(socket, ['wait-for', channel], { stdout: 'pipe', stderr: 'pipe' });
+  const abort = () => proc.kill();
+  if (signal.aborted) abort();
+  else signal.addEventListener('abort', abort, { once: true });
+  const code = await proc.exited;
+  signal.removeEventListener('abort', abort);
+  if (signal.aborted) throw new Error('pane_lost_mid_run');
+  if (code !== 0) throw new Error('run_wait_failed');
+}
+
+// Read one captured stream file up to the contract ceiling; a byte past it is
+// reported as truncation, never silently dropped bytes plus a clean flag.
+async function readCapturedStream(path: string): Promise<{ text: string; truncated: boolean }> {
+  const handle = await open(path, 'r').catch(() => null);
+  if (!handle) return { text: '', truncated: false };
+  try {
+    const buffer = Buffer.alloc(MAX_RUN_CAPTURE_BYTES + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    const truncated = bytesRead > MAX_RUN_CAPTURE_BYTES;
+    const bytes = buffer.subarray(0, Math.min(bytesRead, MAX_RUN_CAPTURE_BYTES));
+    return { text: new TextDecoder('utf-8', { fatal: false }).decode(bytes), truncated };
+  } finally {
+    await handle.close();
+  }
+}
+
 async function run(socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> {
   const result = await spawnTmux(socket, args, stdin);
   if (result.overflow) return { code: 1, stdout: '', stderr: 'output exceeded limit' };
@@ -552,6 +625,7 @@ export class RealTmux implements TmuxControlPlane {
   private machine: string | undefined;
   private outputObserver: PaneOutputObserver;
   private composerObserveTimeoutMs: number;
+  private waitFor: WaitForSignal;
 
   constructor(
     private socket: string,
@@ -563,6 +637,7 @@ export class RealTmux implements TmuxControlPlane {
       machine?: string;
       observePaneOutput?: PaneOutputObserver;
       composerObserveTimeoutMs?: number;
+      waitForSignal?: WaitForSignal;
     } = {},
   ) {
     this.runner = options.run ?? run;
@@ -579,6 +654,7 @@ export class RealTmux implements TmuxControlPlane {
     this.machine = options.machine;
     this.outputObserver = options.observePaneOutput ?? observePaneOutput;
     this.composerObserveTimeoutMs = options.composerObserveTimeoutMs ?? 10_000;
+    this.waitFor = options.waitForSignal ?? waitForSignal;
   }
 
   private paneEnvironment(seatId: string, agentId?: string): string[] {
@@ -1797,6 +1873,180 @@ export class RealTmux implements TmuxControlPlane {
     }
   }
 
+  /**
+   * The shell-mode composer verdict. Claude's bash mode repaints the prompt
+   * marker itself as `!`; a paint that keeps the standard caret shows the bang
+   * as leading text instead. Both prove the same staged bytes; anything else
+   * painted is corruption.
+   */
+  static shellComposerVerdict(pane: string, command: string): ComposerVerdict {
+    const normalize = (text: string) => text.replace(/[│┃]/g, '').replace(/\s+/g, '');
+    const expected = normalize(command);
+    const candidates: string[] = [];
+    const bang = RealTmux.bangComposer(pane);
+    if (bang !== null) candidates.push(bang);
+    const active = RealTmux.activeComposer(pane);
+    if (active !== null) candidates.push(active);
+    if (candidates.length === 0) return 'absent';
+    for (const candidate of candidates) {
+      let visible = normalize(candidate);
+      if (visible.startsWith('!')) visible = visible.slice(1);
+      if (visible === expected) return 'intact';
+      const minimumProofLength = 32;
+      if (visible.length >= minimumProofLength && expected.endsWith(visible)) return 'intact';
+    }
+    return 'corrupted';
+  }
+
+  /** The bash-mode prompt block: like activeComposer, with `!` as the marker. */
+  private static bangComposer(pane: string): string | null {
+    const lines = pane.split('\n');
+    let promptLine = -1;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (/^\s*[│┃]?\s*!\s?/.test(lines[index]!)) {
+        promptLine = index;
+        break;
+      }
+    }
+    if (promptLine < 0) return null;
+    let promptBlockEnd = promptLine + 1;
+    while (promptBlockEnd < lines.length && lines[promptBlockEnd]!.trim() !== '') promptBlockEnd += 1;
+    const promptBlock = lines.slice(promptLine, promptBlockEnd);
+    promptBlock[0] = promptBlock[0]!.replace(/^\s*[│┃]?\s*!\s?/, '');
+    return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
+  }
+
+  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex') {
+    if (engine === 'codex') {
+      // Codex parses a literal `!`-prefixed composer line at submit, so the
+      // whole form rides the ordinary verified send path.
+      return this.sendVerifiedToSeat(seatId, runId, `!${command}`, undefined, 'codex');
+    }
+    // Claude: the `!` must be a KEYSTROKE on an empty interactive composer —
+    // a bracketed paste of `!` stays text and would submit a prompt instead
+    // of entering bash mode.
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    const baseline = await this.command('observe_input_baseline', seatId, [
+      'capture-pane', '-p', '-J', '-t', paneId,
+    ]);
+    if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (!RealTmux.composerInteractive(baseline.stdout) || !RealTmux.composerEmpty(baseline.stdout, engine)) {
+      return { bytes: 0, verdict: 'composer_corrupted' as const };
+    }
+    const bytes = Buffer.byteLength(command, 'utf8');
+    const signal = AbortSignal.timeout(this.composerObserveTimeoutMs);
+    let output: PaneOutputSubscription;
+    try {
+      output = await this.outputObserver(this.socket, paneId, signal);
+    } catch {
+      return { bytes: 0, verdict: 'seat_unresolved' as const };
+    }
+    let lastVerdict: ComposerVerdict = 'absent';
+    try {
+      const restoreComposer = async () => {
+        // Undo exactly the command's codepoints, then one more BSpace to
+        // leave bash mode, then attest the pre-call paint.
+        const restored = await this.command('restore_input_composer', seatId, [
+          'send-keys', '-t', paneId, '-N', String([...command].length + 1), 'BSpace',
+        ]);
+        if (restored.code !== 0) return false;
+        const attested = await this.command('attest_input_baseline', seatId, [
+          'capture-pane', '-p', '-J', '-t', paneId,
+        ]);
+        return attested.code === 0 && attested.stdout === baseline.stdout;
+      };
+      const bang = await this.command('enter_shell_mode', seatId, ['send-keys', '-t', paneId, '-l', '!']);
+      if (bang.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      const literal = await this.pasteLiteral(seatId, paneId, command, 'paste_literal_run');
+      if (!literal) {
+        await restoreComposer();
+        return { bytes: 0, verdict: 'seat_unresolved' as const };
+      }
+      while (!signal.aborted) {
+        try {
+          await output.next(signal);
+        } catch {
+          break;
+        }
+        const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
+        if (captured.code !== 0) {
+          await restoreComposer();
+          return { bytes, verdict: 'seat_unresolved' as const };
+        }
+        lastVerdict = RealTmux.shellComposerVerdict(captured.stdout, command);
+        if (lastVerdict !== 'intact') continue;
+        const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
+        if (enter.code === 0) return { bytes, verdict: 'staged' as const };
+        await restoreComposer();
+        return { bytes, verdict: 'seat_unresolved' as const };
+      }
+      const restored = await restoreComposer();
+      if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
+      return lastVerdict === 'absent'
+        ? { bytes, verdict: 'frame_absent' as const }
+        : { bytes, verdict: 'composer_corrupted' as const };
+    } finally {
+      output.close();
+    }
+  }
+
+  async runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) throw new Error(`seat_unresolved: ${seatId}`);
+    const workload = (await this.workloads()).find((entry) => entry.seat_id === seatId);
+    if (!workload) throw new Error(`seat_unresolved: ${seatId}`);
+    if (!workload.idle) throw new Error(`pane_busy: ${workload.command}`);
+    // /tmp is one shared namespace with the pane shells by pinned unit
+    // contract (no PrivateTmp — test/systemd-unit.test.ts), so the command's
+    // own redirections write files this daemon can harvest.
+    const dir = await mkdtemp(join(tmpdir(), 'txd-run-'));
+    const script = join(dir, 'run.sh');
+    const stdoutPath = join(dir, 'stdout');
+    const stderrPath = join(dir, 'stderr');
+    const codePath = join(dir, 'code');
+    await writeFile(script, `${command}\n`, { mode: 0o700 });
+    const channel = `txd-run-${runId}`;
+    // Armed BEFORE the line is staged, so the completion signal can never
+    // fire unobserved.
+    const waiter = this.waitFor(this.socket, channel, signal);
+    waiter.catch(() => {});
+    // The command itself lives in the script file, so the one staged line
+    // carries only fixed paths — no quoting hazard can break the epilogue
+    // that signals completion.
+    const line = `bash ${script} >${stdoutPath} 2>${stderrPath}; printf '%s' "$?" >${codePath}; tmux -L ${this.socket} wait-for -S ${channel}`;
+    const staged = await this.pasteLiteral(seatId, paneId, line, 'run_shell_line');
+    const enter = staged ? await this.command('run_shell_submit', seatId, ['send-keys', '-t', paneId, 'Enter']) : null;
+    if (!staged || enter?.code !== 0) {
+      await rm(dir, { recursive: true, force: true });
+      throw new Error(`stage_failed: ${seatId}`);
+    }
+    const completion = (async (): Promise<ShellRunOutcome> => {
+      try {
+        await waiter;
+        const [exitCode, stdout, stderr] = await Promise.all([
+          readFile(codePath, 'utf8').then((value) => Number(value.trim())).catch(() => Number.NaN),
+          readCapturedStream(stdoutPath),
+          readCapturedStream(stderrPath),
+        ]);
+        if (!Number.isInteger(exitCode)) throw new Error(`run_exit_unreadable: ${seatId}`);
+        return {
+          exit_code: exitCode,
+          stdout: stdout.text,
+          stderr: stderr.text,
+          stdout_truncated: stdout.truncated,
+          stderr_truncated: stderr.truncated,
+        };
+      } catch (error) {
+        if (signal.aborted) throw new Error(`pane_lost_mid_run: ${seatId}`);
+        throw error;
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    })();
+    return { completion };
+  }
+
   // A posed plan is a vendor approval dialog, not a footer state. Claude poses
   // ExitPlanMode as a proceed prompt with numbered options; Codex has no such
   // dialog, so the detector never claims one for it.
@@ -2249,6 +2499,48 @@ export class FakeTmux implements TmuxControlPlane {
     const s = this.seats.get(seatId);
     return !!s && s.pane === 'live'
       && RealTmux.composerInteractive(this.paneTexts.get(seatId) ?? '');
+  }
+  private agentRuns: Array<{ seat_id: string; run_id: string; command: string; engine: 'claude' | 'codex' }> = [];
+  private agentRunFailures = new Set<string>();
+  private shellRuns: Array<{ seat_id: string; run_id: string; command: string }> = [];
+  private shellRunResults = new Map<string, ShellRunOutcome>();
+  private heldShellRuns = new Set<string>();
+  /** Test control: the seat's composer refuses the shell-escape staging. */
+  failAgentRun(seatId: string): void { this.agentRunFailures.add(seatId); }
+  /** Test observation: every agent-composer shell escape staged, in order. */
+  agentComposerRuns(): Array<{ seat_id: string; run_id: string; command: string; engine: 'claude' | 'codex' }> {
+    return [...this.agentRuns];
+  }
+  /** Test observation: every bare-pane shell run staged, in order. */
+  paneShellRuns(): Array<{ seat_id: string; run_id: string; command: string }> { return [...this.shellRuns]; }
+  /** Test control: what the seat's next shell run harvests. */
+  setShellRunResult(seatId: string, outcome: ShellRunOutcome): void { this.shellRunResults.set(seatId, outcome); }
+  /** Test control: the seat's shell run never completes on its own (abort paths). */
+  holdShellRun(seatId: string): void { this.heldShellRuns.add(seatId); }
+  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex') {
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (this.agentRunFailures.has(seatId)) return { bytes: 0, verdict: 'composer_corrupted' as const };
+    this.agentRuns.push({ seat_id: seatId, run_id: runId, command, engine });
+    return { bytes: Buffer.byteLength(command, 'utf8'), verdict: 'staged' as const };
+  }
+  async runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged> {
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead') throw new Error(`seat_unresolved: ${seatId}`);
+    const workload = (await this.workloads()).find((entry) => entry.seat_id === seatId);
+    if (!workload) throw new Error(`seat_unresolved: ${seatId}`);
+    if (!workload.idle) throw new Error(`pane_busy: ${workload.command}`);
+    this.shellRuns.push({ seat_id: seatId, run_id: runId, command });
+    const outcome = this.shellRunResults.get(seatId)
+      ?? { exit_code: 0, stdout: '', stderr: '', stdout_truncated: false, stderr_truncated: false };
+    const held = this.heldShellRuns.has(seatId);
+    const completion = new Promise<ShellRunOutcome>((resolve, reject) => {
+      const fail = () => reject(new Error(`pane_lost_mid_run: ${seatId}`));
+      if (signal.aborted) return fail();
+      signal.addEventListener('abort', fail, { once: true });
+      if (!held) queueMicrotask(() => resolve(outcome));
+    });
+    return { completion };
   }
   /** Test observation: every text staged into this seat, in order. */
   sends(seatId: string): string[] { return [...(this.sentLines.get(seatId) ?? [])]; }

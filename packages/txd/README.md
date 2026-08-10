@@ -63,6 +63,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/comm`          | Typed message or engine-neutral command/skill admission |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
+| POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat executes in its idle pane shell and returns captured stdout/stderr + exit code |
 | POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost) and `hook.user_prompt_submit`; acks everything else |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
 
@@ -78,6 +79,24 @@ each route is the ruled daemon behavior, unchanged.
   gate. V1 deliberately performs no skill-name preflight; the engine owns
   validation. Any future preflight must consume Token-Fleet's canonical skill
   configuration rather than create a txd-local registry.
+- `tx run <target> <command>` branches on txd's event-sourced agent-presence
+  truth, never a process sniff. A target resolving to a REGISTERED binding is
+  an agent pane: txd stages the engine's shell escape (Claude enters bash mode
+  with a literal `!` keystroke on a verified-empty composer, then pastes and
+  verifies the command; Codex takes the whole `!<command>` line through the
+  verified send path), so the command's output lands in that agent's
+  conversation, and the injection is recorded as `act.agent_input_injected`
+  (`input_class: harness_shell`). A bare declared seat executes the command in
+  its idle pane shell: the command bytes live in a script file, the one staged
+  line carries only fixed paths, and completion is the pane's own
+  `tmux wait-for` signal — armed before the line is typed, no polling loop, no
+  deadline — after which the caller receives the exact captured stdout,
+  stderr, and exit code (each stream bounded by `MAX_RUN_CAPTURE_BYTES`,
+  truncation reported). Refusals are loud and typed: `identity_absent`,
+  `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
+  `seat_binding_pending`, `scoped_reset_pending`, `pane_dead`,
+  `run_not_staged`, and a mid-run pane replacement fails the run with
+  `pane_lost_mid_run` instead of hanging on a dead signal.
 - Ordinary comm payloads are opaque and have no caller-visible length mode or
   size ceiling. Txd loads every verified text segment into a private,
   one-use tmux buffer over stdin and injects it as one bracketed paste before

@@ -51,6 +51,7 @@ import {
   PhysicalDeclarationSchema,
   AgentSchema,
   RegistrationAbortedSchema,
+  RunRequestSchema,
   StopRequestSchema,
   TmuxLifecycleEventRequestSchema,
   WrapperStartHookSchema,
@@ -314,6 +315,32 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         if (parsed instanceof Response) return parsed;
         try { return json(await daemon.inject(parsed, receipt(req))); }
         catch (error) { return json({ ok: false, error: 'agent_inject_refused', detail: String(error) }, 422); }
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/agents/run'),
+      label: 'POST /agents/run',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, RunRequestSchema, 'invalid_run_request');
+        if (parsed instanceof Response) return parsed;
+        let result: Awaited<ReturnType<Daemon['run']>>;
+        try {
+          result = await daemon.run(parsed, receipt(req));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return json({ ok: false, error: 'run_refused', detail }, 409);
+        }
+        if (result.mode === 'agent') return json(result.response);
+        // The command runs exactly as long as it runs: the headers commit now
+        // and the body completes from the pane's wait-for signal (same
+        // transport contract as /agents/comm/wait — no deadline over the
+        // wait). A late failure still lands as a typed refusal body.
+        return deferredJson(result.pending.catch((error) => ({
+          ok: false,
+          error: 'run_refused',
+          detail: error instanceof Error ? error.message : String(error),
+        })));
       },
     },
     {
