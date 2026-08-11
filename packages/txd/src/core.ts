@@ -60,6 +60,9 @@ import {
   type ProvenanceSource,
   type ReconcileResponse,
   type RetirementCause,
+  type RunAgentResponse,
+  type RunPaneResponse,
+  type RunRequest,
   type StopReceipt,
   type StopRefusal,
   type StopRefusalReason,
@@ -169,6 +172,9 @@ function sha256(value: string): string {
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
+  // Live pane-shell runs by seat, so a physical pane replacement can abort
+  // exactly the completions whose signal died with the pane's shell.
+  private paneRuns = new Map<string, Set<AbortController>>();
 
 
   constructor(
@@ -1247,6 +1253,104 @@ export class Daemon {
       if (sent.verdict !== 'staged') throw new Error(`machine_feed_not_staged: ${sent.verdict}`);
       return { ok: true as const, target_agent_id: req.target_agent_id, deferred: true as const };
     });
+  }
+
+  /**
+   * `tx run` — one shell command against one pane, branching on txd's own
+   * event truth (never a process heuristic). A target resolving to a
+   * REGISTERED binding is an agent pane: the command is staged through the
+   * engine's `!` shell escape so its output lands in that agent's
+   * conversation. A bare declared seat executes the command in its idle pane
+   * shell; completion is the pane's own wait-for signal (the command exited)
+   * and the harvest returns to the caller as a deferred body.
+   */
+  async run(req: RunRequest, transportReceipt: string | null = null): Promise<
+    | { mode: 'agent'; response: RunAgentResponse }
+    | { mode: 'pane'; pending: Promise<RunPaneResponse> }
+  > {
+    const prepared = await this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const proj = await this.projections();
+      const events = await this.store.readAll();
+      const pendingResetSeats = this.pendingScopedResetSeats(events);
+      const matches = proj.currentBindings.filter((binding) =>
+        binding.registered && (
+          binding.agent_id === req.target
+          || binding.persona === req.target
+          || binding.seat_id === req.target
+        ),
+      );
+      if (matches.length > 1) throw new Error(AMBIGUOUS_IDENTITY(req.target));
+      if (matches.length === 1) {
+        const binding = matches[0]!;
+        if (pendingResetSeats.has(binding.seat_id)) throw new Error(`scoped_reset_pending: ${binding.seat_id}`);
+        if (!binding.agent_id || !binding.engine) throw new Error(`engine_unattested: ${req.target}`);
+        return { kind: 'agent' as const, binding };
+      }
+      // No registered binding answers to this identity, so the only reading
+      // left is a bare declared seat. Anything else is absent — loud.
+      if (!TXD_ESTATE.includes(req.target)) throw new Error(`identity_absent: ${req.target}`);
+      if (proj.decommissionedSeats.has(req.target)) throw new Error(`seat_decommissioned: ${req.target}`);
+      // A binding mid-birth is an agent arriving; racing its registration
+      // with a shell line would type into its wrapper.
+      if (proj.currentBindings.some((binding) => binding.seat_id === req.target)) {
+        throw new Error(`seat_binding_pending: ${req.target}`);
+      }
+      if (pendingResetSeats.has(req.target)) throw new Error(`scoped_reset_pending: ${req.target}`);
+      const row = proj.seatBoard.find((entry) => entry.seat_id === req.target);
+      if (row && row.pane === 'dead') throw new Error(`pane_dead: ${req.target}`);
+      return { kind: 'pane' as const, seatId: req.target };
+    });
+
+    const runId = crypto.randomUUID();
+    if (prepared.kind === 'agent') {
+      const response = await this.locked(async (): Promise<RunAgentResponse> => {
+        const proj = await this.projections();
+        const binding = proj.currentBindings.find((row) => row.registered
+          && row.agent_id === prepared.binding.agent_id && row.seat_id === prepared.binding.seat_id);
+        if (!binding) throw new Error(`target_binding_changed: ${req.target}`);
+        const sent = await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!);
+        // Payload holds dumb correlation facts only. The command LINE never
+        // enters the append-only stream: like inject's text, it can carry
+        // credentials, and an event cannot be redacted later — the digest
+        // correlates without persisting the bytes.
+        const event = await this.store.append({ entity_type: 'message', entity_id: runId, event_type: 'act.agent_input_injected',
+          payload: {
+            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
+            submit_verdict: sent.verdict, input_class: 'harness_shell', command_digest: sha256(req.command),
+          },
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
+        if (sent.verdict !== 'staged') throw new Error(`run_not_staged: ${sent.verdict}`);
+        return {
+          ok: true, mode: 'agent', run_id: runId, target: req.target, seat_id: binding.seat_id,
+          agent_id: binding.agent_id!, engine: binding.engine!, staged: true, event_ids: [event.seq],
+        };
+      });
+      return { mode: 'agent', response };
+    }
+
+    const controller = new AbortController();
+    const registered = this.paneRuns.get(prepared.seatId) ?? new Set<AbortController>();
+    registered.add(controller);
+    this.paneRuns.set(prepared.seatId, registered);
+    let staged: Awaited<ReturnType<TmuxControlPlane['runInShellPane']>>;
+    try {
+      // Staging under the writer lock: a concurrent reset cannot replace the
+      // pane process between the idle observation and the typed line.
+      staged = await this.locked(() => this.tmux.runInShellPane(prepared.seatId, runId, req.command, controller.signal));
+    } catch (error) {
+      registered.delete(controller);
+      throw error;
+    }
+    const pending = staged.completion
+      .then((outcome): RunPaneResponse => ({ ok: true, mode: 'pane', run_id: runId, seat_id: prepared.seatId, ...outcome }))
+      .finally(() => { registered.delete(controller); });
+    return { mode: 'pane', pending };
+  }
+
+  /** A physical pane replacement is the death event of every run staged in it. */
+  private abortPaneRuns(seatId: string): void {
+    for (const controller of this.paneRuns.get(seatId) ?? []) controller.abort();
   }
 
   transitionMode(
@@ -2526,6 +2630,9 @@ export class Daemon {
         }
       }
       const completedAt = this.now();
+      // The pane processes are replaced: any shell run staged in them lost
+      // the shell that would signal its completion. Fail those runs loud now.
+      for (const seat of seats) this.abortPaneRuns(seat);
       const inputs = bindings.flatMap((binding) =>
         this.resetBindingInputs(binding, transportReceipt, completedAt),
       );
@@ -2647,6 +2754,8 @@ export class Daemon {
   }
 
   async executeEstateRotation(): Promise<void> {
+    // The whole server dies: every staged pane run's completion signal with it.
+    for (const seatId of this.paneRuns.keys()) this.abortPaneRuns(seatId);
     if (!(await this.tmux.killServer())) {
       await this.rotationBarrier.abort();
       throw new Error('estate rotation failed to stop the owned tmux server');

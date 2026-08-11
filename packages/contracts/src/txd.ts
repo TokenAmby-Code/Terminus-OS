@@ -748,6 +748,62 @@ export type CommCallback = z.infer<typeof CommCallbackSchema>;
 export const CommWaitResponseSchema = z.object({ ask_id: z.string(), complete: z.boolean(), callbacks: z.array(CommCallbackSchema), outstanding: z.array(CommTargetSchema) });
 export type CommWaitResponse = z.infer<typeof CommWaitResponseSchema>;
 
+// ── Run (deliberate action) — one shell command against one pane ─────────────
+// `tx run` branches on txd's own event truth, never on process heuristics: a
+// target resolving to a REGISTERED binding is an agent pane and receives the
+// engine's shell-escape composer form (`!` — the harness runs the command and
+// its output lands in that agent's conversation); a bare declared seat executes
+// the command in its pane shell and the caller receives the captured
+// stdout/stderr and exit code. Completion of a pane run is event-driven — the
+// pane shell signals a tmux wait-for channel when the command exits — so the
+// response carries the command's real exit, not a deadline's.
+export const RunRequestSchema = z.strictObject({
+  schema_version: z.number().int(),
+  target: CanonicalIdSchema,
+  // One command line. The agent branch stages it in a live composer and the
+  // pane branch stages one shell line; an embedded newline would submit a
+  // truncated prefix in both, so it is refused at the membrane.
+  command: z.string().min(1).refine((value) => !/[\r\n]/.test(value), 'run commands are a single line'),
+});
+export type RunRequest = z.infer<typeof RunRequestSchema>;
+
+// Per-stream capture ceiling for pane runs, derived from a real transport
+// ceiling: the tx client refuses response bodies over 8 MiB (client.ts), and
+// both captured streams plus the JSON envelope must fit under it. Truncation
+// is reported, never silent.
+export const MAX_RUN_CAPTURE_BYTES = 3 * 1024 * 1024;
+
+export const RunAgentResponseSchema = z.object({
+  ok: z.literal(true),
+  mode: z.literal('agent'),
+  run_id: z.string(),
+  target: z.string(),
+  seat_id: z.string(),
+  agent_id: z.string(),
+  engine: z.enum(['claude', 'codex']),
+  // Staged means the `!` form is in the composer and Enter was pressed. The
+  // command's output belongs to the agent's conversation, not to this caller.
+  staged: z.literal(true),
+  event_ids: z.array(z.number().int()),
+});
+export type RunAgentResponse = z.infer<typeof RunAgentResponseSchema>;
+
+export const RunPaneResponseSchema = z.object({
+  ok: z.literal(true),
+  mode: z.literal('pane'),
+  run_id: z.string(),
+  seat_id: z.string(),
+  exit_code: z.number().int(),
+  stdout: z.string(),
+  stderr: z.string(),
+  stdout_truncated: z.boolean(),
+  stderr_truncated: z.boolean(),
+});
+export type RunPaneResponse = z.infer<typeof RunPaneResponseSchema>;
+
+export const RunResponseSchema = z.discriminatedUnion('mode', [RunAgentResponseSchema, RunPaneResponseSchema]);
+export type RunResponse = z.infer<typeof RunResponseSchema>;
+
 // Plan mode is a semantic deliberate action, not a generic text/key send.
 // Callers name a logical identity and intent; txd resolves the bound engine and
 // owns the harness-specific input and read-back evidence below the tmux membrane.

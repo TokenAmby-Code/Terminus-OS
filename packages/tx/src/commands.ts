@@ -116,6 +116,27 @@ export const COMMANDS: readonly Command[] = [
     },
   },
   {
+    // One command against one pane, branching on txd's event truth: an agent
+    // seat gets the engine's `!` shell escape (output lands in that agent's
+    // conversation); a bare seat executes and this caller gets the captured
+    // stdout/stderr and exit code back.
+    path: ['run'],
+    summary: '<target> <command> — agent panes get the engine !-escape; bare panes execute and return output',
+    run: async ({ args, request, write }) => {
+      if (args.length !== 2 || args[0]!.startsWith('-')) throw new Error('usage: tx run <target> <command>');
+      const result = await request('POST', '/agents/run', {
+        schema_version: SCHEMA_VERSION,
+        target: args[0],
+        command: args[1],
+      }) as { ok: boolean; detail?: string };
+      // A pane run's body completes after the headers, so a late typed
+      // refusal (the pane died mid-run) arrives as ok:false in a 200 body.
+      if (!result.ok) throw new Error(result.detail ?? 'run_refused');
+      write(result);
+      return 0;
+    },
+  },
+  {
     path: ['close'],
     summary: 'Close remote agents through the retirement chain (overseer verb)',
     run: async ({ args, request, write }) => {
