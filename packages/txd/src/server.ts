@@ -55,6 +55,7 @@ import {
   StopRequestSchema,
   TmuxLifecycleEventRequestSchema,
   WrapperStartHookSchema,
+  LcdServiceDeliverySchema,
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
@@ -535,6 +536,32 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
     // lane carries all hook.% payloads, and unconsumed ones may legitimately
     // contain %N-shaped text (tool output). The membrane applies to what txd
     // actually ingests — the unwrapped consumed payloads — below.
+    // The lcd typed lifecycle-fact door — txd as a service subscriber of
+    // lifecycled's typed subscription plane. lcd retries a non-2xx delivery
+    // under its lane backoff and never skips a fact, so the honest outcomes
+    // mirror /ingress/bus: 422 ONLY for envelope skew, 2xx for everything
+    // else with `consumed` reporting whether txd ingested the fact.
+    {
+      method: 'POST',
+      match: exact('/ingress/lifecycle'),
+      label: 'POST /ingress/lifecycle',
+      handler: async (req) => {
+        const parsed = LcdServiceDeliverySchema.safeParse(await readJson(req));
+        if (!parsed.success) {
+          return json({ ok: false, error: 'invalid_lcd_delivery', field: issuePath(parsed.error.issues[0]?.path ?? []) }, 422);
+        }
+        const { fact } = parsed.data;
+        const ack = (consumed: boolean, reason: string | null) =>
+          json({ ok: true, seq: fact.seq, consumed, reason });
+        if (fact.fact_type === 'wrapper_started') {
+          const hook = WrapperStartHookSchema.safeParse(fact.payload);
+          if (!hook.success) return ack(false, 'invalid_wrapper_start_payload');
+          const result = await daemon.attestWrapperStart(hook.data);
+          return ack(result.attested, result.reason);
+        }
+        return ack(false, 'not_consumed');
+      },
+    },
     {
       method: 'POST',
       match: exact('/ingress/bus'),
