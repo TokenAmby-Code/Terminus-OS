@@ -65,6 +65,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
 | POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat executes in its idle pane shell and returns captured stdout/stderr + exit code |
 | POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost) and `hook.user_prompt_submit`; acks everything else |
+| POST   | `/ingress/lifecycle`    | lcd typed lifecycle-fact door: consumes `wrapper_started` (same pane attestation as the bus door's `hook.wrapper_start`); 422 only for envelope skew, acks everything else so the lcd lane never wedges |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
