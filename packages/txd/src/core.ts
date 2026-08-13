@@ -93,7 +93,13 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 type Now = () => string;
 // What txd hands lifecycled to arm one comm watch: enough to name the
 // subscription's agent stream and the message a composer-quiet fact may redrive.
-export type CommWatchArmInput = { message_id: string; target_agent_id: string; source_agent_id: string; stream_class: 'interactive' | 'headless' };
+export type CommWatchArmInput = {
+  message_id: string;
+  target_agent_id: string;
+  source_agent_id: string;
+  stream_class: 'interactive' | 'headless';
+  composer_interactive_observed: boolean;
+};
 export type ComposerGateInput = { correlation_id: string; target_agent_id: string; stream_class: 'interactive' | 'headless' };
 
 // The ONE comm frame template. comm() stages it and commRedrive() verifies
@@ -1042,8 +1048,16 @@ export class Daemon {
   ): Promise<void> {
     if (!this.commWatchArm) return;
     try {
-      if (streamClass === 'interactive') await this.backfillComposerInteractivity(targetAgentId, transportReceipt);
-      await this.commWatchArm({ message_id: messageId, target_agent_id: targetAgentId, source_agent_id: sourceAgentId, stream_class: streamClass });
+      const composerInteractiveObserved = streamClass === 'interactive'
+        ? await this.backfillComposerInteractivity(targetAgentId, transportReceipt)
+        : false;
+      await this.commWatchArm({
+        message_id: messageId,
+        target_agent_id: targetAgentId,
+        source_agent_id: sourceAgentId,
+        stream_class: streamClass,
+        composer_interactive_observed: composerInteractiveObserved,
+      });
     } catch (error) {
       await this.locked(() => this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
         payload: { message_id: messageId, target_agent_id: targetAgentId, detail: String(error) },
@@ -1055,8 +1069,8 @@ export class Daemon {
   private async backfillComposerInteractivity(
     targetAgentId: string,
     transportReceipt: string | null,
-  ): Promise<void> {
-    if (!this.physicalRegistration) return;
+  ): Promise<boolean> {
+    if (!this.physicalRegistration) return false;
     const observation = await this.locked(async () => {
       const events = await this.store.readAll();
       const binding = buildProjections(events).currentBindings.find((row) =>
@@ -1064,15 +1078,16 @@ export class Daemon {
       );
       if (!binding?.pane_generation) return null;
       const observationId = `${targetAgentId}:${binding.pane_generation}`;
-      if (events.some((event) => event.entity_id === observationId
-        && event.event_type === 'act.composer_interactive_announced')) return null;
       return {
         observationId,
         seatId: binding.seat_id,
         paneGeneration: binding.pane_generation,
+        announced: events.some((event) => event.entity_id === observationId
+          && event.event_type === 'act.composer_interactive_announced'),
       };
     });
-    if (!observation || !await this.tmux.observeComposerInteractive(observation.seatId)) return;
+    if (!observation || !await this.tmux.observeComposerInteractive(observation.seatId)) return false;
+    if (observation.announced) return true;
     const occurredAt = this.now();
     await this.locked(async () => {
       const events = await this.store.readAll();
@@ -1118,6 +1133,7 @@ export class Daemon {
         occurred_at: this.now(),
       });
     });
+    return true;
   }
 
   async comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {

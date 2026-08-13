@@ -5,6 +5,7 @@ import {
   ClipboardPushResponseSchema,
   MAX_CLIPBOARD_BASE64_CHARS,
   MAX_CLIPBOARD_BYTES,
+  COMM_WAIT_TIMEOUT_MS,
   SCHEMA_VERSION,
   type ClipboardPushResponse,
 } from '@terminus-os/contracts';
@@ -81,7 +82,7 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
   write(accepted);
   if (!ask) return 0;
   const result = await request('POST', '/agents/comm/wait', {
-    schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_agent_id: agentSource('comm'), timeout_ms: 7 * 60 * 1000,
+    schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_agent_id: agentSource('comm'), timeout_ms: COMM_WAIT_TIMEOUT_MS,
   }) as { complete: boolean };
   write(result);
   return result.complete ? 0 : 3;
