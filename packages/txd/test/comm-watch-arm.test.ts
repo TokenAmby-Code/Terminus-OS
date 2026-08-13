@@ -65,8 +65,14 @@ test('behavioral pin: a painted newborn backfills durable composer interactivity
       published.push({ type, payload });
     },
   };
-  const { store, tmux, d } = await fixture(async () => { order.push('gate'); }, physical);
+  const armed: CommWatchArmInput[] = [];
+  const { store, tmux, d } = await fixture(async (input) => { order.push('gate'); armed.push(input); }, physical);
   tmux.setPaneText('palace:W', '› Write tests for @filename\n\n  gpt-5.6-sol medium');
+  const observe = tmux.observeComposerInteractive.bind(tmux);
+  tmux.observeComposerInteractive = async (seatId) => {
+    order.push(`observe:${seatId}`);
+    return observe(seatId);
+  };
 
   await d.comm({
     schema_version: SCHEMA_VERSION,
@@ -77,7 +83,23 @@ test('behavioral pin: a painted newborn backfills durable composer interactivity
     reply: false,
   });
 
-  expect(order).toEqual(['publish:agent.composer_interactive', 'gate']);
+  await d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'idle control',
+    ask: false,
+    reply: false,
+  });
+
+  expect(order).toEqual([
+    'observe:palace:W',
+    'publish:agent.composer_interactive',
+    'gate',
+    'observe:palace:W',
+    'gate',
+  ]);
+  expect(armed.map((input) => input.composer_interactive_observed)).toEqual([true, true]);
   expect(published[0]?.payload).toMatchObject({
     schema_version: SCHEMA_VERSION,
     agent_id: 'worker',
@@ -115,7 +137,13 @@ test('behavioral pin: an unpainted newborn receives no bytes before lcd releases
   release();
   const accepted = await pending;
   expect(order).toEqual(['gate:worker', 'send:palace:W']);
-  expect(armed).toEqual([{ message_id: accepted.message_id, target_agent_id: 'worker', source_agent_id: 'sender', stream_class: 'interactive' }]);
+  expect(armed).toEqual([{
+    message_id: accepted.message_id,
+    target_agent_id: 'worker',
+    source_agent_id: 'sender',
+    stream_class: 'interactive',
+    composer_interactive_observed: false,
+  }]);
 });
 
 test('a dead readiness plane fails loud before bytes and attests the unarmed gap', async () => {

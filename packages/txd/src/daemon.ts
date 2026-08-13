@@ -5,7 +5,7 @@ import { describeEndpoint } from '@terminus-os/db';
 import { loadConfig } from './config.ts';
 import { PostgresEventStore } from './store.ts';
 import { RealTmux } from './tmux.ts';
-import { Daemon } from './core.ts';
+import { Daemon, type CommWatchArmInput } from './core.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
 import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
@@ -21,6 +21,37 @@ const build: BuildInfo = {
 };
 
 const cfg = await loadConfig();
+// The server owns a five-minute composer wait. One second is the health
+// contract for a local unix-socket round trip, so the client remains strictly
+// outside the server ceiling without an unlabelled multiplier.
+const LIFECYCLED_LOCAL_RESPONSE_MARGIN_MS = 1_000;
+const lifecycledFetchCeilingMs = cfg.commWatchTimeoutMs + LIFECYCLED_LOCAL_RESPONSE_MARGIN_MS;
+
+async function postLifecycledGate(
+  path: '/agents/comm/gate' | '/agents/composer/gate',
+  body: Record<string, unknown>,
+  refusalPrefix: 'lifecycled_comm_gate' | 'lifecycled_composer_gate',
+): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`http://lifecycled${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      unix: cfg.lifecycledSocket!,
+      signal: AbortSignal.timeout(lifecycledFetchCeilingMs),
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    const reason = error instanceof Error && error.name === 'TimeoutError'
+      ? 'transport_ceiling_exceeded'
+      : 'transport_failed';
+    throw new Error(`${refusalPrefix}_${reason}`);
+  }
+  if (response.ok) return;
+  const refusal = await response.json().catch(() => null) as { error?: unknown } | null;
+  const reason = typeof refusal?.error === 'string' ? refusal.error : `http_${response.status}`;
+  throw new Error(`${refusalPrefix}_refused:${reason}`);
+}
 // Connect + migrate (forward-only, shared migrations home) — fail loud at boot.
 const store = await PostgresEventStore.connect(cfg.db);
 const tmux = new RealTmux(cfg.tmuxSocket, {
@@ -46,31 +77,20 @@ const physicalRegistration = cfg.physicalRegistration
 // awaits; a refusal or timeout surfaces
 // as act.comm_watch_unarmed and leaves the target pane untouched.
 const commWatchArm = cfg.lifecycledSocket
-  ? async (input: { message_id: string; target_agent_id: string; source_agent_id: string; stream_class: 'interactive' | 'headless' }) => {
-      const response = await fetch('http://lifecycled/agents/comm/gate', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        unix: cfg.lifecycledSocket!,
-        signal: AbortSignal.timeout(cfg.commWatchTimeoutMs * 4),
-        body: JSON.stringify({
+  ? async (input: CommWatchArmInput) => {
+      await postLifecycledGate('/agents/comm/gate', {
           schema_version: 1,
           message_id: input.message_id,
           source_agent_id: input.source_agent_id,
           target_agent_id: input.target_agent_id,
           stream_class: input.stream_class,
-        }),
-      });
-      if (!response.ok) throw new Error(`lifecycled refused comm watch: HTTP ${response.status}`);
+          composer_interactive_observed: input.composer_interactive_observed,
+        }, 'lifecycled_comm_gate');
     }
   : null;
 const composerGate = cfg.lifecycledSocket
   ? async (input: { correlation_id: string; target_agent_id: string; stream_class: 'interactive' | 'headless' }) => {
-      const response = await fetch('http://lifecycled/agents/composer/gate', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, unix: cfg.lifecycledSocket!,
-        signal: AbortSignal.timeout(cfg.commWatchTimeoutMs * 4),
-        body: JSON.stringify({ schema_version: 1, ...input }),
-      });
-      if (!response.ok) throw new Error(`lifecycled refused composer gate: HTTP ${response.status}`);
+      await postLifecycledGate('/agents/composer/gate', { schema_version: 1, ...input }, 'lifecycled_composer_gate');
     }
   : null;
 const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration, realRemoteEnvelopeLister, commWatchArm, composerGate);

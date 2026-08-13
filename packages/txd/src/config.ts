@@ -61,7 +61,7 @@ const HARD_DEFAULTS = {
   }),
   tmuxSocket: 'k12',
   lifecycledSocket: `${process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`}/lifecycled/ingress.sock`,
-  commWatchTimeoutMs: 10_000,
+  commWatchTimeoutMs: 5 * 60 * 1000,
   rotationLockFile: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.lock`,
   rotationSignalFifo: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.signal`,
 } as const;
@@ -147,7 +147,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
   cfg.db = db.data;
   if (!cfg.tmuxSocket) throw new Error('txd config error: tmuxSocket is required');
   if (cfg.lifecycledSocket === undefined) throw new Error('txd config error: lifecycledSocket is required (empty string disables the comm watch plane)');
-  if (!Number.isInteger(cfg.commWatchTimeoutMs) || cfg.commWatchTimeoutMs! < 1)
+  if (!Number.isInteger(cfg.commWatchTimeoutMs) || cfg.commWatchTimeoutMs! < 5 * 60 * 1000)
     throw new Error(`txd config error: invalid commWatchTimeoutMs ${cfg.commWatchTimeoutMs}`);
   if (!cfg.rotationLockFile) throw new Error('txd config error: rotationLockFile is required');
   if (!cfg.rotationSignalFifo) throw new Error('txd config error: rotationSignalFifo is required');
