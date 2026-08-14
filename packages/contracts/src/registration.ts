@@ -13,12 +13,19 @@ export const EngineSchema = z.enum(["claude", "codex"]);
 export type Engine = z.infer<typeof EngineSchema>;
 export const Sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
 export const GitHeadSchema = z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/);
+export const TransportPathSchema = z.string()
+  .regex(/^\/[A-Za-z0-9._/-]+$/)
+  .refine((path) => path.slice(1).split("/").every(
+    (component) => component.length > 0 && component !== "." && component !== "..",
+  ), {
+    message: "path must be canonical and contain no empty or dot segments",
+  });
 
 export const WorktreeBindingSchema = z.object({
   repository: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
   branch: z.string().min(1),
   replay_id: z.string().uuid(),
-  path: z.string().startsWith("/"),
+  path: TransportPathSchema,
   head_sha: GitHeadSchema,
 }).strict();
 export type WorktreeBinding = z.infer<typeof WorktreeBindingSchema>;
@@ -37,12 +44,12 @@ export const PersonaPackageSchema = z.object({
   // The persona's synth voice_identity; null for a silent persona. Voice is
   // persona-level identity, so it lives in the package, never beside it.
   voice: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/).nullable(),
-  working_directory: z.string().startsWith("/").optional(),
+  working_directory: TransportPathSchema.optional(),
   continuity_references: z.array(z.string().min(1)),
   instruction_package: z.object({
     digest: Sha256Schema,
     sources: z.array(InstructionSourceSchema),
-    cache_path: z.string().startsWith("/"),
+    cache_path: TransportPathSchema,
   }).strict(),
 }).strict().superRefine((persona, context) => {
   const durableRank = persona.rank === "overseer" || persona.rank === "primarch";
@@ -168,10 +175,10 @@ export const WrapperLaunchReplySchema = z.object({
   birth_generation: BirthGenerationSchema,
   pane_id: z.string().min(1),
   pane_generation: PaneGenerationSchema,
-  working_directory: z.string().startsWith("/"),
+  working_directory: TransportPathSchema,
   instruction_package: z.object({
     digest: Sha256Schema,
-    cache_path: z.string().startsWith("/"),
+    cache_path: TransportPathSchema,
   }).strict().nullable(),
 }).strict();
 export type WrapperLaunchReply = z.infer<typeof WrapperLaunchReplySchema>;
@@ -232,8 +239,16 @@ export type LifecycleReady = z.infer<typeof LifecycleReadySchema>;
 // agent lands in is the only input to persona allocation. The target names
 // either a page (txd autofills a free seat on it) or one exact seat.
 export const DispatchTargetSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("page"), page: z.string().min(1) }).strict(),
-  z.object({ kind: z.literal("seat"), seat_id: z.string().min(1) }).strict(),
+  z.object({
+    kind: z.literal("page"),
+    page: z.string().min(1),
+    stack_page: z.string().min(1).optional(),
+  }).strict(),
+  z.object({
+    kind: z.literal("seat"),
+    seat_id: z.string().min(1),
+    stack_page: z.string().min(1).optional(),
+  }).strict(),
 ]);
 export type DispatchTarget = z.infer<typeof DispatchTargetSchema>;
 
@@ -324,7 +339,7 @@ export type PerpetualSeatVacant = z.infer<typeof PerpetualSeatVacantSchema>;
 // authority split; lifecycled owns the proactive leg. Consumers terminalize
 // the agent row this identifies; birth_generation and pane_generation are
 // nullable because txd attests what the binding actually carried.
-export const RETIREMENT_CAUSES = ["close", "estate_reset"] as const;
+export const RETIREMENT_CAUSES = ["close", "estate_reset", "topology_migration"] as const;
 export const RetirementCauseSchema = z.enum(RETIREMENT_CAUSES);
 export type RetirementCause = z.infer<typeof RetirementCauseSchema>;
 

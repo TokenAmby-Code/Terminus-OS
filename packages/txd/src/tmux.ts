@@ -10,7 +10,15 @@
 // The interface is injectable so tests run against an in-memory fake with zero
 // tmux dependency; on-box acceptance exercises the real plane.
 
-import { TXD_ESTATE, TXD_SESSION, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import {
+  isStackPage,
+  seatBelongsToPage,
+  TXD_ESTATE,
+  TXD_SESSION,
+  TXD_STACK_WINDOWS,
+  TXD_WINDOWS,
+  type TxdPage,
+} from './estate.ts';
 import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -129,6 +137,8 @@ export interface TmuxControlPlane {
   estateGeneration(): Promise<EstateGeneration>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
+  /** Split one dynamic pane into a mitosis page and tile the page once. */
+  createStackSeat(page: string, seatId: string): Promise<void>;
   /** Kill the seat's pane (teardown). Idempotent. */
   killSeat(seatId: string): Promise<void>;
   /**
@@ -218,10 +228,6 @@ export interface TmuxControlPlane {
 // construction). repairSeat re-runs exactly this split to put a killed seat
 // back without touching any survivor.
 const REPAIR_SPLITS: Record<string, { source: string; flags: string[]; size?: string }> = {
-  'reservists:W': { source: 'reservists:N', flags: ['-f', '-h', '-b'], size: '30%' },
-  'reservists:N': { source: 'reservists:S', flags: ['-v', '-b'] },
-  'reservists:S': { source: 'reservists:N', flags: ['-v'] },
-  'reservists:E': { source: 'reservists:N', flags: ['-f', '-h'], size: '30%' },
   'palace:W': { source: 'palace:N', flags: ['-f', '-h', '-b'], size: '30%' },
   'palace:N': { source: 'palace:S', flags: ['-v', '-b'] },
   'palace:S': { source: 'palace:N', flags: ['-v'] },
@@ -1059,15 +1065,20 @@ export class RealTmux implements TmuxControlPlane {
       .flatMap(([window, seats]) => seats.map((seat) => `${TXD_SESSION}\t${window}\t${seat}`))
       .sort();
     const actual = rows.map((row) => `${row.session}\t${row.window}\t${row.seat}`).sort();
-    if (actual.length !== expected.length || !actual.every((row, index) => row === expected[index])) {
+    const missing = expected.filter((row) => !actual.includes(row));
+    const unexpected = rows
+      .filter((row) => row.session !== TXD_SESSION || !seatBelongsToPage(row.window, row.seat))
+      .map((row) => `${row.session}\t${row.window}\t${row.seat}`)
+      .sort();
+    if (missing.length > 0 || unexpected.length > 0) {
       const render = (list: string[]): string =>
         list.length === 0 ? 'none' : list.map((row) => row.split('\t').join(':')).join(', ');
       return 'estate seats diverged'
-        + ` (missing: ${render(expected.filter((row) => !actual.includes(row)))};`
-        + ` unexpected: ${render(actual.filter((row) => !expected.includes(row)))};`
-        + ` observed ${actual.length} of ${expected.length} canonical panes)`;
+        + ` (missing: ${render(missing)}; unexpected: ${render(unexpected)};`
+        + ` observed ${actual.length} panes with ${expected.length} required)`;
     }
     for (const [window, seats] of Object.entries(TXD_WINDOWS)) {
+      if (isStackPage(window)) continue;
       if (!this.pageGeometryMatches(window, seats, rows)) {
         return `page ${window} geometry is not canonical: ${this.describePage(window, rows)}`;
       }
@@ -1080,8 +1091,7 @@ export class RealTmux implements TmuxControlPlane {
     if (rows.length === 0) return 'empty';
     if (this.isCanonicalEstate(rows)) return 'canonical';
     const recoverable = rows.every((row) => {
-      const seats = TXD_WINDOWS[row.window as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
-      return row.session === TXD_SESSION && seats !== undefined && (row.seat === '' || seats.includes(row.seat));
+      return row.session === TXD_SESSION && (row.seat === '' || seatBelongsToPage(row.window, row.seat));
     });
     return recoverable ? 'recoverable' : 'foreign';
   }
@@ -1138,7 +1148,9 @@ export class RealTmux implements TmuxControlPlane {
       page,
     );
     let panes: string[];
-    if (page === 'reservists' || page === 'palace') {
+    if (isStackPage(page)) {
+      panes = [first];
+    } else if (page === 'palace') {
       const center = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '70%', '-t', first], `split ${page} center`, page);
       const east = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '43%', '-t', center], `split ${page} east`, page);
       const south = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', center], `split ${page} south`, page);
@@ -1192,6 +1204,10 @@ export class RealTmux implements TmuxControlPlane {
       .filter((seat) => seat.pane === 'live' && seat.seat_id.split(':', 1)[0] === page)
       .map((seat) => seat.seat_id)
       .sort();
+    if (isStackPage(page)) {
+      return expected.every((seat) => live.includes(seat))
+        && live.every((seat) => seatBelongsToPage(page, seat));
+    }
     const want = [...expected].sort();
     if (live.length !== want.length || !live.every((seat, index) => seat === want[index])) return false;
     return this.pageGeometryMatches(page, expected, await this.estateRows());
@@ -1206,7 +1222,19 @@ export class RealTmux implements TmuxControlPlane {
    */
   private async enforcePage(page: string, expected: readonly string[]): Promise<{ canonical: boolean; rebuilt: boolean }> {
     if (await this.pageIsCanonical(page, expected)) return { canonical: true, rebuilt: false };
-    if (await this.clearPageZoom(page, `${TXD_SESSION}:${page}`) && await this.pageIsCanonical(page, expected)) {
+    // Flexible pages preserve all live worker panes. A missing allocation pane
+    // is repaired by splitting one into the existing window, never by
+    // reconstructing the page around a worker.
+    if (isStackPage(page)) {
+      const live = (await this.listSeats()).filter((seat) =>
+        seat.pane === 'live' && seatBelongsToPage(page, seat.seat_id),
+      );
+      if (live.length > 0) {
+        await this.createStackSeat(page, TXD_STACK_WINDOWS[page]);
+        return { canonical: await this.pageIsCanonical(page, expected), rebuilt: false };
+      }
+    }
+    if (await this.clearPageZoom(page, `${TXD_SESSION}:=${page}`) && await this.pageIsCanonical(page, expected)) {
       return { canonical: true, rebuilt: false };
     }
     if (!(await this.rebuildPage(page))) return { canonical: false, rebuilt: true };
@@ -1215,7 +1243,13 @@ export class RealTmux implements TmuxControlPlane {
 
   async rebuildPage(page: string): Promise<boolean> {
     if (!Object.hasOwn(TXD_WINDOWS, page)) return false;
-    const target = `${TXD_SESSION}:${page}`;
+    if (isStackPage(page)) {
+      const live = (await this.listSeats()).filter((seat) =>
+        seat.pane === 'live' && seatBelongsToPage(page, seat.seat_id),
+      );
+      if (live.length > 0) return true;
+    }
+    const target = `${TXD_SESSION}:=${page}`;
     try {
       const listed = await this.command('observe_page_panes', page, ['list-panes', '-t', target, '-F', '#{pane_id}']);
       let seed: string | undefined;
@@ -1266,8 +1300,7 @@ export class RealTmux implements TmuxControlPlane {
     const rows = await this.estateRows();
     if (rows.length > 0) {
       const recoverable = rows.every((row) => {
-        const seats = TXD_WINDOWS[row.window as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
-        return row.session === TXD_SESSION && seats !== undefined && (row.seat === '' || seats.includes(row.seat));
+        return row.session === TXD_SESSION && (row.seat === '' || seatBelongsToPage(row.window, row.seat));
       });
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
       if (!(await this.clearDefaultAgentEnvironment(TXD_SESSION))) {
@@ -1289,7 +1322,8 @@ export class RealTmux implements TmuxControlPlane {
       }
       const divergence = this.canonicalDivergence(await this.estateRows());
       if (divergence) throw new Error(`txd canonical estate recovery could not converge: ${divergence}`);
-      for (const seat of TXD_ESTATE) {
+      const seats = (await this.listSeats()).filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id);
+      for (const seat of seats) {
         try {
           await this.ensureSeatGeneration(seat);
         } catch {
@@ -1304,18 +1338,12 @@ export class RealTmux implements TmuxControlPlane {
 
     let sessionCreated = false;
     try {
-      const reservistsW = await this.estateChecked(
-        ['new-session', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:W'), '-c', this.homeDirectory(), '-s', TXD_SESSION, '-n', 'reservists', '-x', '200', '-y', '60'],
+      const mechanicus = await this.estateChecked(
+        ['new-session', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(TXD_STACK_WINDOWS.mechanicus), '-c', this.homeDirectory(), '-s', TXD_SESSION, '-n', 'mechanicus', '-x', '200', '-y', '60'],
         'create canonical session',
       );
       sessionCreated = true;
-      const reservistsN = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:N'), '-c', this.homeDirectory(), '-l', '70%', '-t', reservistsW], 'split reservists center');
-      const reservistsE = await this.estateChecked(['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:E'), '-c', this.homeDirectory(), '-l', '43%', '-t', reservistsN], 'split reservists east');
-      const reservistsS = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('reservists:S'), '-c', this.homeDirectory(), '-l', '50%', '-t', reservistsN], 'split reservists south');
-      await Promise.all([
-        this.tag(reservistsW, 'reservists:W'), this.tag(reservistsN, 'reservists:N'),
-        this.tag(reservistsS, 'reservists:S'), this.tag(reservistsE, 'reservists:E'),
-      ]);
+      await this.tag(mechanicus, TXD_STACK_WINDOWS.mechanicus);
 
       const palaceW = await this.estateChecked(
         ['new-window', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('palace:W'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'palace'],
@@ -1357,6 +1385,15 @@ export class RealTmux implements TmuxControlPlane {
       );
       const councilPanes = [council, councilSW, councilNE, councilSE];
       await Promise.all(TXD_WINDOWS.council.map((seat, index) => this.tag(councilPanes[index]!, seat)));
+
+      for (const page of ['palace_fleet', 'somnium_fleet'] as const) {
+        const pane = await this.estateChecked(
+          ['new-window', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(TXD_STACK_WINDOWS[page]), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', page],
+          `create ${page} window`,
+          page,
+        );
+        await this.tag(pane, TXD_STACK_WINDOWS[page]);
+      }
 
       // Construction owns an empty socket and every pane it just made. A shape
       // that is still wrong here is not estate drift to be enforced away — it
@@ -1410,6 +1447,39 @@ export class RealTmux implements TmuxControlPlane {
       // canonical lookup can find an untagged pane, and no existing estate seat
       // is eligible for removal here.
       await this.command('rollback_seat', seatId, ['kill-session', '-t', safe]);
+      throw error;
+    }
+  }
+
+  async createStackSeat(page: string, seatId: string): Promise<void> {
+    if (!isStackPage(page) || !seatBelongsToPage(page, seatId)) {
+      throw new Error(`txd tmux refused non-mitosis seat ${seatId} on ${page}`);
+    }
+    if (!(await this.reachable())) {
+      throw new Error('txd tmux server is not externally owned; refusing to spawn it inside txd');
+    }
+    if (!(await this.clearDefaultAgentEnvironment())) {
+      throw new Error('txd tmux createStackSeat could not clear the server agent environment');
+    }
+    const target = `${TXD_SESSION}:=${page}`;
+    const paneId = await this.checked([
+      'split-window', '-d', '-P', '-F', '#{pane_id}',
+      ...this.paneEnvironment(seatId), '-c', this.homeDirectory(), '-t', target,
+    ], `split ${seatId}`, page);
+    try {
+      await this.tag(paneId, seatId);
+      const tagged = await this.command('verify_stack_seat_tag', seatId, [
+        'list-panes', '-t', target, '-F', `#{pane_id}\t#{${CANON_OPT}}`,
+      ]);
+      const witnessed = tagged.stdout.trim().split('\n').some((row) => row === `${paneId}\t${seatId}`);
+      if (tagged.code !== 0 || !witnessed) {
+        throw new Error(`txd tmux canonical tag verification failed for ${seatId}`);
+      }
+      // One topology mutation, one native rebalance. No dimensions or
+      // positions cross this boundary.
+      await this.checked(['select-layout', '-t', target, 'tiled'], `tile ${page}`, page);
+    } catch (error) {
+      await this.command('rollback_stack_seat', seatId, ['kill-pane', '-t', paneId]);
       throw error;
     }
   }
@@ -1480,7 +1550,7 @@ export class RealTmux implements TmuxControlPlane {
     if (!page || !Object.hasOwn(TXD_WINDOWS, page)) return false;
     const seats = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[];
     if (!seats.includes(seatId)) return false;
-    const target = `${TXD_SESSION}:${page}`;
+    const target = `${TXD_SESSION}:=${page}`;
     const listed = await this.command('observe_page_panes', page, [
       'list-panes', '-t', target, '-F', `#{pane_id}\t#{${CANON_OPT}}\t#{pane_dead}`,
     ]);
@@ -2290,20 +2360,30 @@ export class FakeTmux implements TmuxControlPlane {
   async ensureEstate(): Promise<EstateEnsureResult> {
     if (this.shape.sessions.length > 0) {
       const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
-        && JSON.stringify(this.shape.windows) === JSON.stringify(TXD_WINDOWS);
+        && Object.entries(TXD_WINDOWS).every(([page, required]) => {
+          const observed = this.shape.windows[page] ?? [];
+          return required.every((seat) => observed.includes(seat))
+            && observed.every((seat) => seatBelongsToPage(page, seat));
+        });
       const allLive = TXD_ESTATE.every((seat) => this.seats.get(seat)?.pane === 'live');
       if (canonical && allLive) return { state: 'existing', rebuilt_pages: [] };
       const recoverable = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && Object.entries(this.shape.windows).every(([page, seats]) => {
-          const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
-          return expected !== undefined && seats.every((seat) => expected.includes(seat));
+          return Object.hasOwn(TXD_WINDOWS, page) && seats.every((seat) => seatBelongsToPage(page, seat));
         });
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
       const rebuilt_pages: TxdPage[] = [];
       for (const [page, expectedSeats] of Object.entries(TXD_WINDOWS)) {
         const shaped = this.shape.windows[page] ?? [];
-        const healthy = shaped.length === expectedSeats.length
-          && expectedSeats.every((seat) => shaped.includes(seat) && this.seats.get(seat)?.pane === 'live');
+        let healthy = expectedSeats.every((seat) => shaped.includes(seat) && this.seats.get(seat)?.pane === 'live')
+          && shaped.every((seat) => seatBelongsToPage(page, seat));
+        if (!healthy && isStackPage(page)) {
+          const live = shaped.filter((seat) => this.seats.get(seat)?.pane === 'live');
+          if (live.length > 0 && !shaped.includes(TXD_STACK_WINDOWS[page])) {
+            await this.createStackSeat(page, TXD_STACK_WINDOWS[page]);
+            healthy = true;
+          }
+        }
         if (!healthy && !(await this.rebuildPage(page))) throw new Error(`FakeTmux: failed page reconstruction ${page}`);
         if (!healthy) rebuilt_pages.push(page as TxdPage);
       }
@@ -2318,10 +2398,14 @@ export class FakeTmux implements TmuxControlPlane {
   }
   async estateGeneration(): Promise<EstateGeneration> {
     if (this.shape.sessions.length === 0) return 'empty';
-    if (JSON.stringify(this.shape.windows) === JSON.stringify(TXD_WINDOWS)) return 'canonical';
+    const canonical = Object.entries(TXD_WINDOWS).every(([page, required]) => {
+      const observed = this.shape.windows[page] ?? [];
+      return required.every((seat) => observed.includes(seat))
+        && observed.every((seat) => seatBelongsToPage(page, seat));
+    });
+    if (canonical) return 'canonical';
     const recoverable = Object.entries(this.shape.windows).every(([page, seats]) => {
-      const expected = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined;
-      return expected !== undefined && seats.every((seat) => expected.includes(seat));
+      return Object.hasOwn(TXD_WINDOWS, page) && seats.every((seat) => seatBelongsToPage(page, seat));
     });
     return recoverable ? 'recoverable' : 'foreign';
   }
@@ -2336,6 +2420,16 @@ export class FakeTmux implements TmuxControlPlane {
     // Test control: a configured seat throws (simulates a below-membrane tmux
     // failure), exercising the constructor's per-seat isolation.
     if (this.failCreate.has(seatId)) throw new Error(`FakeTmux: forced createSeat failure for ${seatId}`);
+    this.seats.set(seatId, { pane: 'live', generation: crypto.randomUUID() });
+  }
+  async createStackSeat(page: string, seatId: string): Promise<void> {
+    if (!isStackPage(page) || !seatBelongsToPage(page, seatId)) {
+      throw new Error(`FakeTmux: refused non-mitosis seat ${seatId} on ${page}`);
+    }
+    if (this.failCreate.has(seatId)) throw new Error(`FakeTmux: forced createSeat failure for ${seatId}`);
+    const seats = this.shape.windows[page];
+    if (!seats) throw new Error(`FakeTmux: absent mitosis page ${page}`);
+    seats.push(seatId);
     this.seats.set(seatId, { pane: 'live', generation: crypto.randomUUID() });
   }
   /** Test control: force createSeat(seatId) to throw. */
@@ -2394,6 +2488,10 @@ export class FakeTmux implements TmuxControlPlane {
   resetSeats(): string[] { return [...this.resets]; }
   async rebuildPage(page: string): Promise<boolean> {
     if (!Object.hasOwn(TXD_WINDOWS, page)) return false;
+    if (isStackPage(page)) {
+      const existing = this.shape.windows[page] ?? [];
+      if (existing.some((seat) => this.seats.get(seat)?.pane === 'live')) return true;
+    }
     const seats = [...TXD_WINDOWS[page as keyof typeof TXD_WINDOWS]];
     this.shape.sessions = [TXD_SESSION];
     this.shape.windows[page] = seats;

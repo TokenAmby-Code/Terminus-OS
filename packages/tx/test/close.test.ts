@@ -24,11 +24,11 @@ async function withAgentId<T>(fn: () => Promise<T>): Promise<T> {
 test('close forwards explicit targets, force, and the caller identity', async () => {
   const { calls, deps } = harness();
   await withAgentId(async () => {
-    expect(await runCli(['close', 'w-1', 'reservists:S', '--force'], deps)).toBe(0);
+    expect(await runCli(['close', 'w-1', 'palace:S', '--force'], deps)).toBe(0);
   });
   expect(calls[0]).toMatchObject({
     method: 'POST', path: '/agents/close',
-    body: { source_agent_id: 'ov-1', targets: ['w-1', 'reservists:S'], force: true },
+    body: { source_agent_id: 'ov-1', targets: ['w-1', 'palace:S'], force: true },
   });
   expect((calls[0]!.body as Record<string, unknown>).page).toBeUndefined();
   expect((calls[0]!.body as Record<string, unknown>).all_idle).toBeUndefined();
@@ -37,10 +37,10 @@ test('close forwards explicit targets, force, and the caller identity', async ()
 test('close --page and --all-idle are the two filtered forms', async () => {
   const { calls, deps } = harness();
   await withAgentId(async () => {
-    expect(await runCli(['close', '--page', 'reservists'], deps)).toBe(0);
+    expect(await runCli(['close', '--page', 'palace'], deps)).toBe(0);
     expect(await runCli(['close', '--all-idle'], deps)).toBe(0);
   });
-  expect(calls[0]!.body).toMatchObject({ page: 'reservists' });
+  expect(calls[0]!.body).toMatchObject({ page: 'palace' });
   expect(calls[1]!.body).toMatchObject({ all_idle: true });
 });
 
@@ -48,10 +48,10 @@ test('close refuses selector abuse and missing identity at the CLI boundary', as
   const { calls, deps } = harness();
   await withAgentId(async () => {
     expect(await runCli(['close'], deps)).toBe(1); // no selector
-    expect(await runCli(['close', 'w-1', '--page', 'reservists'], deps)).toBe(1); // two selectors
-    expect(await runCli(['close', '--page', 'reservists', '--all-idle'], deps)).toBe(1);
+    expect(await runCli(['close', 'w-1', '--page', 'palace'], deps)).toBe(1); // two selectors
+    expect(await runCli(['close', '--page', 'palace', '--all-idle'], deps)).toBe(1);
     expect(await runCli(['close', '--force', '--all-idle'], deps)).toBe(1); // force is explicit-targets only
-    expect(await runCli(['close', '--force', '--page', 'reservists'], deps)).toBe(1);
+    expect(await runCli(['close', '--force', '--page', 'palace'], deps)).toBe(1);
     expect(await runCli(['close', '--bogus', 'w-1'], deps)).toBe(1);
   });
   const old = process.env.AGENT_ID;

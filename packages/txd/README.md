@@ -19,14 +19,14 @@ contracts source, and the public route shape.
   `contradiction_flagged` event (p0, fail-loud in bring-up mode), never a
   silently synthesized lifecycle.
 - **Boot-time estate constructor.** `constructEstate()` stands one persistent
-  tmux session (`main`) at boot: `reservists` (W/N/S/E), `palace` (W/N/S/E),
-  `somnium` (W/N/S/NE/SE), and one four-pane `council` window. Council is an
+  tmux session (`main`) at boot: flat `mechanicus`, compass `palace`
+  (W/N/S/E), remote compass `somnium` (W/N/S/NE/SE), one four-pane `council`
+  window, and flat overflow pages `palace_fleet` and `somnium_fleet`. Council is an
   explicit 2×2 grid: Custodes NW, Fabricator-General SW, Pax NE, and
   Orchestrator SE. Every pane is resolved only through `@canonical_id`.
-  Construction is idempotent. The exact preceding five-seat Council plus
-  two-seat Mechanicus generation is migrated once; arbitrary or foreign
-  shapes are refused before mutation. txd is the constructor; tx never
-  constructs.
+  Construction is idempotent. Mitosis worker panes retain flexible native
+  tiled geometry; arbitrary or foreign pages are refused before mutation.
+  txd is the constructor; tx never constructs.
 - **Static Council singletons.** Custodes (Claude) and Fabricator-General
   (Codex) are compile-time declarations launched through the Fleet wrapper.
   A private one-time handshake binds each fresh agent only after txd

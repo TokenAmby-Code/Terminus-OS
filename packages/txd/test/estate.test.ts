@@ -6,10 +6,11 @@ import { Daemon } from '../src/core.ts';
 import { TXD_ESTATE } from '../src/estate.ts';
 
 const STABLE_SEAT_IDS = [
-  'reservists:W', 'reservists:N', 'reservists:S', 'reservists:E',
+  'mechanicus:new',
   'palace:W', 'palace:N', 'palace:S', 'palace:E',
   'somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE',
   'council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator',
+  'palace_fleet:new', 'somnium_fleet:new',
 ] as const;
 
 function setup() {
@@ -49,10 +50,12 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(tmux.estateShape()).toEqual({
     sessions: ['main'],
     windows: {
-      reservists: ['reservists:W', 'reservists:N', 'reservists:S', 'reservists:E'],
+      mechanicus: ['mechanicus:new'],
       palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
       somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
       council: ['council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator'],
+      palace_fleet: ['palace_fleet:new'],
+      somnium_fleet: ['somnium_fleet:new'],
     },
   });
 
@@ -63,7 +66,7 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(board.every((r) => r.binding === 'unbound')).toBe(true);
 });
 
-test('canonical seat ids pin the four-seat Council generation', () => {
+test('canonical seat ids pin compass seats and mitosis allocation panes', () => {
   expect(TXD_ESTATE).toEqual(STABLE_SEAT_IDS);
 });
 
