@@ -108,24 +108,32 @@ console.log(
   }),
 );
 
-// Stand the canonical persistent estate declaratively (rung 2). The dedicated
-// unsandboxed tx-estate.service must already own the server; missing ownership or
-// a non-canonical existing shape fails boot loudly before event mutation.
-const est = await daemon.constructEstate();
-await daemon.finalizeEstateRotation();
-// Structured logs go to stderr here as elsewhere in the daemon (core.ts).
-console.error(
-  JSON.stringify({
+// Stand the canonical persistent estate declaratively (rung 2). A predecessor
+// topology deliberately left in place for an operator-owned rotation remains
+// opaque: txd stays available, does not resolve it, and performs no mutation.
+const est = await daemon.constructEstateAtBoot();
+if (est === null) {
+  console.error(JSON.stringify({
     level: 'info',
-    event: 'estate_constructed',
-    created: est.created.length,
-    existing: est.existing.length,
-    backfilled: est.backfilled.length,
-    failed: est.failed.length,
-    created_seats: est.created,
-    backfilled_seats: est.backfilled,
-  }),
-);
+    event: 'estate_activation_pending',
+    action: 'explicit_estate_rotation_required',
+  }));
+} else {
+  await daemon.finalizeEstateRotation();
+  // Structured logs go to stderr here as elsewhere in the daemon (core.ts).
+  console.error(
+    JSON.stringify({
+      level: 'info',
+      event: 'estate_constructed',
+      created: est.created.length,
+      existing: est.existing.length,
+      backfilled: est.backfilled.length,
+      failed: est.failed.length,
+      created_seats: est.created,
+      backfilled_seats: est.backfilled,
+    }),
+  );
+}
 
 async function shutdown() {
   // Graceful, but bounded: let in-flight requests finish, yet never let a stuck

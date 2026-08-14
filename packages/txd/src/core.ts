@@ -2098,6 +2098,22 @@ export class Daemon {
     return result;
   }
 
+  /**
+   * Boot is allowed to observe an intentionally unrotated predecessor shape,
+   * but never to interpret or repair it. The explicit estate rotation remains
+   * the only activation boundary; every non-foreign generation takes the
+   * ordinary strict constructor path.
+   */
+  async constructEstateAtBoot(): Promise<{
+    created: string[];
+    existing: string[];
+    backfilled: string[];
+    failed: string[];
+  } | null> {
+    if (await this.tmux.estateGeneration() === 'foreign') return null;
+    return this.constructEstate();
+  }
+
   // ── /agents/close — the sanctioned remote-close verb (rung 3) ──────────────
   // Reaps agent processes and returns their estate seats to the freelist. The
   // terminal chain (retired + process_reaped + seat_cleared) is atomic per seat
@@ -2918,12 +2934,14 @@ export class Daemon {
     // Probe the externally supervised estate socket, not just `tmux -V` — a
     // responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
+    const estate_generation = await this.tmux.estateGeneration();
+    const activation_pending = estate_generation === 'foreign';
     const open = proj.openContradictions.length;
     const tints = await this.tintReadiness();
     return {
       ok: open === 0
         && tmux_reachable
-        && tints.every((tint) => tint.state === 'ready'),
+        && (activation_pending || tints.every((tint) => tint.state === 'ready')),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,
@@ -2933,6 +2951,8 @@ export class Daemon {
       events: await this.store.count(),
       open_contradictions: open,
       tmux_reachable,
+      estate_generation,
+      activation_pending,
       tints,
     };
   }

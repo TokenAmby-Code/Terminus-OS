@@ -118,6 +118,23 @@ test('refuses a non-canonical existing estate without mutation or events', async
   expect(tmux.estateShape()).toEqual({ sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } });
 });
 
+test('boot defers a foreign pre-rotation shape without mutating or resolving it', async () => {
+  const { store, tmux, d } = setup();
+  tmux.seedNonCanonicalEstate();
+
+  expect(await d.constructEstateAtBoot()).toBeNull();
+  expect(await store.count()).toBe(0);
+  expect(tmux.estateShape()).toEqual({ sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } });
+
+  const health = await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version });
+  expect(health).toMatchObject({
+    ok: true,
+    estate_generation: 'foreign',
+    activation_pending: true,
+    tmux_reachable: true,
+  });
+});
+
 test('boot constructor reconstructs a damaged canonical page and retires bindings whose processes were wiped', async () => {
   const { store, tmux, d } = setup();
   await d.constructEstate();
