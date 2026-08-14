@@ -316,7 +316,24 @@ export class Daemon {
       };
       const idle = (candidate: string) => workloads.get(candidate)?.idle ?? false;
       let seatId: string;
-      let mintedStackSeat = false;
+      let mintedStackSeat: string | null = null;
+      const decommissionMintedStackSeat = async (): Promise<void> => {
+        if (!mintedStackSeat) return;
+        const seat = mintedStackSeat;
+        await this.tmux.killSeat(seat);
+        if ((await this.tmux.listSeats()).some((row) => row.seat_id === seat && row.pane === 'live')) {
+          throw new Error(`txd could not verify minted stack seat cleanup for ${seat}`);
+        }
+        await this.store.append({
+          entity_type: 'seat',
+          entity_id: seat,
+          event_type: 'reg.seat_decommissioned',
+          payload: {},
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+        mintedStackSeat = null;
+      };
       const mintStackSeat = async (page: TxdStackPage): Promise<string | null> => {
         const candidate = `${page}:${crypto.randomUUID()}`;
         try {
@@ -324,7 +341,20 @@ export class Daemon {
         } catch {
           return null;
         }
-        mintedStackSeat = true;
+        mintedStackSeat = candidate;
+        try {
+          await this.store.append({
+            entity_type: 'seat',
+            entity_id: candidate,
+            event_type: 'reg.pane_created',
+            payload: { pane_state: 'live' },
+            provenance: this.prov('observer', null),
+            occurred_at: this.now(),
+          });
+        } catch (error) {
+          await decommissionMintedStackSeat();
+          throw error;
+        }
         return candidate;
       };
       const configuredStackPage = (target: DispatchRequested['target']): TxdStackPage | null =>
@@ -400,57 +430,63 @@ export class Daemon {
           }
         }
       }
-      const paneGeneration = await this.tmux.seatGeneration(seatId);
-      if (!paneGeneration) {
-        await refuse('seat_generation_unattested');
-        return;
-      }
-      // Launch composition: identity (minted by registrationd at dispatch),
-      // a fresh per-launch nonce, and — for an ssh seat — the declared target
-      // alias all enter the pane environment here. The composition is
-      // remembered against the pane generation so the placement adapter can
-      // audit the wrapper's echo; a fresh birth on the same seat mints a
-      // fresh nonce, so a new binding can never attach a dead generation's
-      // envelope.
-      const launchNonce = crypto.randomUUID();
-      const sshTarget = sshSeatTarget(seatId);
-      if (!(await this.tmux.startSeatEngine({
-        seatId,
-        engine: request.engine,
-        wrapper: this.physicalRegistration.agentWrapper,
-        agentId: request.agent_id,
-        launchNonce,
-        ...(sshTarget ? { sshTarget } : {}),
-        ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
-      }))) {
-        if (mintedStackSeat) await this.tmux.killSeat(seatId);
-        await refuse('seat_start_failed');
-        return;
-      }
-      await this.store.append({
-        entity_type: 'seat',
-        entity_id: seatId,
-        event_type: 'reg.launch_composed',
-        payload: {
+      try {
+        const paneGeneration = await this.tmux.seatGeneration(seatId);
+        if (!paneGeneration) {
+          await decommissionMintedStackSeat();
+          await refuse('seat_generation_unattested');
+          return;
+        }
+        // Launch composition: identity (minted by registrationd at dispatch),
+        // a fresh per-launch nonce, and — for an ssh seat — the declared target
+        // alias all enter the pane environment here. The composition is
+        // remembered against the pane generation so the placement adapter can
+        // audit the wrapper's echo; a fresh birth on the same seat mints a
+        // fresh nonce, so a new binding can never attach a dead generation's
+        // envelope.
+        const launchNonce = crypto.randomUUID();
+        const sshTarget = sshSeatTarget(seatId);
+        if (!(await this.tmux.startSeatEngine({
+          seatId,
+          engine: request.engine,
+          wrapper: this.physicalRegistration.agentWrapper,
+          agentId: request.agent_id,
+          launchNonce,
+          ...(sshTarget ? { sshTarget } : {}),
+          ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
+        }))) {
+          await decommissionMintedStackSeat();
+          await refuse('seat_start_failed');
+          return;
+        }
+        await this.store.append({
+          entity_type: 'seat',
+          entity_id: seatId,
+          event_type: 'reg.launch_composed',
+          payload: {
+            seat_id: seatId,
+            pane_generation: paneGeneration,
+            agent_id: request.agent_id,
+            launch_nonce: launchNonce,
+            target_machine: sshTarget ?? null,
+            engine: request.engine,
+            worktree: request.worktree ?? null,
+          },
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+        await publish('agent.dispatch_attested', DispatchAttestedSchema.parse({
+          schema_version: request.schema_version,
+          dispatch_id: request.dispatch_id,
+          machine,
           seat_id: seatId,
           pane_generation: paneGeneration,
-          agent_id: request.agent_id,
-          launch_nonce: launchNonce,
-          target_machine: sshTarget ?? null,
           engine: request.engine,
-          worktree: request.worktree ?? null,
-        },
-        provenance: this.prov('observer', null),
-        occurred_at: this.now(),
-      });
-      await publish('agent.dispatch_attested', DispatchAttestedSchema.parse({
-        schema_version: request.schema_version,
-        dispatch_id: request.dispatch_id,
-        machine,
-        seat_id: seatId,
-        pane_generation: paneGeneration,
-        engine: request.engine,
-      }));
+        }));
+      } catch (error) {
+        await decommissionMintedStackSeat();
+        throw error;
+      }
     });
   }
 

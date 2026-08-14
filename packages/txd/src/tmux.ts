@@ -1066,15 +1066,16 @@ export class RealTmux implements TmuxControlPlane {
       .sort();
     const actual = rows.map((row) => `${row.session}\t${row.window}\t${row.seat}`).sort();
     const missing = expected.filter((row) => !actual.includes(row));
+    const duplicates = [...new Set(actual.filter((row, index) => actual.indexOf(row) !== index))];
     const unexpected = rows
       .filter((row) => row.session !== TXD_SESSION || !seatBelongsToPage(row.window, row.seat))
       .map((row) => `${row.session}\t${row.window}\t${row.seat}`)
       .sort();
-    if (missing.length > 0 || unexpected.length > 0) {
+    if (missing.length > 0 || unexpected.length > 0 || duplicates.length > 0) {
       const render = (list: string[]): string =>
         list.length === 0 ? 'none' : list.map((row) => row.split('\t').join(':')).join(', ');
       return 'estate seats diverged'
-        + ` (missing: ${render(missing)}; unexpected: ${render(unexpected)};`
+        + ` (missing: ${render(missing)}; unexpected: ${render(unexpected)}; duplicates: ${render(duplicates)};`
         + ` observed ${actual.length} panes with ${expected.length} required)`;
     }
     for (const [window, seats] of Object.entries(TXD_WINDOWS)) {
@@ -1200,13 +1201,12 @@ export class RealTmux implements TmuxControlPlane {
 
   /** The canonical acceptance predicate for one page: live seats and geometry. */
   private async pageIsCanonical(page: string, expected: readonly string[]): Promise<boolean> {
-    const live = (await this.listSeats())
-      .filter((seat) => seat.pane === 'live' && seat.seat_id.split(':', 1)[0] === page)
-      .map((seat) => seat.seat_id)
-      .sort();
+    const observed = (await this.listSeats()).filter((seat) => seat.seat_id.split(':', 1)[0] === page);
+    const live = observed.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id).sort();
     if (isStackPage(page)) {
-      return expected.every((seat) => live.includes(seat))
-        && live.every((seat) => seatBelongsToPage(page, seat));
+      return expected.every((seat) => observed.filter((row) => row.seat_id === seat).length === 1
+          && observed.find((row) => row.seat_id === seat)?.pane === 'live')
+        && observed.every((seat) => seat.pane === 'live' && seatBelongsToPage(page, seat.seat_id));
     }
     const want = [...expected].sort();
     if (live.length !== want.length || !live.every((seat, index) => seat === want[index])) return false;
@@ -1226,10 +1226,14 @@ export class RealTmux implements TmuxControlPlane {
     // is repaired by splitting one into the existing window, never by
     // reconstructing the page around a worker.
     if (isStackPage(page)) {
-      const live = (await this.listSeats()).filter((seat) =>
-        seat.pane === 'live' && seatBelongsToPage(page, seat.seat_id),
-      );
-      if (live.length > 0) {
+      const observed = (await this.listSeats()).filter((seat) => seatBelongsToPage(page, seat.seat_id));
+      const allocation = observed.filter((seat) => seat.seat_id === TXD_STACK_WINDOWS[page]);
+      if (allocation.length > 1) return { canonical: false, rebuilt: false };
+      if (allocation.length === 1 && allocation[0]!.pane === 'dead') {
+        if (!(await this.resetSeat(TXD_STACK_WINDOWS[page]))) return { canonical: false, rebuilt: false };
+        return { canonical: await this.pageIsCanonical(page, expected), rebuilt: false };
+      }
+      if (allocation.length === 0 && observed.some((seat) => seat.pane === 'live')) {
         await this.createStackSeat(page, TXD_STACK_WINDOWS[page]);
         return { canonical: await this.pageIsCanonical(page, expected), rebuilt: false };
       }
@@ -2362,11 +2366,10 @@ export class FakeTmux implements TmuxControlPlane {
       const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && Object.entries(TXD_WINDOWS).every(([page, required]) => {
           const observed = this.shape.windows[page] ?? [];
-          return required.every((seat) => observed.includes(seat))
-            && observed.every((seat) => seatBelongsToPage(page, seat));
+          return required.every((seat) => observed.filter((candidate) => candidate === seat).length === 1)
+            && observed.every((seat) => seatBelongsToPage(page, seat) && this.seats.get(seat)?.pane === 'live');
         });
-      const allLive = TXD_ESTATE.every((seat) => this.seats.get(seat)?.pane === 'live');
-      if (canonical && allLive) return { state: 'existing', rebuilt_pages: [] };
+      if (canonical) return { state: 'existing', rebuilt_pages: [] };
       const recoverable = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && Object.entries(this.shape.windows).every(([page, seats]) => {
           return Object.hasOwn(TXD_WINDOWS, page) && seats.every((seat) => seatBelongsToPage(page, seat));
@@ -2378,11 +2381,17 @@ export class FakeTmux implements TmuxControlPlane {
         let healthy = expectedSeats.every((seat) => shaped.includes(seat) && this.seats.get(seat)?.pane === 'live')
           && shaped.every((seat) => seatBelongsToPage(page, seat));
         if (!healthy && isStackPage(page)) {
+          const allocation = shaped.filter((seat) => seat === TXD_STACK_WINDOWS[page]);
           const live = shaped.filter((seat) => this.seats.get(seat)?.pane === 'live');
-          if (live.length > 0 && !shaped.includes(TXD_STACK_WINDOWS[page])) {
+          if (allocation.length === 1 && this.seats.get(allocation[0]!)?.pane === 'dead') {
+            await this.resetSeat(allocation[0]!);
+          } else if (allocation.length === 0 && live.length > 0) {
             await this.createStackSeat(page, TXD_STACK_WINDOWS[page]);
-            healthy = true;
           }
+          const repaired = this.shape.windows[page] ?? [];
+          healthy = expectedSeats.every((seat) => repaired.filter((candidate) => candidate === seat).length === 1
+              && this.seats.get(seat)?.pane === 'live')
+            && repaired.every((seat) => seatBelongsToPage(page, seat) && this.seats.get(seat)?.pane === 'live');
         }
         if (!healthy && !(await this.rebuildPage(page))) throw new Error(`FakeTmux: failed page reconstruction ${page}`);
         if (!healthy) rebuilt_pages.push(page as TxdPage);
@@ -2400,8 +2409,8 @@ export class FakeTmux implements TmuxControlPlane {
     if (this.shape.sessions.length === 0) return 'empty';
     const canonical = Object.entries(TXD_WINDOWS).every(([page, required]) => {
       const observed = this.shape.windows[page] ?? [];
-      return required.every((seat) => observed.includes(seat))
-        && observed.every((seat) => seatBelongsToPage(page, seat));
+      return required.every((seat) => observed.filter((candidate) => candidate === seat).length === 1)
+        && observed.every((seat) => seatBelongsToPage(page, seat) && this.seats.get(seat)?.pane === 'live');
     });
     if (canonical) return 'canonical';
     const recoverable = Object.entries(this.shape.windows).every(([page, seats]) => {
@@ -2490,7 +2499,11 @@ export class FakeTmux implements TmuxControlPlane {
     if (!Object.hasOwn(TXD_WINDOWS, page)) return false;
     if (isStackPage(page)) {
       const existing = this.shape.windows[page] ?? [];
-      if (existing.some((seat) => this.seats.get(seat)?.pane === 'live')) return true;
+      if (existing.some((seat) => this.seats.get(seat)?.pane === 'live')) {
+        return TXD_WINDOWS[page].every((seat) => existing.filter((candidate) => candidate === seat).length === 1
+            && this.seats.get(seat)?.pane === 'live')
+          && existing.every((seat) => seatBelongsToPage(page, seat) && this.seats.get(seat)?.pane === 'live');
+      }
     }
     const seats = [...TXD_WINDOWS[page as keyof typeof TXD_WINDOWS]];
     this.shape.sessions = [TXD_SESSION];

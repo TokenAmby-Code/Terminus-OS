@@ -92,6 +92,23 @@ test('canonical ids resolve to seats inside the shared session windows', async (
   expect((await tmux.listSeats()).map((seat) => seat.seat_id).sort()).toEqual([...TXD_ESTATE].sort());
 });
 
+test('stack recovery revives one dead allocation pane without replacing a live worker', async () => {
+  const { tmux } = setup();
+  await tmux.ensureEstate();
+  await tmux.createStackSeat('palace_fleet', 'palace_fleet:worker-1');
+  tmux.killOutOfBand('palace_fleet:new');
+
+  expect(await tmux.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
+  expect(tmux.resetSeats()).toContain('palace_fleet:new');
+  expect(tmux.estateShape().windows.palace_fleet).toEqual([
+    'palace_fleet:new',
+    'palace_fleet:worker-1',
+  ]);
+  expect((await tmux.listSeats()).filter((seat) => seat.seat_id === 'palace_fleet:new')).toEqual([
+    { seat_id: 'palace_fleet:new', pane: 'live' },
+  ]);
+});
+
 test('refuses a non-canonical existing estate without mutation or events', async () => {
   const { store, tmux, d } = setup();
   tmux.seedNonCanonicalEstate();

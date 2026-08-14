@@ -161,7 +161,7 @@ test('a scoped reset releases an unbound composed birth for redispatch', async (
 });
 
 test('the mechanicus pool mints a fresh stack pane directly', async () => {
-  const { tmux, published, d } = setup();
+  const { store, tmux, published, d } = setup();
   await d.constructEstate();
   await d.dispatch(request({ kind: 'page', page: 'mechanicus' }));
   expect(published).toHaveLength(1);
@@ -169,6 +169,38 @@ test('the mechanicus pool mints a fresh stack pane directly', async () => {
   const seatId = String(published[0]!.payload.seat_id);
   expect(seatId).toMatch(/^mechanicus:[0-9a-f-]{36}$/);
   expect(tmux.seatEngine(seatId)?.agentId).toBe(AGENT_ID);
+  expect((await store.readAll()).filter((event) => event.entity_id === seatId).map((event) => event.event_type)).toEqual([
+    'reg.pane_created',
+    'reg.launch_composed',
+  ]);
+});
+
+test('a minted stack pane is decommissioned when its engine cannot start', async () => {
+  class FailingStackTmux extends FakeTmux {
+    override async startSeatEngine(launch: Parameters<FakeTmux['startSeatEngine']>[0]): Promise<boolean> {
+      if (launch.seatId.startsWith('mechanicus:')) return false;
+      return super.startSeatEngine(launch);
+    }
+  }
+  const store = new MemoryEventStore();
+  const tmux = new FailingStackTmux();
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const d = new Daemon(store, tmux, undefined, undefined, {
+    machine: 'k12-personal',
+    configuration: CONFIGURATION,
+    agentWrapper: '/fleet/agent-wrapper',
+    perpetual: {},
+    publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => { published.push({ type, payload }); },
+  });
+  await d.constructEstate();
+
+  await d.dispatch(request({ kind: 'page', page: 'mechanicus' }));
+
+  expect(published).toMatchObject([{ type: 'agent.dispatch_refused', payload: { reason: 'seat_start_failed' } }]);
+  const dynamic = (await store.readAll()).filter((event) => event.entity_id.startsWith('mechanicus:')
+    && event.entity_id !== 'mechanicus:new');
+  expect(dynamic.map((event) => event.event_type)).toEqual(['reg.pane_created', 'reg.seat_decommissioned']);
+  expect((await tmux.listSeats()).find((seat) => seat.seat_id === dynamic[0]!.entity_id)?.pane).toBe('dead');
 });
 
 test('autofill skips a pane held by a foreign process and takes the next idle seat', async () => {
