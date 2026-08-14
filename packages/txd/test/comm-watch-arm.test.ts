@@ -146,6 +146,47 @@ test('behavioral pin: concurrent comms publish one composer observation per pane
   expect(events.filter((event) => event.event_type === 'act.composer_interactive_announced')).toHaveLength(1);
 });
 
+test('behavioral pin: a pane rebind after observation cannot publish stale composer interactivity', async () => {
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const physical = {
+    machine: 'test',
+    configuration: { generation: 'g', digest: 'd' },
+    agentWrapper: '/wrapper',
+    perpetual: {},
+    commStreams: {},
+    publish: async (type: string, payload: Record<string, unknown>) => {
+      published.push({ type, payload });
+    },
+  };
+  const { store, tmux, d } = await fixture(async () => undefined, physical);
+  tmux.setPaneText('palace:W', '› Write tests for @filename\n\n  gpt-5.6-sol medium');
+  const observe = tmux.observeComposerInteractive.bind(tmux);
+  tmux.observeComposerInteractive = async (seatId) => {
+    const interactive = await observe(seatId);
+    await store.append({
+      entity_type: 'seat', entity_id: seatId, event_type: 'reg.bound',
+      payload: { agent_id: 'worker', persona: 'p', rank: 'astartes', commander: null, tint: '#111111', pane_generation: 'replacement-generation', engine: 'codex' },
+      provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-01T00:00:01.000Z',
+    });
+    return interactive;
+  };
+
+  await expect(d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'stale generation control',
+    ask: false,
+    reply: false,
+  })).rejects.toThrow('target_binding_changed: worker');
+
+  expect(published.filter((event) => event.type === 'agent.composer_interactive')).toHaveLength(0);
+  const events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'reg.composer_observation_prepared')).toHaveLength(0);
+  expect(events.filter((event) => event.event_type === 'act.composer_interactive_announced')).toHaveLength(0);
+});
+
 test('behavioral pin: an unpainted newborn receives no bytes before lcd releases its composer-interactive gate', async () => {
   const order: string[] = [];
   const armed: CommWatchArmInput[] = [];

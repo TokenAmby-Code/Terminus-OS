@@ -1095,6 +1095,13 @@ export class Daemon {
       const occurredAt = this.now();
       const shouldPublish = await this.locked(async () => {
         const events = await this.store.readAll();
+        const current = buildProjections(events).currentBindings.find((row) =>
+          row.registered
+          && row.agent_id === targetAgentId
+          && row.seat_id === observation.seatId
+          && row.pane_generation === observation.paneGeneration,
+        );
+        if (!current) return false;
         if (events.some((event) => event.entity_id === observation.observationId
           && event.event_type === 'act.composer_interactive_announced')) return false;
         if (!events.some((event) => event.entity_id === observation.observationId
