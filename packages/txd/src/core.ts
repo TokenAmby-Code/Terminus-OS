@@ -178,6 +178,7 @@ function sha256(value: string): string {
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
+  private composerObservationsInFlight = new Map<string, Promise<boolean>>();
   // Live pane-shell runs by seat, so a physical pane replacement can abort
   // exactly the completions whose signal died with the pane's shell.
   private paneRuns = new Map<string, Set<AbortController>>();
@@ -1088,52 +1089,66 @@ export class Daemon {
     });
     if (!observation || !await this.tmux.observeComposerInteractive(observation.seatId)) return false;
     if (observation.announced) return true;
-    const occurredAt = this.now();
-    await this.locked(async () => {
-      const events = await this.store.readAll();
-      if (events.some((event) => event.entity_id === observation.observationId
-        && event.event_type === 'act.composer_interactive_announced')) return;
-      if (!events.some((event) => event.entity_id === observation.observationId
-        && event.event_type === 'reg.composer_observation_prepared')) {
+    const inFlight = this.composerObservationsInFlight.get(observation.observationId);
+    if (inFlight) return inFlight;
+    const announcement = (async () => {
+      const occurredAt = this.now();
+      const shouldPublish = await this.locked(async () => {
+        const events = await this.store.readAll();
+        if (events.some((event) => event.entity_id === observation.observationId
+          && event.event_type === 'act.composer_interactive_announced')) return false;
+        if (!events.some((event) => event.entity_id === observation.observationId
+          && event.event_type === 'reg.composer_observation_prepared')) {
+          await this.store.append({
+            entity_type: 'agent',
+            entity_id: observation.observationId,
+            event_type: 'reg.composer_observation_prepared',
+            payload: {
+              agent_id: targetAgentId,
+              seat_id: observation.seatId,
+              pane_generation: observation.paneGeneration,
+            },
+            provenance: this.prov('observer', transportReceipt),
+            occurred_at: occurredAt,
+          });
+        }
+        return true;
+      });
+      if (!shouldPublish) return true;
+      await this.physicalRegistration!.publish('agent.composer_interactive', {
+        schema_version: SCHEMA_VERSION,
+        agent_id: targetAgentId,
+        seat_id: observation.seatId,
+        pane_generation: observation.paneGeneration,
+        observed_at: occurredAt,
+      });
+      await this.locked(async () => {
+        const events = await this.store.readAll();
+        if (events.some((event) => event.entity_id === observation.observationId
+          && event.event_type === 'act.composer_interactive_announced')) return;
         await this.store.append({
           entity_type: 'agent',
           entity_id: observation.observationId,
-          event_type: 'reg.composer_observation_prepared',
+          event_type: 'act.composer_interactive_announced',
           payload: {
             agent_id: targetAgentId,
             seat_id: observation.seatId,
             pane_generation: observation.paneGeneration,
           },
           provenance: this.prov('observer', transportReceipt),
-          occurred_at: occurredAt,
+          occurred_at: this.now(),
         });
-      }
-    });
-    await this.physicalRegistration.publish('agent.composer_interactive', {
-      schema_version: SCHEMA_VERSION,
-      agent_id: targetAgentId,
-      seat_id: observation.seatId,
-      pane_generation: observation.paneGeneration,
-      observed_at: occurredAt,
-    });
-    await this.locked(async () => {
-      const events = await this.store.readAll();
-      if (events.some((event) => event.entity_id === observation.observationId
-        && event.event_type === 'act.composer_interactive_announced')) return;
-      await this.store.append({
-        entity_type: 'agent',
-        entity_id: observation.observationId,
-        event_type: 'act.composer_interactive_announced',
-        payload: {
-          agent_id: targetAgentId,
-          seat_id: observation.seatId,
-          pane_generation: observation.paneGeneration,
-        },
-        provenance: this.prov('observer', transportReceipt),
-        occurred_at: this.now(),
       });
-    });
-    return true;
+      return true;
+    })();
+    this.composerObservationsInFlight.set(observation.observationId, announcement);
+    try {
+      return await announcement;
+    } finally {
+      if (this.composerObservationsInFlight.get(observation.observationId) === announcement) {
+        this.composerObservationsInFlight.delete(observation.observationId);
+      }
+    }
   }
 
   async comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {

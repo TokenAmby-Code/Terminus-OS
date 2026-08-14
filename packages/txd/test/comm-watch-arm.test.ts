@@ -110,6 +110,42 @@ test('behavioral pin: a painted newborn backfills durable composer interactivity
   expect(events.filter((event) => event.event_type === 'act.composer_interactive_announced')).toHaveLength(1);
 });
 
+test('behavioral pin: concurrent comms publish one composer observation per pane generation', async () => {
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const physical = {
+    machine: 'test',
+    configuration: { generation: 'g', digest: 'd' },
+    agentWrapper: '/wrapper',
+    perpetual: {},
+    commStreams: {},
+    publish: async (type: string, payload: Record<string, unknown>) => {
+      published.push({ type, payload });
+    },
+  };
+  const { store, tmux, d } = await fixture(async () => undefined, physical);
+  tmux.setPaneText('palace:W', '› Write tests for @filename\n\n  gpt-5.6-sol medium');
+  const observe = tmux.observeComposerInteractive.bind(tmux);
+  let observations = 0;
+  let releaseObservations!: () => void;
+  const observationsReady = new Promise<void>((resolve) => { releaseObservations = resolve; });
+  tmux.observeComposerInteractive = async (seatId) => {
+    observations += 1;
+    if (observations === 2) releaseObservations();
+    await observationsReady;
+    return observe(seatId);
+  };
+
+  await Promise.all([
+    d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'one', ask: false, reply: false }),
+    d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'two', ask: false, reply: false }),
+  ]);
+
+  expect(published.filter((event) => event.type === 'agent.composer_interactive')).toHaveLength(1);
+  const events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'reg.composer_observation_prepared')).toHaveLength(1);
+  expect(events.filter((event) => event.event_type === 'act.composer_interactive_announced')).toHaveLength(1);
+});
+
 test('behavioral pin: an unpainted newborn receives no bytes before lcd releases its composer-interactive gate', async () => {
   const order: string[] = [];
   const armed: CommWatchArmInput[] = [];
