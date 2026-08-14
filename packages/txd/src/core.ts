@@ -79,7 +79,17 @@ import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections, type LaunchComposition, type TransportClaim } from './projections.ts';
-import { isTxdPage, SSH_SEAT_TARGETS, sshSeatTarget, TXD_ESTATE, TXD_WINDOWS, type TxdPage } from './estate.ts';
+import {
+  isStackPage,
+  isStackSeat,
+  isTxdPage,
+  SSH_SEAT_TARGETS,
+  sshSeatTarget,
+  TXD_ESTATE,
+  TXD_WINDOWS,
+  type TxdPage,
+  type TxdStackPage,
+} from './estate.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
@@ -306,28 +316,87 @@ export class Daemon {
       };
       const idle = (candidate: string) => workloads.get(candidate)?.idle ?? false;
       let seatId: string;
+      let mintedStackSeat: string | null = null;
+      const decommissionMintedStackSeat = async (): Promise<void> => {
+        if (!mintedStackSeat) return;
+        const seat = mintedStackSeat;
+        await this.tmux.killSeat(seat);
+        if ((await this.tmux.listSeats()).some((row) => row.seat_id === seat && row.pane === 'live')) {
+          throw new Error(`txd could not verify minted stack seat cleanup for ${seat}`);
+        }
+        await this.store.append({
+          entity_type: 'seat',
+          entity_id: seat,
+          event_type: 'reg.seat_decommissioned',
+          payload: {},
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+        mintedStackSeat = null;
+      };
+      const mintStackSeat = async (page: TxdStackPage): Promise<string | null> => {
+        const candidate = `${page}:${crypto.randomUUID()}`;
+        try {
+          await this.tmux.createStackSeat(page, candidate);
+        } catch {
+          return null;
+        }
+        mintedStackSeat = candidate;
+        try {
+          await this.store.append({
+            entity_type: 'seat',
+            entity_id: candidate,
+            event_type: 'reg.pane_created',
+            payload: { pane_state: 'live' },
+            provenance: this.prov('observer', null),
+            occurred_at: this.now(),
+          });
+        } catch (error) {
+          await decommissionMintedStackSeat();
+          throw error;
+        }
+        return candidate;
+      };
+      const configuredStackPage = (target: DispatchRequested['target']): TxdStackPage | null =>
+        target.stack_page && isStackPage(target.stack_page) ? target.stack_page : null;
+      const pageStates = (page: TxdPage) => (TXD_WINDOWS[page] as readonly string[]).map((candidate) => ({
+        seat_id: candidate,
+        state: disqualify(candidate) ?? (idle(candidate) ? null : 'foreign_process' as const),
+      }));
       if (request.target.kind === 'page') {
         const page = request.target.page;
         if (!isTxdPage(page)) {
           await refuse('page_absent');
           return;
         }
-        // Declared page order, so which seat an autofill takes is
-        // reproducible. Autofill never displaces a foreign foreground
-        // process: when txd itself is choosing, only an idle shell is free.
-        const states = TXD_WINDOWS[page].map((candidate) => ({
-          seat_id: candidate,
-          state: disqualify(candidate) ?? (idle(candidate) ? null : 'foreign_process' as const),
-        }));
-        const chosen = states.find((candidate) => candidate.state === null);
-        if (!chosen) {
-          await refuse('no_free_seat', states.map((candidate) => ({
-            seat_id: candidate.seat_id,
-            state: candidate.state!,
-          })));
-          return;
+        if (isStackPage(page)) {
+          const minted = await mintStackSeat(page);
+          if (!minted) {
+            await refuse('seat_start_failed');
+            return;
+          }
+          seatId = minted;
+        } else {
+          // Declared page order, so which seat an autofill takes is
+          // reproducible. Autofill never displaces a foreign foreground
+          // process: when txd itself is choosing, only an idle shell is free.
+          const states = pageStates(page);
+          const chosen = states.find((candidate) => candidate.state === null);
+          if (!chosen) {
+            const stackPage = configuredStackPage(request.target);
+            const minted = stackPage ? await mintStackSeat(stackPage) : null;
+            if (!minted) {
+              await refuse('no_free_seat', states.map((candidate) => ({
+                seat_id: candidate.seat_id,
+                state: candidate.state!,
+              })));
+              return;
+            }
+            seatId = minted;
+          } else {
+            seatId = chosen.seat_id;
+          }
         }
-        seatId = chosen.seat_id;
       } else {
         // An explicitly named seat replaces whatever its pane is running —
         // naming the seat is the authorization, and the CLI's in-place
@@ -335,73 +404,89 @@ export class Daemon {
         // invoker itself. Only a live agent binding or estate-level state
         // refuses.
         seatId = request.target.seat_id;
-        if (!TXD_ESTATE.includes(seatId)) {
+        if (!TXD_ESTATE.includes(seatId) || isStackSeat(seatId)) {
           await refuse('seat_absent');
           return;
         }
         const state = disqualify(seatId);
         if (state !== null) {
-          const reason = ({
-            bound: 'seat_bound',
-            launching: 'seat_launching',
-            decommissioned: 'seat_decommissioned',
-            reset_pending: 'seat_reset_pending',
-            dead: 'pane_dead',
-          } as const)[state];
-          await refuse(reason, [{ seat_id: seatId, state }]);
-          return;
+          const page = seatId.split(':', 1)[0]!;
+          const stackPage = configuredStackPage(request.target);
+          const noFreeDeclaredSeat = isTxdPage(page) && !isStackPage(page)
+            && pageStates(page).every((candidate) => candidate.state !== null);
+          const minted = stackPage && noFreeDeclaredSeat ? await mintStackSeat(stackPage) : null;
+          if (minted) {
+            seatId = minted;
+          } else {
+            const reason = ({
+              bound: 'seat_bound',
+              launching: 'seat_launching',
+              decommissioned: 'seat_decommissioned',
+              reset_pending: 'seat_reset_pending',
+              dead: 'pane_dead',
+            } as const)[state];
+            await refuse(reason, [{ seat_id: seatId, state }]);
+            return;
+          }
         }
       }
-      const paneGeneration = await this.tmux.seatGeneration(seatId);
-      if (!paneGeneration) {
-        await refuse('seat_generation_unattested');
-        return;
-      }
-      // Launch composition: identity (minted by registrationd at dispatch),
-      // a fresh per-launch nonce, and — for an ssh seat — the declared target
-      // alias all enter the pane environment here. The composition is
-      // remembered against the pane generation so the placement adapter can
-      // audit the wrapper's echo; a fresh birth on the same seat mints a
-      // fresh nonce, so a new binding can never attach a dead generation's
-      // envelope.
-      const launchNonce = crypto.randomUUID();
-      const sshTarget = sshSeatTarget(seatId);
-      if (!(await this.tmux.startSeatEngine({
-        seatId,
-        engine: request.engine,
-        wrapper: this.physicalRegistration.agentWrapper,
-        agentId: request.agent_id,
-        launchNonce,
-        ...(sshTarget ? { sshTarget } : {}),
-        ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
-      }))) {
-        await refuse('seat_start_failed');
-        return;
-      }
-      await this.store.append({
-        entity_type: 'seat',
-        entity_id: seatId,
-        event_type: 'reg.launch_composed',
-        payload: {
+      try {
+        const paneGeneration = await this.tmux.seatGeneration(seatId);
+        if (!paneGeneration) {
+          await decommissionMintedStackSeat();
+          await refuse('seat_generation_unattested');
+          return;
+        }
+        // Launch composition: identity (minted by registrationd at dispatch),
+        // a fresh per-launch nonce, and — for an ssh seat — the declared target
+        // alias all enter the pane environment here. The composition is
+        // remembered against the pane generation so the placement adapter can
+        // audit the wrapper's echo; a fresh birth on the same seat mints a
+        // fresh nonce, so a new binding can never attach a dead generation's
+        // envelope.
+        const launchNonce = crypto.randomUUID();
+        const sshTarget = sshSeatTarget(seatId);
+        if (!(await this.tmux.startSeatEngine({
+          seatId,
+          engine: request.engine,
+          wrapper: this.physicalRegistration.agentWrapper,
+          agentId: request.agent_id,
+          launchNonce,
+          ...(sshTarget ? { sshTarget } : {}),
+          ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
+        }))) {
+          await decommissionMintedStackSeat();
+          await refuse('seat_start_failed');
+          return;
+        }
+        await this.store.append({
+          entity_type: 'seat',
+          entity_id: seatId,
+          event_type: 'reg.launch_composed',
+          payload: {
+            seat_id: seatId,
+            pane_generation: paneGeneration,
+            agent_id: request.agent_id,
+            launch_nonce: launchNonce,
+            target_machine: sshTarget ?? null,
+            engine: request.engine,
+            worktree: request.worktree ?? null,
+          },
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+        await publish('agent.dispatch_attested', DispatchAttestedSchema.parse({
+          schema_version: request.schema_version,
+          dispatch_id: request.dispatch_id,
+          machine,
           seat_id: seatId,
           pane_generation: paneGeneration,
-          agent_id: request.agent_id,
-          launch_nonce: launchNonce,
-          target_machine: sshTarget ?? null,
           engine: request.engine,
-          worktree: request.worktree ?? null,
-        },
-        provenance: this.prov('observer', null),
-        occurred_at: this.now(),
-      });
-      await publish('agent.dispatch_attested', DispatchAttestedSchema.parse({
-        schema_version: request.schema_version,
-        dispatch_id: request.dispatch_id,
-        machine,
-        seat_id: seatId,
-        pane_generation: paneGeneration,
-        engine: request.engine,
-      }));
+        }));
+      } catch (error) {
+        await decommissionMintedStackSeat();
+        throw error;
+      }
     });
   }
 
@@ -2263,7 +2348,15 @@ export class Daemon {
     // to abort.
     signalUnregistered = true,
   ): Promise<boolean> {
-    const reaped = await this.tmux.reapSeat(binding.seat_id, binding.tint);
+    let reaped: boolean;
+    if (isStackSeat(binding.seat_id)) {
+      await this.tmux.killSeat(binding.seat_id);
+      reaped = !(await this.tmux.listSeats()).some((seat) =>
+        seat.seat_id === binding.seat_id && seat.pane === 'live',
+      );
+    } else {
+      reaped = await this.tmux.reapSeat(binding.seat_id, binding.tint);
+    }
     if (!reaped) return false;
     const occurred_at = this.now();
     const prov = this.prov('observer', transportReceipt);
@@ -2273,6 +2366,9 @@ export class Daemon {
     }
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
+    if (isStackSeat(binding.seat_id)) {
+      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_decommissioned', payload: {}, provenance: prov, occurred_at });
+    }
     await this.store.appendAll(inputs);
     await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
     // The seat is now cleared, and if it is one the estate keeps staffed the

@@ -7,8 +7,8 @@ import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 // Lane: behavioral-pin (the gating lane).
 //
 // The defect these were written against: `tx estate show` reported 20 rows
-// against an estate of 17 seats. `proof:bus`, `reservists:civic` and
-// `reservists:token-os` appeared in every estate read, carried no binding, and
+// against an estate of 17 seats. `proof:bus`, `palace:civic` and
+// `palace:token-os` appeared in every estate read, carried no binding, and
 // had no tmux pane behind them. They are surviving `reg.pane_created` ledger
 // facts whose panes are gone.
 //
@@ -66,13 +66,13 @@ test('a cleared seat whose pane is gone is flagged as a phantom', async () => {
   expect(types).not.toContain('reg.teardown_started');
 });
 
-// The reservists:civic / reservists:token-os shape: a seat the estate
+// The palace:civic / palace:token-os shape: a seat the estate
 // declaration once stood and later dropped, with no decommission ever written.
 test('a seat dropped from the declaration without a decommission is flagged', async () => {
   const { store, d } = setup();
   await store.append({
     entity_type: 'seat',
-    entity_id: 'reservists:civic',
+    entity_id: 'palace:civic',
     event_type: 'reg.pane_created',
     payload: { pane_state: 'live' },
     provenance: { source: 'observer', transport_receipt: null, emitter_version: 8 },
@@ -82,7 +82,7 @@ test('a seat dropped from the declaration without a decommission is flagged', as
   const rec = await d.reconcile();
 
   expect(rec.new_contradictions).toContainEqual(expect.objectContaining({
-    entity_id: 'reservists:civic',
+    entity_id: 'palace:civic',
     kind: 'pane_absent',
   }));
   expect(rec.ok).toBe(false);

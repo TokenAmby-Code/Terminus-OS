@@ -122,14 +122,15 @@ function declaration(seatId: string, paneGeneration: string, wrapperPid: number)
 // ── The estate declaration ───────────────────────────────────────────────────
 
 test('somnium seats are ssh seats targeting k12-work; every other seat is local', () => {
-  for (const seat of TXD_WINDOWS.somnium) {
+  const remoteSeats: readonly string[] = [...TXD_WINDOWS.somnium, ...TXD_WINDOWS.somnium_fleet];
+  for (const seat of remoteSeats) {
     expect(sshSeatTarget(seat)).toBe('k12-work');
   }
   for (const seat of TXD_ESTATE) {
-    if ((TXD_WINDOWS.somnium as readonly string[]).includes(seat)) continue;
+    if (remoteSeats.includes(seat)) continue;
     expect(sshSeatTarget(seat)).toBeUndefined();
   }
-  expect(Object.keys(SSH_SEAT_TARGETS).sort()).toEqual([...TXD_WINDOWS.somnium].sort());
+  expect(Object.keys(SSH_SEAT_TARGETS).sort()).toEqual([...remoteSeats].sort());
 });
 
 // ── Launch composition ───────────────────────────────────────────────────────

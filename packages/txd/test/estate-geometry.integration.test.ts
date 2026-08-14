@@ -82,6 +82,23 @@ async function constructAt(width: number, height: number): Promise<Record<'palac
 }
 
 describe('disposable canonical estate geometry', () => {
+  test('fresh construction pins mitosis pages at windows 0, 4, and 5', async () => {
+    const socket = `txd-window-order-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    await new RealTmux(socket).ensureEstate();
+
+    const windows = await tmux(socket, 'list-windows', '-t', 'main', '-F', '#{window_index}:#{window_name}');
+    expect(windows.split('\n')).toEqual([
+      '0:mechanicus',
+      '1:palace',
+      '2:somnium',
+      '3:council',
+      '4:palace_fleet',
+      '5:somnium_fleet',
+    ]);
+  });
+
   test('every canonical pane owns its placement environment and txd restamps it on respawn', async () => {
     const socket = `txd-pane-environment-${process.pid}`;
     sockets.push(socket);

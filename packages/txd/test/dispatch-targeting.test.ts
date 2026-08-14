@@ -160,22 +160,47 @@ test('a scoped reset releases an unbound composed birth for redispatch', async (
   expect(tmux.seatEngine('palace:W')?.agentId).toBe('d0debb42-d54f-434f-aeb4-345e6b54df91');
 });
 
-test('a page target to an undeclared page is refused, not guessed', async () => {
-  const { published, d } = setup();
+test('the mechanicus pool mints a fresh stack pane directly', async () => {
+  const { store, tmux, published, d } = setup();
   await d.constructEstate();
   await d.dispatch(request({ kind: 'page', page: 'mechanicus' }));
-  expect(published).toEqual([{
-    type: 'agent.dispatch_refused',
-    payload: {
-      schema_version: AGENT_SCHEMA_VERSION,
-      dispatch_id: DISPATCH_ID,
-      machine: 'k12-personal',
-      target: { kind: 'page', page: 'mechanicus' },
-      engine: 'claude',
-      reason: 'page_absent',
-      seats: [],
-    },
-  }]);
+  expect(published).toHaveLength(1);
+  expect(published[0]).toMatchObject({ type: 'agent.dispatch_attested' });
+  const seatId = String(published[0]!.payload.seat_id);
+  expect(seatId).toMatch(/^mechanicus:[0-9a-f-]{36}$/);
+  expect(tmux.seatEngine(seatId)?.agentId).toBe(AGENT_ID);
+  expect((await store.readAll()).filter((event) => event.entity_id === seatId).map((event) => event.event_type)).toEqual([
+    'reg.pane_created',
+    'reg.launch_composed',
+  ]);
+});
+
+test('a minted stack pane is decommissioned when its engine cannot start', async () => {
+  class FailingStackTmux extends FakeTmux {
+    override async startSeatEngine(launch: Parameters<FakeTmux['startSeatEngine']>[0]): Promise<boolean> {
+      if (launch.seatId.startsWith('mechanicus:')) return false;
+      return super.startSeatEngine(launch);
+    }
+  }
+  const store = new MemoryEventStore();
+  const tmux = new FailingStackTmux();
+  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const d = new Daemon(store, tmux, undefined, undefined, {
+    machine: 'k12-personal',
+    configuration: CONFIGURATION,
+    agentWrapper: '/fleet/agent-wrapper',
+    perpetual: {},
+    publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => { published.push({ type, payload }); },
+  });
+  await d.constructEstate();
+
+  await d.dispatch(request({ kind: 'page', page: 'mechanicus' }));
+
+  expect(published).toMatchObject([{ type: 'agent.dispatch_refused', payload: { reason: 'seat_start_failed' } }]);
+  const dynamic = (await store.readAll()).filter((event) => event.entity_id.startsWith('mechanicus:')
+    && event.entity_id !== 'mechanicus:new');
+  expect(dynamic.map((event) => event.event_type)).toEqual(['reg.pane_created', 'reg.seat_decommissioned']);
+  expect((await tmux.listSeats()).find((seat) => seat.seat_id === dynamic[0]!.entity_id)?.pane).toBe('dead');
 });
 
 test('autofill skips a pane held by a foreign process and takes the next idle seat', async () => {
@@ -190,7 +215,7 @@ test('autofill skips a pane held by a foreign process and takes the next idle se
   });
 });
 
-test('an exhausted page refuses with the seat-level truth for every candidate', async () => {
+test('an exhausted palace falls through and mints a registered-identity stack pane', async () => {
   const { tmux, published, d } = setup();
   await d.constructEstate();
   await bindSeat(d, tmux, 'palace:W');
@@ -205,24 +230,46 @@ test('an exhausted page refuses with the seat-level truth for every candidate', 
     });
   }
   published.length = 0;
-  await d.dispatch(request({ kind: 'page', page: 'palace' }));
-  expect(published).toEqual([{
-    type: 'agent.dispatch_refused',
-    payload: {
-      schema_version: AGENT_SCHEMA_VERSION,
-      dispatch_id: DISPATCH_ID,
-      machine: 'k12-personal',
-      target: { kind: 'page', page: 'palace' },
-      engine: 'claude',
-      reason: 'no_free_seat',
-      seats: [
-        { seat_id: 'palace:W', state: 'bound' },
-        { seat_id: 'palace:N', state: 'foreign_process' },
-        { seat_id: 'palace:S', state: 'foreign_process' },
-        { seat_id: 'palace:E', state: 'foreign_process' },
-      ],
-    },
-  }]);
+  await d.dispatch(request({ kind: 'page', page: 'palace', stack_page: 'palace_fleet' }));
+  expect(published).toHaveLength(1);
+  expect(published[0]).toMatchObject({
+    type: 'agent.dispatch_attested',
+    payload: { dispatch_id: DISPATCH_ID, engine: 'claude' },
+  });
+  const seatId = String(published[0]!.payload.seat_id);
+  expect(seatId).toMatch(/^palace_fleet:[0-9a-f-]{36}$/);
+  expect(tmux.seatEngine(seatId)).toMatchObject({
+    seatId,
+    agentId: AGENT_ID,
+    wrapper: '/fleet/agent-wrapper',
+  });
+});
+
+test('a named palace seat falls through only when every declared palace seat is full', async () => {
+  const { tmux, published, d } = setup();
+  await d.constructEstate();
+  await bindSeat(d, tmux, 'palace:W');
+  for (const seat of ['palace:N', 'palace:S', 'palace:E']) tmux.setCommand(seat, 'sudo');
+  published.length = 0;
+
+  await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W', stack_page: 'palace_fleet' }));
+
+  expect(published).toHaveLength(1);
+  expect(published[0]).toMatchObject({ type: 'agent.dispatch_attested' });
+  const seatId = String(published[0]!.payload.seat_id);
+  expect(seatId).toMatch(/^palace_fleet:[0-9a-f-]{36}$/);
+  expect(tmux.seatEngine(seatId)?.agentId).toBe(AGENT_ID);
+});
+
+test('somnium overflow reuses the remote wrapper placement per pane', async () => {
+  const { tmux, published, d } = setup();
+  await d.constructEstate();
+  for (const seat of ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE']) {
+    tmux.setCommand(seat, 'ssh');
+  }
+  await d.dispatch(request({ kind: 'page', page: 'somnium', stack_page: 'somnium_fleet' }));
+  const seatId = String(published[0]!.payload.seat_id);
+  expect(tmux.seatEngine(seatId)).toMatchObject({ seatId, sshTarget: 'k12-work' });
 });
 
 test('a seat target lands on exactly the named seat', async () => {

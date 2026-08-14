@@ -6,10 +6,11 @@ import { Daemon } from '../src/core.ts';
 import { TXD_ESTATE } from '../src/estate.ts';
 
 const STABLE_SEAT_IDS = [
-  'reservists:W', 'reservists:N', 'reservists:S', 'reservists:E',
+  'mechanicus:new',
   'palace:W', 'palace:N', 'palace:S', 'palace:E',
   'somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE',
   'council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator',
+  'palace_fleet:new', 'somnium_fleet:new',
 ] as const;
 
 function setup() {
@@ -49,10 +50,12 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(tmux.estateShape()).toEqual({
     sessions: ['main'],
     windows: {
-      reservists: ['reservists:W', 'reservists:N', 'reservists:S', 'reservists:E'],
+      mechanicus: ['mechanicus:new'],
       palace: ['palace:W', 'palace:N', 'palace:S', 'palace:E'],
       somnium: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'],
       council: ['council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator'],
+      palace_fleet: ['palace_fleet:new'],
+      somnium_fleet: ['somnium_fleet:new'],
     },
   });
 
@@ -63,7 +66,7 @@ test('stands the full estate from empty — one pane_created per seat', async ()
   expect(board.every((r) => r.binding === 'unbound')).toBe(true);
 });
 
-test('canonical seat ids pin the four-seat Council generation', () => {
+test('canonical seat ids pin compass seats and mitosis allocation panes', () => {
   expect(TXD_ESTATE).toEqual(STABLE_SEAT_IDS);
 });
 
@@ -87,6 +90,23 @@ test('canonical ids resolve to seats inside the shared session windows', async (
   expect(await tmux.sendToSeat('somnium:NE', 'hello')).toMatchObject({ verdict: 'staged' });
   expect(await tmux.reapSeat('palace:S')).toBe(true);
   expect((await tmux.listSeats()).map((seat) => seat.seat_id).sort()).toEqual([...TXD_ESTATE].sort());
+});
+
+test('stack recovery revives one dead allocation pane without replacing a live worker', async () => {
+  const { tmux } = setup();
+  await tmux.ensureEstate();
+  await tmux.createStackSeat('palace_fleet', 'palace_fleet:worker-1');
+  tmux.killOutOfBand('palace_fleet:new');
+
+  expect(await tmux.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
+  expect(tmux.resetSeats()).toContain('palace_fleet:new');
+  expect(tmux.estateShape().windows.palace_fleet).toEqual([
+    'palace_fleet:new',
+    'palace_fleet:worker-1',
+  ]);
+  expect((await tmux.listSeats()).filter((seat) => seat.seat_id === 'palace_fleet:new')).toEqual([
+    { seat_id: 'palace_fleet:new', pane: 'live' },
+  ]);
 });
 
 test('refuses a non-canonical existing estate without mutation or events', async () => {

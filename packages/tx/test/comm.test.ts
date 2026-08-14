@@ -31,22 +31,22 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
   };
   try {
     expect(await runCli(['comm', 'council:custodes', 'command=compact', '--', 'hard'], deps)).toBe(0);
-    expect(await runCli(['comm', 'reservists:N', 'skill=openai-docs', '--', 'models'], deps)).toBe(0);
+    expect(await runCli(['comm', 'palace:N', 'skill=openai-docs', '--', 'models'], deps)).toBe(0);
     expect(calls).toEqual([
       { method: 'POST', path: '/agents/comm', body: {
         schema_version: 11, source_agent_id: 'source', target: 'council:custodes',
         intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
       } },
       { method: 'POST', path: '/agents/comm', body: {
-        schema_version: 11, source_agent_id: 'source', target: 'reservists:N',
+        schema_version: 11, source_agent_id: 'source', target: 'palace:N',
         intent: { kind: 'skill', name: 'openai-docs', args: ['models'] }, ask: false, reply: false,
       } },
     ]);
     for (const argv of [
-      ['comm', 'reservists:N', 'skill=/openai-docs'],
-      ['comm', 'reservists:N', 'skill=$openai-docs'],
-      ['comm', 'reservists:N', 'skill=openai-docs', '--engine=codex'],
-      ['comm', '--page', 'reservists', 'command=compact'],
+      ['comm', 'palace:N', 'skill=/openai-docs'],
+      ['comm', 'palace:N', 'skill=$openai-docs'],
+      ['comm', 'palace:N', 'skill=openai-docs', '--engine=codex'],
+      ['comm', '--page', 'palace', 'command=compact'],
     ]) expect(await runCli(argv, deps)).toBe(1);
     expect(errors.join('\n')).not.toContain('choose an engine');
   } finally {
