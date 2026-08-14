@@ -150,9 +150,12 @@ describe("txd lifecycle vocabulary", () => {
       events: 0,
       open_contradictions: 0,
       tmux_reachable: true,
+      estate_generation: "canonical",
+      activation_pending: false,
       tints: [],
     };
     expect(HealthSchema.parse(health).service).toBe("txd");
+    expect(HealthSchema.parse(health).activation_pending).toBe(false);
     expect(() => HealthSchema.parse({ ...health, service: "k12_daemon" })).toThrow();
   });
 

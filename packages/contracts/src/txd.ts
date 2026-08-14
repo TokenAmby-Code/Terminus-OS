@@ -413,6 +413,10 @@ export const HealthSchema = z.object({
   // Honest-only: bring-up mode reports ok=false while any contradiction is open.
   open_contradictions: z.number().int(),
   tmux_reachable: z.boolean(),
+  estate_generation: z.enum(['empty', 'canonical', 'recoverable', 'foreign']),
+  // A foreign shape can be a deliberately unrotated predecessor topology.
+  // The daemon stays available without mutating it until the operator rotates.
+  activation_pending: z.boolean(),
   tints: z.array(TintReadinessSchema),
 });
 export type Health = z.infer<typeof HealthSchema>;
