@@ -37,7 +37,6 @@ export type DaemonConfig = {
     generation: string;
     digest: string;
     perpetual: Record<string, 'claude' | 'codex'>;
-    commStreams?: Record<string, 'interactive' | 'headless'>;
   };
 };
 
@@ -73,7 +72,6 @@ function envDefaults(): PartialConfig {
     digest: process.env.TXD_REGISTRATION_CONFIG_DIGEST,
   };
   let perpetual: Record<string, 'claude' | 'codex'> = {};
-  let commStreams: Record<string, 'interactive' | 'headless'> = {};
   if (process.env.TXD_PERPETUAL_AGENTS !== undefined) {
     try {
       perpetual = JSON.parse(process.env.TXD_PERPETUAL_AGENTS) as Record<string, 'claude' | 'codex'>;
@@ -81,18 +79,11 @@ function envDefaults(): PartialConfig {
       throw new Error('txd config error: TXD_PERPETUAL_AGENTS must be valid JSON');
     }
   }
-  if (process.env.TXD_COMM_STREAM_CLASSES !== undefined) {
-    try {
-      commStreams = JSON.parse(process.env.TXD_COMM_STREAM_CLASSES) as Record<string, 'interactive' | 'headless'>;
-    } catch {
-      throw new Error('txd config error: TXD_COMM_STREAM_CLASSES must be valid JSON');
-    }
-  }
   const registrationSeen = Object.values(registrationRequired).some((value) => value !== undefined);
   if (registrationSeen && Object.values(registrationRequired).some((value) => !value)) {
     throw new Error('txd config error: physical registration environment is incomplete');
   }
-  const registration = { ...registrationRequired, perpetual, commStreams };
+  const registration = { ...registrationRequired, perpetual };
   return {
     bind: process.env.TXD_BIND,
     port: process.env.TXD_PORT ? Number(process.env.TXD_PORT) : undefined,
@@ -163,12 +154,6 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
         || Object.entries(physical.perpetual).some(([pane, engine]) =>
           !pane || (engine !== 'claude' && engine !== 'codex'))) {
       throw new Error('txd config error: physicalRegistration.perpetual must map panes to engines');
-    }
-    if (physical.commStreams !== undefined && (typeof physical.commStreams !== 'object'
-        || Array.isArray(physical.commStreams)
-        || Object.entries(physical.commStreams).some(([pane, stream]) =>
-          !pane || (stream !== 'interactive' && stream !== 'headless')))) {
-      throw new Error('txd config error: physicalRegistration.commStreams must map panes to stream classes');
     }
   }
 

@@ -110,10 +110,9 @@ export type CommWatchArmInput = {
   message_id: string;
   target_agent_id: string;
   source_agent_id: string;
-  stream_class: 'interactive' | 'headless';
   composer_interactive_observed: boolean;
 };
-export type ComposerGateInput = { correlation_id: string; target_agent_id: string; stream_class: 'interactive' | 'headless' };
+export type ComposerGateInput = { correlation_id: string; target_agent_id: string };
 export type CommReceiptRuntime = {
   now: () => number;
   schedule: (wake: () => void, delayMs: number) => () => void;
@@ -145,7 +144,6 @@ export type PhysicalRegistrationRuntime = {
   configuration: { generation: string; digest: string };
   agentWrapper: string;
   perpetual: Record<string, 'claude' | 'codex'>;
-  commStreams?: Record<string, 'interactive' | 'headless'>;
   publish: (
     eventType: TxdPublishedEventType,
     payload: Record<string, unknown>,
@@ -1213,18 +1211,14 @@ export class Daemon {
     sourceAgentId: string,
     targetAgentId: string,
     transportReceipt: string | null,
-    streamClass: 'interactive' | 'headless',
   ): Promise<void> {
     if (!this.commWatchArm) return;
     try {
-      const composerInteractiveObserved = streamClass === 'interactive'
-        ? await this.backfillComposerInteractivity(targetAgentId, transportReceipt)
-        : false;
+      const composerInteractiveObserved = await this.backfillComposerInteractivity(targetAgentId, transportReceipt);
       await this.commWatchArm({
         message_id: messageId,
         target_agent_id: targetAgentId,
         source_agent_id: sourceAgentId,
-        stream_class: streamClass,
         composer_interactive_observed: composerInteractiveObserved,
       });
     } catch (error) {
@@ -1380,8 +1374,7 @@ export class Daemon {
     });
 
     await Promise.all(prepared.targets.map((target) => {
-      const streamClass = this.physicalRegistration?.commStreams?.[target.seat_id] ?? 'interactive';
-      return this.armCommWatch(prepared.messageId, req.source_agent_id, target.agent_id, transportReceipt, streamClass);
+      return this.armCommWatch(prepared.messageId, req.source_agent_id, target.agent_id, transportReceipt);
     }));
 
     return this.locked(async () => {
@@ -1400,13 +1393,9 @@ export class Daemon {
       for (const target of prepared.targets) {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
-        const streamClass = this.physicalRegistration?.commStreams?.[target.seat_id] ?? 'interactive';
-        if (prepared.renderedIntent && streamClass !== 'interactive') throw new Error('intent_requires_interactive_stream');
         const frame = prepared.renderedIntent?.frame
           ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
-        const sent = streamClass === 'headless'
-          ? await this.tmux.sendToSeat(target.seat_id, frame)
-          : await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame, prepared.renderedIntent?.tabAfter, binding.engine ?? undefined);
+        const sent = await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame, prepared.renderedIntent?.tabAfter, binding.engine ?? undefined);
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
             target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes,
@@ -1416,15 +1405,6 @@ export class Daemon {
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
         allStaged &&= sent.verdict === 'staged';
-        if (streamClass === 'headless' && sent.verdict === 'staged') {
-          const assertionId = `${prepared.messageId}:${target.agent_id}`;
-          await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
-            payload: { message_id: prepared.messageId, target_agent_id: target.agent_id, source_agent_id: req.source_agent_id, confirmation_fact_type: 'headless_consumed' },
-            provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
-          await this.physicalRegistration?.publish('agent.headless_consumed', {
-            schema_version: SCHEMA_VERSION, agent_id: target.agent_id, message_id: prepared.messageId, seat_id: target.seat_id,
-          });
-        }
       }
       if (prepared.replyingToAsk) await this.assertCallback(prepared.replyingToAsk, req.source_agent_id, req.message!, 'reply', null, transportReceipt);
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
@@ -1439,11 +1419,10 @@ export class Daemon {
       const binding = proj.currentBindings.find((row) => row.registered && row.agent_id === req.target_agent_id);
       if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
       const correlationId = crypto.randomUUID();
-      const streamClass = this.physicalRegistration?.commStreams?.[binding.seat_id] ?? 'interactive';
-      return { binding, correlationId, streamClass };
+      return { binding, correlationId };
     });
     if (!this.composerGate) throw new Error('composer_gate_unconfigured');
-    await this.composerGate({ correlation_id: prepared.correlationId, target_agent_id: req.target_agent_id, stream_class: prepared.streamClass });
+    await this.composerGate({ correlation_id: prepared.correlationId, target_agent_id: req.target_agent_id });
 
     return this.locked(async () => {
       const proj = await this.projections();

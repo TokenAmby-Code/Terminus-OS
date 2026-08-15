@@ -71,14 +71,14 @@ const commWatchArm = cfg.lifecycledSocket
           message_id: input.message_id,
           source_agent_id: input.source_agent_id,
           target_agent_id: input.target_agent_id,
-          stream_class: input.stream_class,
+          stream_class: 'interactive',
           composer_interactive_observed: input.composer_interactive_observed,
         }, 'lifecycled_comm_gate');
     }
   : null;
 const composerGate = cfg.lifecycledSocket
-  ? async (input: { correlation_id: string; target_agent_id: string; stream_class: 'interactive' | 'headless' }) => {
-      await postLifecycledGate('/agents/composer/gate', { schema_version: 1, ...input }, 'lifecycled_composer_gate');
+  ? async (input: { correlation_id: string; target_agent_id: string }) => {
+      await postLifecycledGate('/agents/composer/gate', { schema_version: 1, ...input, stream_class: 'interactive' }, 'lifecycled_composer_gate');
     }
   : null;
 // The journal connection owns both txd's durable cursor and its producer.
@@ -95,7 +95,6 @@ const physicalRegistration = cfg.physicalRegistration
       },
       agentWrapper: cfg.agentWrapper,
       perpetual: cfg.physicalRegistration.perpetual,
-      commStreams: cfg.physicalRegistration.commStreams ?? {},
       publish: makeJournalPublisher(journalConnection.sql, cfg.machine),
     }
   : null;
