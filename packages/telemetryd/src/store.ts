@@ -36,7 +36,7 @@ export class PostgresTelemetryStore implements TelemetryStore {
       insert into telemetry.phone_hooks
         (hook_id, occurred_at, event_type, source, payload)
       values
-        (${hook.hook_id}, ${hook.occurred_at}, ${hook.event_type}, ${hook.source}, ${JSON.stringify(hook.payload)}::jsonb)
+        (${hook.hook_id}, ${hook.occurred_at}, ${hook.event_type}, ${hook.source}, ${hook.payload})
     `;
   }
 
