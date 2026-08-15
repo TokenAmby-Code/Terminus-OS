@@ -14,10 +14,11 @@ import { FakeTmux, RealTmux } from '../src/tmux.ts';
 import { buildRoutes } from '../src/server.ts';
 
 describe('adversarial: the session_start registration leg stays dead', () => {
-  test('txd does not consume hook.session_start', () => {
+  test('txd does not consume hook.session_start', async () => {
     const daemon = new Daemon(new MemoryEventStore(), new FakeTmux());
-    const routes = buildRoutes(daemon, { version: 'test', git_sha: 'test', bun: 'test' }, 'test');
-    expect(routes.every((route) => route.match('/ingress/hooks/session_start') === null)).toBeTrue();
+    const route = buildRoutes(daemon, { version: 'test', git_sha: 'test', bun: 'test' }, 'test')
+      .find((candidate) => candidate.match('/ingress/hooks/session_start') !== null)!;
+    expect((await route.handler(new Request('http://localhost/ingress/hooks/session_start', { method: 'POST' }), {})).status).toBe(410);
   });
 
   test('the daemon has no engine-session attestation', () => {

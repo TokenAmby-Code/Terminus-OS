@@ -25,9 +25,12 @@ import {
   type CommAccepted,
   type CommCallback,
   type CommDeliveryReadResponse,
+  COMM_DELIVERY_RECEIPT_TIMEOUT_MS,
   type CommHook,
   type CommIntent,
   type CommRequest,
+  type CommReceiptWaitRequest,
+  type CommReceipt,
   type CommRedriveRequest,
   type CommRedriveResponse,
   type CommTarget,
@@ -111,6 +114,18 @@ export type CommWatchArmInput = {
   composer_interactive_observed: boolean;
 };
 export type ComposerGateInput = { correlation_id: string; target_agent_id: string; stream_class: 'interactive' | 'headless' };
+export type CommReceiptRuntime = {
+  now: () => number;
+  schedule: (wake: () => void, delayMs: number) => () => void;
+};
+const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
+  now: () => Date.now(),
+  schedule: (wake, delayMs) => {
+    const timer = setTimeout(wake, delayMs);
+    timer.unref?.();
+    return () => clearTimeout(timer);
+  },
+};
 
 // The ONE comm frame template. comm() stages it and commRedrive() verifies
 // the composer against it; a second copy of this string would let the two
@@ -188,6 +203,7 @@ function sha256(value: string): string {
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
+  private deliveryWaiters = new Map<string, Set<() => void>>();
   private composerObservationsInFlight = new Map<string, Promise<boolean>>();
   // Live pane-shell runs by seat, so a physical pane replacement can abort
   // exactly the completions whose signal died with the pane's shell.
@@ -204,6 +220,7 @@ export class Daemon {
     /** Arms lifecycled's comm watch pre-send; null = no watch plane configured. */
     private commWatchArm: ((input: CommWatchArmInput) => Promise<void>) | null = null,
     private composerGate: ((input: ComposerGateInput) => Promise<void>) | null = null,
+    private commReceiptRuntime: CommReceiptRuntime = DEFAULT_COMM_RECEIPT_RUNTIME,
   ) {}
 
   async attestWrapperStart(
@@ -1395,6 +1412,7 @@ export class Daemon {
             target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes,
             submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: frame,
+            receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
         allStaged &&= sent.verdict === 'staged';
@@ -1642,6 +1660,11 @@ export class Daemon {
     this.wakeAsk(askId);
   }
 
+  private wakeDelivery(messageId: string): void {
+    for (const wake of this.deliveryWaiters.get(messageId) ?? []) wake();
+    this.deliveryWaiters.delete(messageId);
+  }
+
   // One flush, every message it carried. A frame this agent was never a target
   // of belongs to someone else's correspondence and is skipped in silence; only
   // a flush that matched NOTHING is a refusal, so an ordinary prompt still
@@ -1674,6 +1697,7 @@ export class Daemon {
             payload: { message_id: messageId, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
           asserted.push(messageId);
         }
+        this.wakeDelivery(messageId);
         const sourceAgentId = String(accepted.payload.source_agent_id);
         const confirmationStaged = events.some((event) => event.event_type === 'act.agent_input_injected'
           && event.payload.input_class === 'delivery_confirmation'
@@ -1681,7 +1705,12 @@ export class Daemon {
           && event.payload.target_agent_id === sourceAgentId
           && Array.isArray(event.payload.message_ids)
           && event.payload.message_ids.includes(messageId));
-        if (!confirmationStaged) {
+        const bytesSent = events.find((event) => event.event_type === 'act.comm_bytes_sent'
+          && event.entity_id === messageId
+          && event.payload.target_agent_id === hook.agent_id);
+        const deadline = Date.parse(String(bytesSent?.payload.receipt_deadline_at ?? ''));
+        const asynchronous = !Number.isFinite(deadline) || this.commReceiptRuntime.now() >= deadline;
+        if (!confirmationStaged && asynchronous) {
           confirmations.set(sourceAgentId, [...(confirmations.get(sourceAgentId) ?? []), messageId]);
         }
       }
@@ -1803,6 +1832,70 @@ export class Daemon {
       accepted_at: accepted.occurred_at,
       deliveries, complete: deliveries.length > 0 && deliveries.every((d) => d.delivered),
     };
+  }
+
+  async waitCommReceipt(req: CommReceiptWaitRequest): Promise<CommReceipt> {
+    if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+    const state = async () => {
+      const events = await this.store.readAll();
+      const accepted = events.find((event) => event.entity_id === req.message_id && event.event_type === 'reg.comm_accepted');
+      if (!accepted) throw new Error('message_absent');
+      if (accepted.payload.source_agent_id !== req.source_agent_id) throw new Error('comm_source_mismatch');
+      const delivery = await this.commDelivery(req.message_id);
+      const sent = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
+      const deadline = Math.max(...sent.map((event) => Date.parse(String(event.payload.receipt_deadline_at ?? ''))));
+      if (!Number.isFinite(deadline)) throw new Error('comm_receipt_deadline_absent');
+      const deadlineByTarget = new Map(sent.map((event) => [
+        String(event.payload.target_agent_id),
+        Date.parse(String(event.payload.receipt_deadline_at ?? '')),
+      ]));
+      const timely = delivery.complete && delivery.deliveries.every((row) => {
+        const targetDeadline = deadlineByTarget.get(row.target.agent_id);
+        const assertedAt = Date.parse(row.asserted_at ?? '');
+        return targetDeadline !== undefined && Number.isFinite(assertedAt) && assertedAt < targetDeadline;
+      });
+      return { accepted, delivery, sent, deadline, timely };
+    };
+
+    let wake!: () => void;
+    const event = new Promise<void>((resolve) => { wake = resolve; });
+    const waiters = this.deliveryWaiters.get(req.message_id) ?? new Set<() => void>();
+    waiters.add(wake);
+    this.deliveryWaiters.set(req.message_id, waiters);
+    let cancel = () => {};
+    try {
+      let current = await state();
+      if (!current.delivery.complete) {
+        await Promise.race([
+          event,
+          new Promise<void>((resolve) => {
+            cancel = this.commReceiptRuntime.schedule(resolve, Math.max(0, current.deadline - this.commReceiptRuntime.now()));
+          }),
+        ]);
+        current = await state();
+      }
+      if (current.timely) {
+        return {
+          ok: true, schema_version: SCHEMA_VERSION, phase: 'delivery_confirmed',
+          message_id: req.message_id, source_agent_id: req.source_agent_id,
+          deliveries: current.delivery.deliveries,
+        };
+      }
+      const targets = (current.accepted.payload.targets ?? []) as CommTarget[];
+      return {
+        ok: true, schema_version: SCHEMA_VERSION, phase: 'bytes_sent',
+        message_id: req.message_id, source_agent_id: req.source_agent_id,
+        targets,
+        bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
+        staged: current.sent.length === targets.length && current.sent.every((row) => row.payload.submit_verdict === 'staged'),
+        event_ids: current.sent.map((row) => row.seq),
+      };
+    } finally {
+      cancel();
+      const current = this.deliveryWaiters.get(req.message_id);
+      current?.delete(wake);
+      if (current?.size === 0) this.deliveryWaiters.delete(req.message_id);
+    }
   }
 
   commStop(agentId: string, content: string, stopEventId: string | null, receipt: string | null): Promise<void> {

@@ -31,6 +31,8 @@ import {
   ClipboardPushRequestSchema,
   ClipboardSelectionRequestSchema,
   CommRequestSchema,
+  CommHookSchema,
+  CommReceiptWaitRequestSchema,
   AgentInjectRequestSchema,
   CommRedriveRequestSchema,
   CommWaitRequestSchema,
@@ -38,6 +40,7 @@ import {
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
   RunRequestSchema,
+  StopRequestSchema,
   TmuxLifecycleEventRequestSchema,
   WrapperStartHookSchema,
   LcdServiceDeliverySchema,
@@ -72,6 +75,32 @@ export function commFrameMessageIds(prompt: string | undefined): string[] {
   const seen = new Set<string>();
   for (const match of prompt.matchAll(TX_COMM_FRAME)) seen.add(match[1]!);
   return [...seen];
+}
+
+function stringField(payload: Record<string, unknown>, field: string): string | undefined {
+  const value = payload[field];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function promptHookInput(payload: Record<string, unknown>): unknown {
+  const prompt = stringField(payload, 'prompt');
+  return {
+    agent_id: payload.agent_id,
+    schema_version: payload.schema_version ?? SCHEMA_VERSION,
+    message_ids: commFrameMessageIds(prompt),
+    content: prompt,
+    stop_event_id: stringField(payload, 'stop_event_id'),
+    session_id: stringField(payload, 'session_id'),
+  };
+}
+
+function stopHookInput(payload: Record<string, unknown>): unknown {
+  return {
+    agent_id: payload.agent_id,
+    schema_version: payload.schema_version ?? SCHEMA_VERSION,
+    content: stringField(payload, 'content') ?? stringField(payload, 'last_assistant_message'),
+    stop_event_id: stringField(payload, 'stop_event_id'),
+  };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -293,6 +322,16 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
     },
     {
       method: 'POST',
+      match: exact('/agents/comm/receipt'),
+      label: 'POST /agents/comm/receipt',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, CommReceiptWaitRequestSchema, 'invalid_comm_receipt_request');
+        if (parsed instanceof Response) return parsed;
+        return deferredJson(daemon.waitCommReceipt(parsed));
+      },
+    },
+    {
+      method: 'POST',
       match: exact('/agents/comm/redrive'),
       label: 'POST /agents/comm/redrive',
       handler: async (req) => {
@@ -335,6 +374,47 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           return json({ ok: false, error: 'mode_refused', detail }, 422);
         }
       },
+    },
+    {
+      method: 'POST',
+      match: exact('/ingress/hooks/user_prompt_submit'),
+      label: 'POST /ingress/hooks/user_prompt_submit',
+      handler: async (req) => {
+        const raw = await readJson(req);
+        const parsed = CommHookSchema.safeParse(raw && typeof raw === 'object' && !Array.isArray(raw)
+          ? promptHookInput(raw as Record<string, unknown>) : raw);
+        if (!parsed.success) return json({ ok: false, error: 'invalid_user_prompt_submit_payload' }, 422);
+        try { return json(await daemon.promptSubmitted(parsed.data, receipt(req))); }
+        catch (error) {
+          if (error instanceof Error && error.message === 'message_target_mismatch') {
+            return json({ ok: true, asserted: [], dead_lettered: [], consumed: false });
+          }
+          throw error;
+        }
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ingress/hooks/stop'),
+      label: 'POST /ingress/hooks/stop',
+      handler: async (req) => {
+        const raw = await readJson(req);
+        const parsed = StopRequestSchema.safeParse(raw && typeof raw === 'object' && !Array.isArray(raw)
+          ? stopHookInput(raw as Record<string, unknown>) : raw);
+        if (!parsed.success) return json({ ok: false, error: 'invalid_stop_payload' }, 422);
+        const stopped = await daemon.stop(parsed.data, receipt(req));
+        if ('refused' in stopped) return json({ ok: true, consumed: false, reason: stopped.reason });
+        if (parsed.data.content !== undefined) {
+          await daemon.commStop(parsed.data.agent_id, parsed.data.content, parsed.data.stop_event_id ?? null, receipt(req));
+        }
+        return json({ ok: true, consumed: true, receipt: stopped });
+      },
+    },
+    {
+      method: 'POST',
+      match: prefix('/ingress/hooks/'),
+      label: 'POST /ingress/hooks/:type',
+      handler: async () => new Response(null, { status: 410 }),
     },
     {
       method: 'POST',

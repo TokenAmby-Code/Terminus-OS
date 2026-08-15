@@ -3,6 +3,9 @@ import {
   ACT_EVENT_NAMES,
   CLOSE_REQUIRED_RANK,
   CloseRequestSchema,
+  COMM_DELIVERY_RECEIPT_TIMEOUT_MS,
+  CommReceiptSchema,
+  CommReceiptWaitRequestSchema,
   CommRequestSchema,
   EVENT_TYPES,
   ESTATE_EVENT_NAMES,
@@ -136,6 +139,45 @@ describe("txd lifecycle vocabulary", () => {
     }
     expect(() => CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [], engine: "codex" } })).toThrow();
     expect(() => CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [] }, engine: "codex" })).toThrow();
+  });
+
+  test("behavioral pin: comm receipt wait has a fixed 30-second ceiling and two return tiers", () => {
+    expect(COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toBe(30_000);
+    expect(CommReceiptWaitRequestSchema.parse({
+      schema_version: 11,
+      message_id: "message-1",
+      source_agent_id: "source",
+    })).toEqual({ schema_version: 11, message_id: "message-1", source_agent_id: "source" });
+    expect(() => CommReceiptWaitRequestSchema.parse({
+      schema_version: 11,
+      message_id: "message-1",
+      source_agent_id: "source",
+      timeout_ms: 1,
+    })).toThrow();
+    expect(CommReceiptSchema.parse({
+      ok: true,
+      schema_version: 11,
+      phase: "delivery_confirmed",
+      message_id: "message-1",
+      source_agent_id: "source",
+      deliveries: [{
+        target: { agent_id: "target", seat_id: "palace:W", persona: null },
+        delivered: true,
+        asserted_at: "2026-08-15T17:00:01.000Z",
+        assertion_event_id: 42,
+      }],
+    }).phase).toBe("delivery_confirmed");
+    expect(CommReceiptSchema.parse({
+      ok: true,
+      schema_version: 11,
+      phase: "bytes_sent",
+      message_id: "message-2",
+      source_agent_id: "source",
+      targets: [{ agent_id: "target", seat_id: "palace:W", persona: null }],
+      bytes_sent: 5,
+      staged: true,
+      event_ids: [41],
+    }).phase).toBe("bytes_sent");
   });
 
   test("health names the service txd — nothing k12-named survives of the daemon", () => {

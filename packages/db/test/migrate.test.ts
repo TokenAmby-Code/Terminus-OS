@@ -9,6 +9,12 @@ describe("migration planning (pure, forward-only)", () => {
     const files = await readdir(join(import.meta.dir, "..", "migrations"));
     expect(files).toContain("0014_bus_tool_hook_event_purge.sql");
   });
+  test("the txd journal predicate cut is forward of the existing phone migrations", async () => {
+    const files = await readdir(join(import.meta.dir, "..", "migrations"));
+    expect(files).toContain("0019_txd_journal_predicate.sql");
+    expect(files).not.toContain("0017_txd_journal_predicate.sql");
+    expect(files).not.toContain("0018_txd_journal_predicate.sql");
+  });
   test("orders numerically and returns only pending migrations", () => {
     const pending = planMigrations(
       ["0003_third.sql", "0001_schema_migrations.sql", "0002_second.sql"],

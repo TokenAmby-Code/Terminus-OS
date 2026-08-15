@@ -58,9 +58,12 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/clipboard/pull`   | Load UTF-8 into the transient, non-executing `tx-clipboard` buffer |
 | POST   | `/ctl/clipboard/selection` | Commit bounded UTF-8 through txd to `tx-clipboard` and one validated attached client |
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` / page-less `pane-killed` ingress; repairs each faulted seat alone, rebuilding a page only when no tagged pane survives on it |
+| POST   | `/ingress/hooks/user_prompt_submit` | Receiving-engine delivery attestation for comm receipts |
+| POST   | `/ingress/hooks/stop`    | Receiving-engine stop fact for lifecycle and ask callbacks |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Remote close (`tx close`, overseer-gated): reap N processes individually, keep estate panes, seats → freelist; explicit stopped targets are intended closes, other live/unobservable targets refuse absent force |
 | POST   | `/agents/comm`          | Typed message or engine-neutral command/skill admission |
+| POST   | `/agents/comm/receipt`  | Event-driven, fixed 30-second delivery receipt rendezvous |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
 | POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat executes in its idle pane shell and returns captured stdout/stderr + exit code |
@@ -69,6 +72,12 @@ each route is the ruled daemon behavior, unchanged.
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
+- After `/agents/comm` stages the bytes, `tx comm` waits on
+  `act.comm_delivery_asserted` for at most 30 seconds. An on-time receiving
+  engine hook returns the delivery-confirmed receipt directly. At the bound,
+  the CLI returns the bytes-sent receipt; a later hook stages the confirmation
+  through the sender's ordinary agent input path and persists that follow-up's
+  own `act.agent_input_injected` receipt. The wait has no delivery-state poll.
 - `tx comm <identity> command=<name> [-- args]` invokes the named slash
   command. `tx comm <identity> skill=<name> [-- args]` invokes a target skill.
   Callers never supply `/`, `$`, or an engine flag: txd resolves the target's
