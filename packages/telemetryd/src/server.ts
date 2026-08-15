@@ -46,15 +46,17 @@ export function makeServer(options: {
         }
         const phone = PhoneMacroDroidHook.safeParse(input);
         if (!phone.success) return json({ ok: false, error: "invalid_telemetry" }, 400);
-        const occurredAt = new Date(Number(phone.data.occurred_at));
+        const occurredAt = /^\d{13}$/.test(phone.data.occurred_at)
+          ? new Date(Number(phone.data.occurred_at))
+          : new Date(phone.data.occurred_at);
         if (Number.isNaN(occurredAt.getTime())) return json({ ok: false, error: "invalid_telemetry" }, 400);
         const hookId = crypto.randomUUID();
-        const payload = phone.data.event_type === "phone.application"
-          ? phone.data.payload
-          : {
+        const payload = phone.data.event_type === "phone.spotify" || phone.data.event_type === "phone.youtube"
+          ? {
               ...phone.data.payload,
               playing: phone.data.payload.playing === true || phone.data.payload.playing === "true",
-            };
+            }
+          : phone.data.payload;
         const record = PhoneMacroDroidHookRecord.parse({
           ...phone.data,
           hook_id: hookId,

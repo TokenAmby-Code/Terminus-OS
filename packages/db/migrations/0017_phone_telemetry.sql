@@ -6,7 +6,13 @@ CREATE TABLE IF NOT EXISTS telemetry.phone_hooks (
     hook_id      uuid        NOT NULL UNIQUE,
     occurred_at  timestamptz NOT NULL,
     recorded_at  timestamptz NOT NULL DEFAULT clock_timestamp(),
-    event_type   text        NOT NULL CHECK (event_type IN ('phone.application', 'phone.spotify', 'phone.youtube')),
+    event_type   text        NOT NULL CHECK (event_type IN (
+        'phone.application',
+        'phone.spotify',
+        'phone.youtube',
+        'phone.geofence',
+        'phone.proxy_egress_macro_probe'
+    )),
     source       text        NOT NULL CHECK (source = 'phone.macrodroid'),
     payload      jsonb       NOT NULL
 );

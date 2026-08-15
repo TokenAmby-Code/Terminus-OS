@@ -94,6 +94,44 @@ test("decodes and records the MacroDroid phone hook envelope", async () => {
   }]);
 });
 
+test("accepts every enabled MacroDroid hook envelope from the live export", async () => {
+  const store = new MemoryStore();
+  const base = serve(store);
+  const hooks = [
+    {
+      schema_version: 1,
+      event_type: "phone.application",
+      source: "phone.macrodroid",
+      payload: { event: "Application Closed (YouTube)" },
+      occurred_at: "1786752000123",
+    },
+    {
+      schema_version: 1,
+      event_type: "phone.geofence",
+      source: "phone.macrodroid",
+      payload: { event: "Entered Home" },
+      occurred_at: "1786752000124",
+    },
+    {
+      schema_version: 1,
+      event_type: "phone.proxy_egress_macro_probe",
+      source: "phone.macrodroid",
+      payload: { probe: "proxy-egress-70473da" },
+      occurred_at: "2026-07-27T04:05:30Z",
+    },
+  ] as const;
+
+  for (const hook of hooks) {
+    const response = await fetch(`${base}/events`, { method: "POST", body: JSON.stringify(hook) });
+    expect(response.status).toBe(200);
+  }
+  expect(store.phoneHooks.map(({ event_type }) => event_type)).toEqual([
+    "phone.application",
+    "phone.geofence",
+    "phone.proxy_egress_macro_probe",
+  ]);
+});
+
 test("rejects a forged phone source and unknown phone hook type", async () => {
   const store = new MemoryStore();
   const base = serve(store);
