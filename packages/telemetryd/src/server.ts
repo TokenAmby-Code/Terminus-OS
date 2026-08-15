@@ -1,4 +1,10 @@
-import { DesktopTelemetryEvent, DesktopTelemetryReceipt } from "@terminus-os/contracts";
+import {
+  DesktopTelemetryEvent,
+  DesktopTelemetryReceipt,
+  PhoneMacroDroidHook,
+  PhoneMacroDroidHookReceipt,
+  PhoneMacroDroidHookRecord,
+} from "@terminus-os/contracts";
 import type { TelemetryStore } from "./store.ts";
 
 
@@ -33,12 +39,30 @@ export function makeServer(options: {
         } catch {
           return json({ ok: false, error: "invalid_json" }, 400);
         }
-        const parsed = DesktopTelemetryEvent.safeParse(input);
-        if (!parsed.success) {
-          return json({ ok: false, error: "invalid_desktop_telemetry" }, 400);
+        const desktop = DesktopTelemetryEvent.safeParse(input);
+        if (desktop.success) {
+          const recorded = await options.store.record(desktop.data);
+          return json(DesktopTelemetryReceipt.parse({ ok: true, event_id: desktop.data.event_id, recorded }));
         }
-        const recorded = await options.store.record(parsed.data);
-        return json(DesktopTelemetryReceipt.parse({ ok: true, event_id: parsed.data.event_id, recorded }));
+        const phone = PhoneMacroDroidHook.safeParse(input);
+        if (!phone.success) return json({ ok: false, error: "invalid_telemetry" }, 400);
+        const occurredAt = new Date(Number(phone.data.occurred_at));
+        if (Number.isNaN(occurredAt.getTime())) return json({ ok: false, error: "invalid_telemetry" }, 400);
+        const hookId = crypto.randomUUID();
+        const payload = phone.data.event_type === "phone.application"
+          ? phone.data.payload
+          : {
+              ...phone.data.payload,
+              playing: phone.data.payload.playing === true || phone.data.payload.playing === "true",
+            };
+        const record = PhoneMacroDroidHookRecord.parse({
+          ...phone.data,
+          hook_id: hookId,
+          occurred_at: occurredAt.toISOString(),
+          payload,
+        });
+        await options.store.recordPhoneHook(record);
+        return json(PhoneMacroDroidHookReceipt.parse({ ok: true, hook_id: hookId, recorded: true }));
       }
       return json({ ok: false, error: "not_found" }, 404);
     },

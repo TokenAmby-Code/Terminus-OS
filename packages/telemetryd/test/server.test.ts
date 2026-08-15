@@ -1,16 +1,21 @@
 import { afterEach, expect, test } from "bun:test";
-import type { DesktopTelemetryEventT } from "@terminus-os/contracts";
+import type { DesktopTelemetryEventT, PhoneMacroDroidHookRecordT } from "@terminus-os/contracts";
 import { makeServer } from "../src/server.ts";
 import type { TelemetryStore } from "../src/store.ts";
 
 
 class MemoryStore implements TelemetryStore {
   readonly events: DesktopTelemetryEventT[] = [];
+  readonly phoneHooks: PhoneMacroDroidHookRecordT[] = [];
 
   async record(event: DesktopTelemetryEventT): Promise<boolean> {
     if (this.events.some((candidate) => candidate.event_id === event.event_id)) return false;
     this.events.push(event);
     return true;
+  }
+
+  async recordPhoneHook(hook: PhoneMacroDroidHookRecordT): Promise<void> {
+    this.phoneHooks.push(hook);
   }
 
   async close(): Promise<void> {}
@@ -61,4 +66,51 @@ test("rejects enforcement instructions at the ingress boundary", async () => {
 
   expect(response.status).toBe(400);
   expect(store.events).toHaveLength(0);
+});
+
+test("decodes and records the MacroDroid phone hook envelope", async () => {
+  const store = new MemoryStore();
+  const base = serve(store);
+  const hook = {
+    schema_version: 1,
+    event_type: "phone.spotify",
+    source: "phone.macrodroid",
+    payload: { app: "Spotify", playing: "true" },
+    occurred_at: "1786752000123",
+  } as const;
+
+  const response = await fetch(`${base}/events`, { method: "POST", body: JSON.stringify(hook) });
+
+  expect(response.status).toBe(200);
+  const receipt = await response.json() as { ok: boolean; hook_id: string; recorded: boolean };
+  expect(receipt.ok).toBe(true);
+  expect(receipt.recorded).toBe(true);
+  expect(receipt.hook_id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(store.phoneHooks).toEqual([{
+    hook_id: receipt.hook_id,
+    ...hook,
+    occurred_at: "2026-08-15T00:00:00.123Z",
+    payload: { app: "Spotify", playing: true },
+  }]);
+});
+
+test("rejects a forged phone source and unknown phone hook type", async () => {
+  const store = new MemoryStore();
+  const base = serve(store);
+  const hook = {
+    schema_version: 1,
+    event_type: "phone.spotify",
+    source: "phone.macrodroid",
+    payload: { app: "Spotify", playing: "false" },
+    occurred_at: "1786752000123",
+  };
+  expect((await fetch(`${base}/events`, {
+    method: "POST",
+    body: JSON.stringify({ ...hook, source: "phone.forged" }),
+  })).status).toBe(400);
+  expect((await fetch(`${base}/events`, {
+    method: "POST",
+    body: JSON.stringify({ ...hook, event_type: "phone.command" }),
+  })).status).toBe(400);
+  expect(store.phoneHooks).toEqual([]);
 });
