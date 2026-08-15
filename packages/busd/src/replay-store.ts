@@ -42,7 +42,10 @@ export interface ReplayStore {
   admit(input: ReplayAdmission): Promise<{ created: boolean; event: ReplayEventRecord }>;
   append(input: ReplayEventInput): Promise<{ created: boolean; event: ReplayEventRecord }>;
   projection(replayId: string): Promise<ReplayProjection | null>;
-  unfinished(query: { source: string; after: string | null; limit: number }): Promise<UnfinishedReplayPage>;
+  unfinished(query: {
+    source: string; machine: string | null; kind: "command" | "non_operation" | null;
+    after: string | null; limit: number;
+  }): Promise<UnfinishedReplayPage>;
   events(query: {
     after: string | null;
     source: string | null;
@@ -156,27 +159,39 @@ export class MemoryReplayStore implements ReplayStore {
 
   async unfinished(query: {
     source: string;
+    machine: string | null;
+    kind: "command" | "non_operation" | null;
     after: string | null;
     limit: number;
   }): Promise<UnfinishedReplayPage> {
     assertLimit(query.limit);
+    const scopeMatches = (stream: Stream): boolean => {
+      if (stream.source !== query.source) return false;
+      if (query.machine === null && query.kind === null) return true;
+      const first = stream.events[0]!;
+      if (first.provenance.machine !== query.machine) return false;
+      const command = first.event_type.endsWith(".command_accepted");
+      return query.kind === "command" ? command : !command;
+    };
+    const matches = (stream: Stream): boolean => scopeMatches(stream)
+      && !stream.events.some((event) => event.payload.terminal === true);
     if (query.after !== null) {
       const cursor = this.streams.get(query.after);
-      if (!cursor || cursor.source !== query.source) {
-        throw new InvalidReplayCursor("replay cursor does not exist for source");
+      if (!cursor || !scopeMatches(cursor)) {
+        throw new InvalidReplayCursor("replay cursor does not exist for scoped unfinished index");
       }
     }
     const matching = [...this.streams.entries()]
       .filter(([replayId, stream]) =>
-        stream.source === query.source
-        && (query.after === null || replayId > query.after)
-        && !stream.events.some((event) => event.payload.terminal === true))
+        matches(stream) && (query.after === null || replayId > query.after))
       .map(([replayId]) => replayId)
       .sort();
+    const total = [...this.streams.values()].filter(matches).length;
     const replays = matching.slice(0, query.limit);
     return {
       replays,
       next_cursor: matching.length > replays.length ? replays.at(-1)! : null,
+      total,
     };
   }
 
@@ -358,8 +373,14 @@ export class PostgresReplayStore implements ReplayStore {
     try {
       return await this.sql.begin(async (transaction) => {
         const inserted = (await transaction`
-        INSERT INTO replay.streams (replay_id, request_hash, source)
-        VALUES (${input.replay_id}, ${input.request_hash}, ${input.event.source})
+        INSERT INTO replay.streams (
+          replay_id, request_hash, source, first_event_type, machine, terminal
+        )
+        VALUES (
+          ${input.replay_id}, ${input.request_hash}, ${input.event.source},
+          ${input.event.event_type}, ${input.event.provenance.machine},
+          ${input.event.payload.terminal === true}
+        )
         ON CONFLICT (replay_id) DO NOTHING
         RETURNING replay_id`) as { replay_id: string }[];
         const streams = (await transaction`
@@ -399,8 +420,11 @@ export class PostgresReplayStore implements ReplayStore {
     try {
       return await this.sql.begin(async (transaction) => {
         const streams = (await transaction`
-        SELECT next_sequence FROM replay.streams
-        WHERE replay_id = ${input.replay_id} FOR UPDATE`) as { next_sequence: number | bigint | string }[];
+        SELECT next_sequence, terminal FROM replay.streams
+        WHERE replay_id = ${input.replay_id} FOR UPDATE`) as {
+          next_sequence: number | bigint | string;
+          terminal: boolean;
+        }[];
         if (!streams.length) throw new UnknownReplay(`unknown replay_id: ${input.replay_id}`);
         const duplicate = (await transaction`
         SELECT event_id, replay_id, sequence, event_type, schema_version, source,
@@ -411,11 +435,7 @@ export class PostgresReplayStore implements ReplayStore {
           assertSameEvent(event, input);
           return { created: false, event };
         }
-        const terminated = (await transaction`
-        SELECT 1 FROM replay.events
-        WHERE replay_id = ${input.replay_id} AND payload @> '{"terminal":true}'::jsonb
-        LIMIT 1`) as { "?column?": number }[];
-        if (terminated.length) {
+        if (streams[0]!.terminal) {
           throw new TerminalStreamViolation(
             `replay ${input.replay_id} is terminated; no further events may be appended`);
         }
@@ -427,7 +447,9 @@ export class PostgresReplayStore implements ReplayStore {
         const sequence = Number(streams[0]!.next_sequence);
         const event = await this.insertEvent(transaction, input, sequence);
         await transaction`
-        UPDATE replay.streams SET next_sequence = ${sequence + 1}
+        UPDATE replay.streams
+        SET next_sequence = ${sequence + 1},
+            terminal = terminal OR ${input.payload.terminal === true}
         WHERE replay_id = ${input.replay_id}`;
         return { created: true, event };
       }) as { created: boolean; event: ReplayEventRecord };
@@ -472,33 +494,78 @@ export class PostgresReplayStore implements ReplayStore {
 
   async unfinished(query: {
     source: string;
+    machine: string | null;
+    kind: "command" | "non_operation" | null;
     after: string | null;
     limit: number;
   }): Promise<UnfinishedReplayPage> {
     assertLimit(query.limit);
-    if (query.after !== null) {
-      const cursor = (await this.sql`
-        SELECT 1
-        FROM replay.streams
-        WHERE replay_id = ${query.after} AND source = ${query.source}`) as { "?column?": number }[];
-      if (!cursor.length) throw new InvalidReplayCursor("replay cursor does not exist for source");
+    const scoped = query.machine !== null && query.kind !== null;
+    if (!scoped) {
+      if (query.after !== null) {
+        const cursor = (await this.sql`
+          SELECT 1 FROM replay.streams
+          WHERE replay_id = ${query.after} AND source = ${query.source}`) as { "?column?": number }[];
+        if (!cursor.length) throw new InvalidReplayCursor("replay cursor does not exist for unfinished source");
+      }
+      const totals = (await this.sql`
+        SELECT count(*)::int AS total FROM replay.streams
+        WHERE source = ${query.source} AND terminal = false`) as { total: number }[];
+      const rows = (await this.sql`
+        SELECT replay_id::text AS replay_id FROM replay.streams
+        WHERE source = ${query.source} AND terminal = false
+          AND (${query.after}::uuid IS NULL OR replay_id > ${query.after}::uuid)
+        ORDER BY replay_id LIMIT ${query.limit + 1}`) as { replay_id: string }[];
+      const replays = rows.slice(0, query.limit).map((row) => row.replay_id);
+      return {
+        replays,
+        next_cursor: rows.length > query.limit ? replays.at(-1)! : null,
+        total: Number(totals[0]?.total ?? 0),
+      };
     }
+    const command = query.kind === "command";
+    if (query.after !== null) {
+      const cursor = command
+        ? (await this.sql`
+          SELECT 1 FROM replay.streams
+          WHERE replay_id = ${query.after} AND source = ${query.source}
+            AND machine = ${query.machine}
+            AND first_event_type LIKE '%.command_accepted'`) as { "?column?": number }[]
+        : (await this.sql`
+          SELECT 1 FROM replay.streams
+          WHERE replay_id = ${query.after} AND source = ${query.source}
+            AND machine = ${query.machine}
+            AND first_event_type NOT LIKE '%.command_accepted'`) as { "?column?": number }[];
+      if (!cursor.length) throw new InvalidReplayCursor("replay cursor does not exist for scoped unfinished index");
+    }
+    const totals = command
+      ? (await this.sql`
+        SELECT count(*)::int AS total FROM replay.streams
+        WHERE source = ${query.source} AND machine = ${query.machine}
+          AND terminal = false AND first_event_type LIKE '%.command_accepted'`) as { total: number }[]
+      : (await this.sql`
+        SELECT count(*)::int AS total FROM replay.streams
+        WHERE source = ${query.source} AND machine = ${query.machine}
+          AND terminal = false AND first_event_type NOT LIKE '%.command_accepted'`) as { total: number }[];
     const fetchLimit = query.limit + 1;
-    const rows = (await this.sql`
-      SELECT s.replay_id::text AS replay_id
-      FROM replay.streams s
-      WHERE s.source = ${query.source}
-        AND (${query.after}::uuid IS NULL OR s.replay_id > ${query.after}::uuid)
-        AND NOT EXISTS (
-          SELECT 1 FROM replay.events e
-          WHERE e.replay_id = s.replay_id AND e.payload @> '{"terminal":true}'::jsonb
-        )
-      ORDER BY s.replay_id
-      LIMIT ${fetchLimit}`) as { replay_id: string }[];
+    const rows = command
+      ? (await this.sql`
+        SELECT replay_id::text AS replay_id FROM replay.streams
+        WHERE source = ${query.source} AND machine = ${query.machine}
+          AND terminal = false AND first_event_type LIKE '%.command_accepted'
+          AND (${query.after}::uuid IS NULL OR replay_id > ${query.after}::uuid)
+        ORDER BY replay_id LIMIT ${fetchLimit}`) as { replay_id: string }[]
+      : (await this.sql`
+        SELECT replay_id::text AS replay_id FROM replay.streams
+        WHERE source = ${query.source} AND machine = ${query.machine}
+          AND terminal = false AND first_event_type NOT LIKE '%.command_accepted'
+          AND (${query.after}::uuid IS NULL OR replay_id > ${query.after}::uuid)
+        ORDER BY replay_id LIMIT ${fetchLimit}`) as { replay_id: string }[];
     const replays = rows.slice(0, query.limit).map((row) => row.replay_id);
     return {
       replays,
       next_cursor: rows.length > query.limit ? replays.at(-1)! : null,
+      total: Number(totals[0]?.total ?? 0),
     };
   }
 

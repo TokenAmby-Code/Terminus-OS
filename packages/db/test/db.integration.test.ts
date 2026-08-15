@@ -89,6 +89,29 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
     expect(indexes).toEqual([{ indexname: "replay_delivery_attempts_success" }]);
   });
 
+  test("open replay work is materialized and indexed by machine and transaction kind", async () => {
+    const columns = (await sql`
+      SELECT column_name, is_nullable
+      FROM information_schema.columns
+      WHERE table_schema = 'replay' AND table_name = 'streams'
+        AND column_name IN ('first_event_type', 'machine', 'terminal')
+      ORDER BY column_name`) as Array<{ column_name: string; is_nullable: string }>;
+    expect(columns).toEqual([
+      { column_name: "first_event_type", is_nullable: "NO" },
+      { column_name: "machine", is_nullable: "NO" },
+      { column_name: "terminal", is_nullable: "NO" },
+    ]);
+    const indexes = (await sql`
+      SELECT indexname FROM pg_indexes
+      WHERE schemaname = 'replay'
+        AND indexname IN ('replay_open_commands_by_machine', 'replay_open_non_operations_by_machine')
+      ORDER BY indexname`) as Array<{ indexname: string }>;
+    expect(indexes.map((row) => row.indexname)).toEqual([
+      "replay_open_commands_by_machine",
+      "replay_open_non_operations_by_machine",
+    ]);
+  });
+
   test("connectDb fails loud on a dead endpoint (no retry-forever)", async () => {
     const dead = DbEndpoint.parse({
       kind: "socket",
