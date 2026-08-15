@@ -171,7 +171,7 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
               (lane, event_seq, event_id, event_type, schema_version, error_code, detail)
              VALUES ($1, $2, $3::uuid, $4, $5, $6, $7)
              ON CONFLICT (lane, event_seq) DO NOTHING`,
-            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, error.detail],
+            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, JSON.stringify(error.detail)],
           );
           poisoned += 1;
           continue;
@@ -189,7 +189,7 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
               (lane, event_seq, event_id, event_type, schema_version, error_code, detail)
              VALUES ($1, $2, $3::uuid, $4, $5, $6, $7)
              ON CONFLICT (lane, event_seq) DO NOTHING`,
-            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, error.detail],
+            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, JSON.stringify(error.detail)],
           );
           poisoned += 1;
           continue;
@@ -212,15 +212,19 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
   }
 }
 
+// The consumer treats decoded lane values as opaque; `any` exists only to
+// accommodate variance between independently typed lane handlers.
+type AnyJournalLane = JournalLane<any>;
+
 export class DurableJournalConsumer {
-  readonly #lanes: readonly JournalLane<any>[];
+  readonly #lanes: readonly AnyJournalLane[];
   readonly #store: JournalConsumerStore;
   #drainRequested = false;
   #drainRunning = false;
   #activeDrain: Promise<void> | undefined;
   #laneState: Record<string, DrainResult> = {};
 
-  constructor(options: { lanes: readonly JournalLane<any>[]; store: JournalConsumerStore }) {
+  constructor(options: { lanes: readonly AnyJournalLane[]; store: JournalConsumerStore }) {
     if (options.lanes.length === 0) throw new Error("durable consumer requires at least one lane");
     const names = new Set<string>();
     for (const lane of options.lanes) {
@@ -266,7 +270,7 @@ export class DurableJournalConsumer {
     } finally {
       this.#drainRunning = false;
       this.#activeDrain = undefined;
-      if (this.#drainRequested) return this.requestDrain();
     }
+    if (this.#drainRequested) await this.requestDrain();
   }
 }

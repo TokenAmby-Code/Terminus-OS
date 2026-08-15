@@ -154,11 +154,18 @@ if (est === null) {
 async function shutdown() {
   // Graceful, but bounded: let in-flight requests finish, yet never let a stuck
   // request block termination — close the store and exit after 5s regardless.
-  await Promise.race([server.stop(), Bun.sleep(5_000)]);
-  await eventJournal.listener.stop();
-  await eventJournal.sql.close();
-  await store.close();
-  process.exit(0);
+  const failures: unknown[] = [];
+  for (const cleanup of [
+    () => Promise.race([server.stop(), Bun.sleep(5_000)]),
+    () => eventJournal.listener.stop(),
+    () => eventJournal.consumer.settle(),
+    () => eventJournal.sql.close(),
+    () => store.close(),
+  ]) {
+    try { await cleanup(); } catch (error) { failures.push(error); }
+  }
+  for (const error of failures) console.error(error);
+  process.exit(failures.length === 0 ? 0 : 1);
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

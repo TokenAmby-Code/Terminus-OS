@@ -114,8 +114,8 @@ export class PostgresJournalPublisher {
          )`,
         [
           this.producer, event.eventId, event.eventType, event.schemaVersion, event.idempotencyKey,
-          event.occurredAt, event.payload, event.streamId, event.streamSeq,
-          event.causationEventId, event.correlationId, event.provenance,
+          event.occurredAt, JSON.stringify(event.payload), event.streamId, event.streamSeq,
+          event.causationEventId, event.correlationId, JSON.stringify(event.provenance),
         ],
       ) as Array<Record<string, unknown>>;
       if (rows.length !== 1) throw new Error("journal.publish returned an invalid receipt count");

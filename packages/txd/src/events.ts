@@ -26,7 +26,11 @@ function eventIdentity(eventType: TxdPublishedEventType, payload: Record<string,
     // A vacancy is an observation that may recur after a later occupant leaves;
     // it has no producer-owned occurrence id, so each observation is distinct.
     ?? randomUUID();
-  return `${eventType}:${String(occurrence)}`;
+  const subject = ['agent_id', 'seat_id', 'target_agent_id', 'machine']
+    .filter((field) => payload[field] !== undefined && payload[field] !== null)
+    .map((field) => `${field}=${String(payload[field])}`)
+    .join('|');
+  return `${eventType}:${subject}:${String(occurrence)}`;
 }
 
 function eventId(key: string): string {

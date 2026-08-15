@@ -24,6 +24,13 @@ import { PgNotificationListener } from './journal/pg-listener.ts';
 
 export type TxdJournalEvent = JournalEvent & { seq: number };
 
+export type TxdEventJournal = {
+  sql: SQL;
+  lane: JournalLane<TxdJournalEvent>;
+  consumer: DurableJournalConsumer;
+  listener: PgNotificationListener;
+};
+
 const PHYSICAL_REFUSALS = new Set([
   'physical_registration_unconfigured',
   'physical_configuration_skew',
@@ -182,7 +189,7 @@ export function createTxdEventJournal(options: {
   daemon: Daemon;
   sql: SQL;
   account: string;
-}) {
+}): TxdEventJournal {
   const lane = createTxdEventLane({ machine: options.machine, daemon: options.daemon });
   const consumer = new DurableJournalConsumer({
     lanes: [lane],

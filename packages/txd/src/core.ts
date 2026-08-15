@@ -474,6 +474,7 @@ export class Daemon {
           }
         }
       }
+      let launchComposed = false;
       try {
         const paneGeneration = await this.tmux.seatGeneration(seatId);
         if (!paneGeneration) {
@@ -519,6 +520,7 @@ export class Daemon {
           provenance: this.prov('observer', null),
           occurred_at: this.now(),
         });
+        launchComposed = true;
         await terminalize('agent.dispatch_attested', DispatchAttestedSchema.parse({
           schema_version: request.schema_version,
           dispatch_id: request.dispatch_id,
@@ -528,6 +530,26 @@ export class Daemon {
           engine: request.engine,
         }));
       } catch (error) {
+        if (launchComposed && !mintedStackSeat) {
+          const terminalPersisted = (await this.store.readByEntity(request.agent_id)).some((event) =>
+            event.event_type === 'reg.dispatch_requested'
+            && event.payload.dispatch_id === request.dispatch_id
+            && typeof event.payload.outcome_event_type === 'string'
+            && event.payload.outcome !== undefined);
+          if (!terminalPersisted) {
+            if (!(await this.tmux.resetSeat(seatId))) {
+              throw new AggregateError([error], `txd could not reset failed launch at ${seatId}`);
+            }
+            await this.store.append({
+              entity_type: 'seat',
+              entity_id: seatId,
+              event_type: 'reg.seat_cleared',
+              payload: {},
+              provenance: this.prov('observer', null),
+              occurred_at: this.now(),
+            });
+          }
+        }
         await decommissionMintedStackSeat();
         throw error;
       }
@@ -2453,8 +2475,8 @@ export class Daemon {
   // dedupe a repeat/late stop (act.receipt_deduped), or REFUSE a ghost — a stop for
   // an id that never walked through /agents/launch. The ghost is refused at
   // admission, so nothing is recorded. The stop-hook is a REAL but UNTRUSTED
-  // witness; what other services do with a stop is their correlation, consumed
-  // from the bus — txd only folds the turn axis.
+  // witness; lifecycled publishes the correlated agent journal fact and txd
+  // folds only the turn axis.
   stop(req: StopRequest, transportReceipt: string | null = null): Promise<StopReceipt | StopRefusal> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {

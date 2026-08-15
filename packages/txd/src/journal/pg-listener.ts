@@ -251,7 +251,7 @@ export class PgNotificationListener {
     catchUpPending: false, catchUpRunning: false,
   };
   #running = false;
-  #loop?: Promise<void>;
+  #loop: Promise<void> | undefined;
   #socket: WireSocket | undefined;
   #drainScheduled = false;
   #cancelBackoff: (() => void) | undefined;
@@ -267,7 +267,12 @@ export class PgNotificationListener {
   async start(): Promise<void> {
     if (this.#running) throw new Error("listener already started");
     this.#running = true;
-    this.#loop = this.#run();
+    this.#loop = this.#run().catch((error) => {
+      this.#running = false;
+      const code = error instanceof PgProtocolError ? error.code : "listener_failed";
+      this.#health = { ...this.#health, state: "failed", lastErrorCode: code, nextAttemptAt: null };
+      for (const waiter of this.#registrationWaiters.splice(0)) waiter.reject(error);
+    });
   }
 
   registered(generation = 1): Promise<void> {
@@ -279,7 +284,10 @@ export class PgNotificationListener {
     this.#running = false;
     this.#cancelBackoff?.();
     this.#socket?.destroy();
+    const stopped = new PgProtocolError("listener_stopped");
+    for (const waiter of this.#registrationWaiters.splice(0)) waiter.reject(stopped);
     await this.#loop;
+    this.#loop = undefined;
     this.#health = { ...this.#health, state: "stopped", nextAttemptAt: null };
   }
 
@@ -290,6 +298,7 @@ export class PgNotificationListener {
         await this.connectOnce();
       } catch (error) {
         if (!this.#running) break;
+        if (this.#health.state === "listening") attempt = 0;
         attempt += 1;
         const code = error instanceof PgProtocolError ? error.code : "connection_failed";
         this.#health = { ...this.#health, state: "failed", lastErrorCode: code, lastDisconnectAt: new Date().toISOString() };
@@ -418,7 +427,10 @@ export class PgNotificationListener {
     let incoming = await queue.next();
     while (true) {
       if (incoming.type === "E") throw protocolError(incoming);
-      if (incoming.type === "N") continue;
+      if (incoming.type === "N") {
+        incoming = queue.poll() ?? await queue.next();
+        continue;
+      }
       if (incoming.type !== "A") throw new PgProtocolError("unexpected_listening_frame");
       if (incoming.body.length < 6) throw new PgProtocolError("short_notification_frame");
       const channel = cstring(incoming.body, 4);
