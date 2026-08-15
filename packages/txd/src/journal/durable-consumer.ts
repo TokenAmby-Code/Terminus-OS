@@ -171,7 +171,7 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
               (lane, event_seq, event_id, event_type, schema_version, error_code, detail)
              VALUES ($1, $2, $3::uuid, $4, $5, $6, $7)
              ON CONFLICT (lane, event_seq) DO NOTHING`,
-            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, JSON.stringify(error.detail)],
+            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, error.detail],
           );
           poisoned += 1;
           continue;
@@ -189,7 +189,7 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
               (lane, event_seq, event_id, event_type, schema_version, error_code, detail)
              VALUES ($1, $2, $3::uuid, $4, $5, $6, $7)
              ON CONFLICT (lane, event_seq) DO NOTHING`,
-            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, JSON.stringify(error.detail)],
+            [lane.name, event.seq, event.event_id, event.event_type, event.schema_version, error.code, error.detail],
           );
           poisoned += 1;
           continue;
