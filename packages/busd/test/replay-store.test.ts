@@ -156,14 +156,73 @@ describe("MemoryReplayStore", () => {
       event_type: "githubd.command_progressed",
       causation_event_id: firstEventId,
     }));
-    expect(await store.unfinished({ source: "githubd", after: null, limit: 10 }))
-      .toEqual({ replays: [replayId], next_cursor: null });
+    expect(await store.unfinished({
+      source: "githubd", machine: null, kind: null, after: null, limit: 10,
+    })).toEqual({ replays: [replayId], next_cursor: null, total: 1 });
     let watermark = await store.deliveryAttemptWatermark();
     expect((await store.pendingDeliveries(10, watermark)).map((task) => task.event.sequence)).toEqual([1]);
     expect((await store.pendingDeliveries(10, watermark)).map((task) => task.event.sequence)).toEqual([1]);
     await store.recordDelivery(firstEventId, "manager", true, null);
     watermark = await store.deliveryAttemptWatermark();
     expect((await store.pendingDeliveries(10, watermark)).map((task) => task.event.sequence)).toEqual([2]);
+  });
+
+  test("boot work is indexed to local open command transactions, not fact or foreign history", async () => {
+    const store = new MemoryReplayStore();
+    const local = [
+      "11111111-1111-4111-8111-111111111111",
+      "22222222-2222-4222-8222-222222222222",
+      "33333333-3333-4333-8333-333333333333",
+    ];
+    for (const [index, id] of local.entries()) {
+      await store.admit(admission({
+        replay_id: id,
+        request_hash: String(index + 1).repeat(64),
+        event: event({ replay_id: id, event_id: crypto.randomUUID() }),
+      }));
+    }
+    for (let index = 0; index < 2_000; index += 1) {
+      const id = crypto.randomUUID();
+      await store.admit(admission({
+        replay_id: id,
+        request_hash: index.toString(16).padStart(64, "0"),
+        event: event({
+          replay_id: id,
+          event_id: crypto.randomUUID(),
+          event_type: "github.pull_request",
+          provenance: { machine: "k12-personal", ingress: "webhook" },
+        }),
+      }));
+    }
+    const foreign = crypto.randomUUID();
+    await store.admit(admission({
+      replay_id: foreign,
+      request_hash: "f".repeat(64),
+      event: event({
+        replay_id: foreign,
+        event_id: crypto.randomUUID(),
+        provenance: { machine: "k12-work", ingress: "command" },
+      }),
+    }));
+
+    expect(await store.unfinished({
+      source: "githubd", machine: "test", kind: "command", after: null, limit: 10,
+    })).toEqual({ replays: local, next_cursor: null, total: 3 });
+    expect(await store.unfinished({
+      source: "githubd", machine: "k12-personal", kind: "non_operation", after: null, limit: 10,
+    })).toMatchObject({ total: 2_000 });
+
+    const firstPage = await store.unfinished({
+      source: "githubd", machine: "test", kind: "command", after: null, limit: 1,
+    });
+    await store.append(event({
+      replay_id: firstPage.replays[0]!, event_id: crypto.randomUUID(),
+      event_type: "githubd.operation_succeeded", causation_event_id: null,
+      payload: { terminal: true },
+    }));
+    expect((await store.unfinished({
+      source: "githubd", machine: "test", kind: "command", after: firstPage.next_cursor, limit: 10,
+    })).replays).toEqual(local.slice(1));
   });
 
   test("store boundaries reject invalid limits and normalize unknown delivery identities", async () => {
@@ -177,6 +236,8 @@ describe("MemoryReplayStore", () => {
     })).rejects.toBeInstanceOf(RangeError);
     await expect(store.unfinished({
       source: "githubd",
+      machine: null,
+      kind: null,
       after: null,
       limit: 501,
     })).rejects.toBeInstanceOf(RangeError);

@@ -188,19 +188,28 @@ export function buildRoutes(deps: ServerDeps): Route[] {
       handler: async (req) => {
         const url = new URL(req.url);
         const source = url.searchParams.get('source');
+        const machine = url.searchParams.get('machine');
+        const kind = url.searchParams.get('kind');
         const after = url.searchParams.get('after');
         const rawLimit = url.searchParams.get('limit') ?? '200';
         if (!source || url.searchParams.get('unfinished') !== 'true'
+            || ((machine === null) !== (kind === null))
+            || (kind !== null && kind !== 'command' && kind !== 'non_operation')
             || !/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 500
             || (after !== null && !ReplayIdSchema.safeParse(after).success)) {
           return json({ ok: false, error: 'invalid_replay_query' }, 422);
         }
         try {
-          return json(await deps.replayStore.unfinished({
+          const page = await deps.replayStore.unfinished({
             source,
+            machine,
+            kind: kind as "command" | "non_operation" | null,
             after,
             limit: Number(rawLimit),
-          }));
+          });
+          return json(machine === null
+            ? { replays: page.replays, next_cursor: page.next_cursor }
+            : page);
         } catch (error) {
           if (error instanceof InvalidReplayCursor) {
             return json({ ok: false, error: 'invalid_replay_cursor' }, 422);

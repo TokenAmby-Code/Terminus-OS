@@ -207,6 +207,40 @@ test("unfinished replay reconciliation is bounded and cursor-paginated", async (
   }
 });
 
+test("unfinished command query requires and preserves machine scope with a derived total", async () => {
+  const replayStore = new MemoryReplayStore();
+  const server = makeServer({
+    bind: "127.0.0.1", port: 0, store: new MemoryBusStore(), replayStore,
+    onAppend: () => {}, build: { version: "test", git_sha: "test", bun: Bun.version }, machine: "test",
+  });
+  const local = "55555555-5555-4555-8555-555555555555";
+  const foreign = "66666666-6666-4666-8666-666666666666";
+  await replayStore.admit({
+    ...input(), replay_id: local, request_hash: "5".repeat(64),
+    event: { ...input().event, replay_id: local, event_id: crypto.randomUUID() },
+  });
+  await replayStore.admit({
+    ...input(), replay_id: foreign, request_hash: "6".repeat(64),
+    event: {
+      ...input().event, replay_id: foreign, event_id: crypto.randomUUID(),
+      provenance: { machine: "other", ingress: "command" },
+    },
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  try {
+    const response = await fetch(
+      `${base}/v1/replays?source=githubd&unfinished=true&machine=test&kind=command&limit=10`,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ replays: [local], next_cursor: null, total: 1 });
+    expect((await fetch(
+      `${base}/v1/replays?source=githubd&unfinished=true&kind=command&limit=10`,
+    )).status).toBe(422);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("changed request hash and changed event identity conflict without mutation", async () => {
   const replayStore = new MemoryReplayStore();
   const server = makeServer({
