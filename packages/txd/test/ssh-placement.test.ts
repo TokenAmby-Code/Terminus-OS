@@ -121,8 +121,13 @@ function declaration(seatId: string, paneGeneration: string, wrapperPid: number)
 
 // ── The estate declaration ───────────────────────────────────────────────────
 
-test('somnium seats are ssh seats targeting k12-work; every other seat is local', () => {
-  const remoteSeats: readonly string[] = [...TXD_WINDOWS.somnium, ...TXD_WINDOWS.somnium_fleet];
+test('somnium and k12-work council seats are ssh seats targeting k12-work; every other seat is local', () => {
+  const remoteSeats: readonly string[] = [
+    ...TXD_WINDOWS.somnium,
+    ...TXD_WINDOWS.somnium_fleet,
+    'council:pax',
+    'council:orchestrator',
+  ];
   for (const seat of remoteSeats) {
     expect(sshSeatTarget(seat)).toBe('k12-work');
   }

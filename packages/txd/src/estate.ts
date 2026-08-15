@@ -50,14 +50,20 @@ export function seatBelongsToPage(page: string, seatId: string): boolean {
 /** The panes a flat rotation creates. Dynamic mitosis workers are added later. */
 export const TXD_ESTATE: readonly string[] = Object.values(TXD_WINDOWS).flat();
 
-// somnium and somnium_fleet run one wrapper-per-pane on k12-work. The dynamic
-// suffix is irrelevant to placement; the page is the transport declaration.
+// somnium and somnium_fleet run one wrapper-per-pane on k12-work; there the
+// page is the transport declaration and the dynamic suffix is irrelevant to
+// placement. council:pax and council:orchestrator are the k12-work overseer
+// seats — their council siblings stay local, so they are declared by seat.
+const SSH_COUNCIL_SEATS = ['council:pax', 'council:orchestrator'] as const;
+
 export const SSH_SEAT_TARGETS: Readonly<Record<string, string>> = Object.fromEntries([
   ...TXD_WINDOWS.somnium,
   TXD_STACK_WINDOWS.somnium_fleet,
+  ...SSH_COUNCIL_SEATS,
 ].map((seat) => [seat, 'k12-work']));
 
 export function sshSeatTarget(seatId: string): string | undefined {
+  if ((SSH_COUNCIL_SEATS as readonly string[]).includes(seatId)) return 'k12-work';
   const page = seatId.split(':', 1)[0];
   return page === 'somnium' || page === 'somnium_fleet' ? 'k12-work' : undefined;
 }
