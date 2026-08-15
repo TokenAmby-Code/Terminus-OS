@@ -93,7 +93,9 @@ test('estate rotation completion releases launch occupancy from the replaced est
       },
     }));
   }
-  expect(buildProjections(await s.readAll()).launchCompositions.size).toBe(2);
+  const beforeRotation = buildProjections(await s.readAll());
+  expect(beforeRotation.launchCompositions.size).toBe(2);
+  expect(beforeRotation.transportClaims.size).toBe(2);
 
   await s.append(e({
     entity_type: 'estate',
