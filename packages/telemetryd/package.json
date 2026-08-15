@@ -1,7 +1,7 @@
 {
   "name": "@terminus-os/telemetryd",
   "version": "0.1.0",
-  "description": "Typed, event-driven desktop telemetry ingress for enforcement consumers.",
+  "description": "Typed passive telemetry ingress for desktop and phone observations.",
   "type": "module",
   "private": true,
   "scripts": {

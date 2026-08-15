@@ -1,10 +1,11 @@
-import type { DesktopTelemetryEventT } from "@terminus-os/contracts";
+import type { DesktopTelemetryEventT, PhoneMacroDroidHookRecordT } from "@terminus-os/contracts";
 import { connectDb, MIGRATIONS_DIR, runMigrations, type DbEndpointT } from "@terminus-os/db";
 import type { SQL } from "bun";
 
 
 export interface TelemetryStore {
   record(event: DesktopTelemetryEventT): Promise<boolean>;
+  recordPhoneHook(hook: PhoneMacroDroidHookRecordT): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -28,6 +29,15 @@ export class PostgresTelemetryStore implements TelemetryStore {
       returning event_id
     `;
     return rows.length === 1;
+  }
+
+  async recordPhoneHook(hook: PhoneMacroDroidHookRecordT): Promise<void> {
+    await this.sql`
+      insert into telemetry.phone_hooks
+        (hook_id, occurred_at, event_type, source, payload)
+      values
+        (${hook.hook_id}, ${hook.occurred_at}, ${hook.event_type}, ${hook.source}, ${JSON.stringify(hook.payload)}::jsonb)
+    `;
   }
 
   async close(): Promise<void> {
