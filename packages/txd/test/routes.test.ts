@@ -1,7 +1,6 @@
 import { expect, test } from 'bun:test';
 import {
   CLIPBOARD_BUFFER_NAME,
-  HOOK_TYPES,
   SCHEMA_VERSION,
 } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
@@ -403,22 +402,28 @@ test('adversarial: every legacy route is dead (404) — no shim, no alias', asyn
   }
 });
 
-test('adversarial: the entire direct /ingress/hooks/* surface is dead — every vendor type 404s, zero footprint', async () => {
+test('UserPromptSubmit enters txd directly and asserts the correlated comm delivery', async () => {
   const store = new MemoryEventStore();
-  const d = new Daemon(store, new FakeTmux());
-  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux, undefined, undefined, null, null, async () => {});
+  await d.launch({ seat_id: 'council:custodes', schema_version: 11, identity: 'sender', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'target', persona: 'p', tint: '#1' });
+  for (const identity of ['sender', 'target']) await store.append({
+    entity_type: 'agent', entity_id: identity, event_type: 'reg.agent_registered',
+    payload: { persona: 'p', rank: 'astartes', commander: null },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: '2026-08-15T17:00:00.000Z',
+  });
+  const accepted = await d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'target', message: 'receipt me', ask: false, reply: false });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
-  const before = await store.count();
   try {
-    for (const hook of HOOK_TYPES) {
-      const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/${hook}`, {
-        method: 'POST',
-        // The old consumed doors' exact valid bodies must ALSO 404 — no shim.
-        body: JSON.stringify({ agent_id: 'i1', schema_version: 11 }),
-      });
-      expect(res.status).toBe(404);
-    }
-    expect(await store.count()).toBe(before); // no event recorded through a dead door
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/user_prompt_submit`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-edge-proxy': 'hook-receipt-1' },
+      body: JSON.stringify({ agent_id: 'target', prompt: `[tx comm ${accepted.message_id} from sender]\nreceipt me` }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, asserted: [accepted.message_id] });
+    expect((await d.commDelivery(accepted.message_id)).complete).toBeTrue();
   } finally {
     srv.stop(true);
   }

@@ -78,8 +78,13 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
     schema_version: SCHEMA_VERSION, source_agent_id: agentSource('comm'),
     ...(intent ? { intent } : { message: positional.at(-1)! }), ask, reply,
     ...(page ? { page } : {}), ...(!page && !reply ? { target: positional[0] } : {}),
-  }) as { ask_id: string | null };
-  write(accepted);
+  }) as { message_id: string; ask_id: string | null };
+  const receipt = await request('POST', '/agents/comm/receipt', {
+    schema_version: SCHEMA_VERSION,
+    message_id: accepted.message_id,
+    source_agent_id: agentSource('comm'),
+  });
+  write(receipt);
   if (!ask) return 0;
   const result = await request('POST', '/agents/comm/wait', {
     schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_agent_id: agentSource('comm'), timeout_ms: COMM_WAIT_TIMEOUT_MS,
