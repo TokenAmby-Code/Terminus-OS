@@ -4,7 +4,7 @@
 // facts from lcd, never hook.% bus rows).
 //
 // lcd's lane retries a refused (non-2xx) delivery under its backoff and never
-// skips a fact, so the door's honest outcomes mirror /ingress/bus: 422 ONLY
+// skips a fact, so the door's honest outcomes are 422 ONLY
 // for envelope/contract skew, 2xx for everything else with `consumed`
 // reporting whether txd ingested the fact. The wrapper attestation semantics
 // (txd-observed pane truth over the environmental claim, typed refusals
@@ -74,7 +74,7 @@ function wrapperStartPayload(overrides: Record<string, unknown> = {}): Record<st
   };
 }
 
-test('a wrapper_started fact drives the same attestation as the bus door: txd-observed pane truth wins', async () => {
+test('a wrapper_started fact drives txd-observed pane attestation truth', async () => {
   const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
   const { tmux, srv, post } = setup(runtime(published));
   try {
@@ -136,23 +136,6 @@ test('envelope skew is 422 — the one honest hard failure, lcd backs off and re
       fact: { ...delivery(wrapperStartPayload()).fact, fact_type: 'ghost_fact' },
     });
     expect(unknownFactType.status).toBe(422);
-  } finally {
-    srv.stop(true);
-  }
-});
-
-test('the bus door still serves deliveries unchanged — the cutover is the flip, not this PR', async () => {
-  const { srv } = setup();
-  try {
-    const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/bus`, {
-      method: 'POST',
-      body: JSON.stringify({ schema_version: 1, subscription: 'txd', event: {
-        seq: 1, event_type: 'probe.unhandled', source: 't', payload: {},
-        provenance: { ingress: 'events', transport_receipt: null, machine: 'test' },
-        occurred_at: '2026-08-12T00:00:00Z', recorded_at: '2026-08-12T00:00:00Z',
-      } }),
-    });
-    expect(response.status).toBe(200);
   } finally {
     srv.stop(true);
   }

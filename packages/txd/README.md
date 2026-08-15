@@ -64,8 +64,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
 | POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat executes in its idle pane shell and returns captured stdout/stderr + exit code |
-| POST   | `/ingress/bus`          | Central-bus delivery door: consumes `hook.stop` (record / dedupe / refuse-ghost) and `hook.user_prompt_submit`; acks everything else |
-| POST   | `/ingress/lifecycle`    | lcd typed lifecycle-fact door: consumes `wrapper_started` (same pane attestation as the bus door's `hook.wrapper_start`); 422 only for envelope skew, acks everything else so the lcd lane never wedges |
+| POST   | `/ingress/lifecycle`    | lifecycled typed lifecycle-fact door: consumes `wrapper_started`; 422 only for envelope skew, acks everything else so the lane never wedges |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
@@ -116,23 +115,20 @@ each route is the ruled daemon behavior, unchanged.
   agent left plan mode. With no dialog posed, nothing is typed and the
   transition fails loud. No caller sends arbitrary text, keys, raw pane ids, or
   harness guesses.
-- `/ingress/bus` is txd's **bus subscription door** (central-bus ruling): hook
-  fan-in terminates at busd (`packages/busd`), which journals every vendor hook
-  type as a `hook.<type>` bus event; txd consumes its two hook types as a
-  normal bus subscriber (subscription `txd`, pattern `hook.%`) and 2xx-acks
-  every other delivered event (ack ≠ consume — bus delivery is head-of-line
-  per subscription). The direct `/ingress/hooks/*` surface and its 410 tail
-  are REMOVED, no crumbs. The hook-type enumeration stays pinned in
-  `@terminus-os/contracts/hooks` from the actual claude-code and codex hook
-  contracts.
+- Txd owns a durable cursor over `journal.events`. Registration requests and
+  lifecycle facts are selected by exact event type; PostgreSQL notification is
+  only the wakeup, and startup catch-up closes missed-notification windows.
+  Txd publishes its `agent.*` outcomes through `journal.publish`. Raw engine
+  hooks remain lifecycled's direct ingress concern and never become a second
+  txd HTTP subscription surface.
 - `/ingress/tmux` is the tmux witness door. The managed estate keeps exited
   panes observable and forwards their canonical page through the thin `tx`
   client. `txd` compares that observation to `TXD_WINDOWS`; only `txd` decides
   whether to reconstruct. A page reconstruction wipes every process, history,
   pane-local option, and split inside that page border, then rebuilds the full
   declared geometry before retiring the old bindings in event truth.
-- `/ingress/bus` also consumes generic wrapper-start, physical declaration,
-  literal engine-session, and final registration facts. It attests pane and
+- The journal cursor consumes dispatch, physical declaration, registration
+  abort/finalization, stop, and prompt-submitted facts. Txd attests pane and
   process reality, projects tint, and never allocates identity or persona.
 - `/tmux/read/*` is txd's ONLY public read surface — side-effect-free by
   construction. "entities" is dead as public API vocabulary, and the old
@@ -171,8 +167,9 @@ refuse loud). On fleet boxes it is the sanctioned shape: the native PostgreSQL
 
 ## Persistence — PostgreSQL 18
 
-The event stream lives in the `terminus` database, schema `txd`, table
-`txd.events` — the 8 ruled columns, nothing derived:
+The local event stream lives in the `terminus` database, schema `txd`, table
+`txd.events`. The same schema owns txd's `journal_cursors` and
+`journal_poison` ledger for selected estate-journal facts.
 
 | Column        | Type     | Notes                                             |
 |---------------|----------|---------------------------------------------------|

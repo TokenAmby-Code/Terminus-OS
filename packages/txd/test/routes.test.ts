@@ -1,10 +1,8 @@
 import { expect, test } from 'bun:test';
 import {
-  BUS_SCHEMA_VERSION,
   CLIPBOARD_BUFFER_NAME,
   HOOK_TYPES,
   SCHEMA_VERSION,
-  type BusDelivery,
 } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
@@ -16,42 +14,6 @@ function daemon() {
   return new Daemon(new MemoryEventStore(), new FakeTmux());
 }
 const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
-
-function delivery(event_type: string, payload: Record<string, unknown>, seq = 1): BusDelivery {
-  return {
-    schema_version: BUS_SCHEMA_VERSION,
-    subscription: 'txd',
-    event: {
-      seq,
-      event_type,
-      source: 'claude',
-      payload,
-      provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'test' },
-      occurred_at: '2026-07-22T00:00:00.000Z',
-      recorded_at: '2026-07-22T00:00:00.100Z',
-    },
-  };
-}
-
-test('the bus door serves hook.stop deliveries with the ruled stop behavior', async () => {
-  const d = daemon();
-  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
-  try {
-    const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/bus`, {
-      method: 'POST',
-      body: JSON.stringify(delivery('hook.stop', { agent_id: 'i1', schema_version: 11 })),
-    });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({
-      ok: true,
-      consumed: true,
-      receipt: { ok: true, recorded: true, turn: 'awaiting_input' },
-    });
-  } finally {
-    srv.stop(true);
-  }
-});
 
 test('GET /tmux/read/estate serves the estate view including who is bound', async () => {
   const d = daemon();
@@ -406,10 +368,9 @@ test('POST /ingress/tmux accepts the page-less kill-time event and sweeps the es
 
 // ── Adversarial: legacy stays dead ──────────────────────────────────────────
 // The pre-extraction daemon surface (flat routes + the public per-entity
-// event-history endpoint) must NOT survive — and neither must the direct
-// /ingress/hooks/* surface (central-bus ruling: hook fan-in terminates at
-// busd; txd's hook intake is the bus subscription ONLY). 404, not redirect,
-// not shim, no 410 tail.
+// event-history endpoint) must NOT survive. Raw hooks belong to lifecycled's
+// direct typed lane; journal facts enter through txd's owned cursor, not HTTP.
+// 404, not redirect, not shim, no 410 tail.
 
 const LEGACY = [
   ['GET', '/health'],
@@ -420,6 +381,7 @@ const LEGACY = [
   ['POST', '/stop'],
   ['POST', '/subscribe'],
   ['POST', '/reconcile'],
+  ['POST', '/ingress/bus'],
   ['GET', '/entities'],
   ['GET', '/entities/somnium:NE/events'],
 ] as const;

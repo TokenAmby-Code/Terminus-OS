@@ -9,12 +9,15 @@
 import { describe, expect, test } from 'bun:test';
 import { AgentSchema, PlacementAttestedSchema } from '@terminus-os/contracts';
 import { Daemon } from '../src/core.ts';
+import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux, RealTmux } from '../src/tmux.ts';
-import { CONSUMED_BUS_EVENT_TYPES } from '../src/server.ts';
+import { buildRoutes } from '../src/server.ts';
 
 describe('adversarial: the session_start registration leg stays dead', () => {
   test('txd does not consume hook.session_start', () => {
-    expect(CONSUMED_BUS_EVENT_TYPES).not.toContain('hook.session_start');
+    const daemon = new Daemon(new MemoryEventStore(), new FakeTmux());
+    const routes = buildRoutes(daemon, { version: 'test', git_sha: 'test', bun: 'test' }, 'test');
+    expect(routes.every((route) => route.match('/ingress/hooks/session_start') === null)).toBeTrue();
   });
 
   test('the daemon has no engine-session attestation', () => {

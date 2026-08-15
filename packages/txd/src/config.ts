@@ -34,7 +34,6 @@ export type DaemonConfig = {
   commWatchTimeoutMs: number;
   /** Generated physical-only view of Token-Fleet's canonical pane allocation. */
   physicalRegistration?: {
-    busUrl: string;
     generation: string;
     digest: string;
     perpetual: Record<string, 'claude' | 'codex'>;
@@ -70,7 +69,6 @@ function envDefaults(): PartialConfig {
   const socket_dir = process.env.TXD_DB_SOCKET_DIR;
   const database = process.env.TXD_DB_DATABASE;
   const registrationRequired = {
-    busUrl: process.env.TXD_REGISTRATION_BUS_URL,
     generation: process.env.TXD_REGISTRATION_CONFIG_GENERATION,
     digest: process.env.TXD_REGISTRATION_CONFIG_DIGEST,
   };
@@ -154,15 +152,6 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
   if (!cfg.agentWrapper) throw new Error('txd config error: agentWrapper is required');
   if (cfg.physicalRegistration !== undefined) {
     const physical = cfg.physicalRegistration as DaemonConfig['physicalRegistration'];
-    let busUrl: URL;
-    try {
-      busUrl = new URL(physical?.busUrl ?? '');
-    } catch {
-      throw new Error('txd config error: physicalRegistration.busUrl must be an absolute URL');
-    }
-    if (!['http:', 'https:'].includes(busUrl.protocol)) {
-      throw new Error('txd config error: physicalRegistration.busUrl must use http or https');
-    }
     if (!physical?.generation) {
       throw new Error('txd config error: physicalRegistration.generation is required');
     }
