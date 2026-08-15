@@ -642,6 +642,10 @@ export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventRespon
 // opaque message bytes OR one engine-neutral surface intent. Syntax rendering
 // belongs to txd after it resolves the target binding's engine.
 export const COMM_WAIT_TIMEOUT_MS = 7 * 60 * 1000;
+// The synchronous delivery-receipt ceiling. The caller may not tune it: after
+// this exact bound a still-unattested send becomes the asynchronous tier-2
+// flow, while the eventual hook remains deliverable to the sender.
+export const COMM_DELIVERY_RECEIPT_TIMEOUT_MS = 30_000;
 export const CommIntentSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('command'),
@@ -707,12 +711,11 @@ export const CommHookSchema = z.object({
 });
 export type CommHook = z.infer<typeof CommHookSchema>;
 
-// Phase two of the two-phase comm contract, read back on demand. Phase one is
-// the quick release `CommAccepted` above; this is the delivery that follows it,
-// derived from `act.comm_delivery_asserted` and nothing else. Absence of a
-// delivery here is silence, never a verdict: a target whose turn has not ended
-// has not refused the message, and observed latency to this fact ranges from
-// 64ms to nearly ten hours.
+// The durable delivery read model, derived from
+// `act.comm_delivery_asserted` and nothing else. Absence of a delivery here is
+// silence, never a verdict: a target whose turn has not ended has not refused
+// the message, and observed latency to this fact ranges from 64ms to nearly ten
+// hours. The CLI's bounded receipt wait below does not alter this durable truth.
 export const CommDeliverySchema = z.object({
   target: CommTargetSchema, delivered: z.boolean(),
   asserted_at: z.string().nullable(), assertion_event_id: z.number().int().nullable(),
@@ -723,6 +726,37 @@ export const CommDeliveryReadResponseSchema = z.object({
   accepted_at: z.string(), deliveries: z.array(CommDeliverySchema), complete: z.boolean(),
 });
 export type CommDeliveryReadResponse = z.infer<typeof CommDeliveryReadResponseSchema>;
+
+export const CommReceiptWaitRequestSchema = z.object({
+  schema_version: z.number().int(),
+  message_id: CanonicalIdSchema,
+  source_agent_id: CanonicalIdSchema,
+}).strict();
+export type CommReceiptWaitRequest = z.infer<typeof CommReceiptWaitRequestSchema>;
+export const CommDeliveryConfirmedReceiptSchema = z.object({
+  ok: z.literal(true),
+  schema_version: z.number().int(),
+  phase: z.literal('delivery_confirmed'),
+  message_id: CanonicalIdSchema,
+  source_agent_id: CanonicalIdSchema,
+  deliveries: z.array(CommDeliverySchema),
+});
+export const CommBytesSentReceiptSchema = z.object({
+  ok: z.literal(true),
+  schema_version: z.number().int(),
+  phase: z.literal('bytes_sent'),
+  message_id: CanonicalIdSchema,
+  source_agent_id: CanonicalIdSchema,
+  targets: z.array(CommTargetSchema),
+  bytes_sent: z.number().int().nonnegative(),
+  staged: z.boolean(),
+  event_ids: z.array(z.number().int()),
+});
+export const CommReceiptSchema = z.discriminatedUnion('phase', [
+  CommDeliveryConfirmedReceiptSchema,
+  CommBytesSentReceiptSchema,
+]);
+export type CommReceipt = z.infer<typeof CommReceiptSchema>;
 
 // The remedial half of the two-phase comm contract is a deliberate pane
 // action: lifecycled decides WHEN, txd is the only mechanism.

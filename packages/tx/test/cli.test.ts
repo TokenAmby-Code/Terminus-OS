@@ -117,7 +117,15 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
   // exists to assert. Scoped and restored, matching comm.test.ts.
   const old = process.env.AGENT_ID;
   process.env.AGENT_ID = 'source';
-  const h = harness({
+  const receipt = {
+    ok: true,
+    schema_version: 11,
+    phase: 'delivery_confirmed',
+    message_id: 'message-1',
+    source_agent_id: 'source',
+    deliveries: [],
+  };
+  const answer = {
     ask_id: 'ask-1',
     complete: true,
     callbacks: [{
@@ -127,11 +135,28 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
       source: 'reply',
     }],
     outstanding: [],
-  });
+  };
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+  const deps: CliDependencies = {
+    request: async (method, path, body) => {
+      calls.push({ method, path, ...(body === undefined ? {} : { body }) });
+      if (path === '/agents/comm') return { ok: true, message_id: 'message-1', ask_id: 'ask-1' };
+      if (path === '/agents/comm/receipt') return receipt;
+      return answer;
+    },
+    stdout: (line) => stdout.push(line),
+    stderr: (line) => stderr.push(line),
+  };
   try {
-    expect(await runCli(['comm', '--ask', 'palace:W', 'report your seat'], h.deps)).toBe(0);
-    expect(h.stderr).toEqual([]);
-    expect(JSON.parse(h.stdout[0]!).callbacks[0].content)
+    expect(await runCli(['comm', '--ask', 'palace:W', 'report your seat'], deps)).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(calls.map((call) => call.path)).toEqual([
+      '/agents/comm', '/agents/comm/receipt', '/agents/comm/wait',
+    ]);
+    expect(JSON.parse(stdout[0]!)).toEqual(receipt);
+    expect(JSON.parse(stdout[1]!).callbacks[0].content)
       .toBe('attesting from pane %28 with window @5 and session $5.');
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;

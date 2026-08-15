@@ -129,12 +129,26 @@ test('a busy sender leaves no parked confirmation and hook replay retries the ve
     }
     return verified(seatId, correlationId, text, tabAfterPrefix);
   };
-  const d = new Daemon(store, tmux);
+  let now = Date.parse('2026-08-15T17:00:00.000Z');
+  const d = new Daemon(
+    store,
+    tmux,
+    () => new Date(now).toISOString(),
+    undefined,
+    null,
+    null,
+    null,
+    undefined,
+    { now: () => now, schedule: () => () => {} },
+  );
   await registered(d, store, 'council:custodes', 'sender');
   await registered(d, store, 'palace:W', 'worker');
   const messageId = (await d.comm({
     schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'brief', ask: false, reply: false,
   })).message_id;
+  // This assertion arrives after the fixed synchronous receipt bound, so the
+  // sender-facing confirmation is the tier-2 follow-up under test here.
+  now += 30_000;
 
   await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [messageId] }))
     .rejects.toThrow('delivery_confirmation_not_staged:frame_absent');

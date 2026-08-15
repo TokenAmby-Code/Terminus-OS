@@ -6,7 +6,12 @@ test('comm CLI forwards opaque payload and exposes no format or idempotency flag
   process.env.AGENT_ID = 'source';
   const calls: unknown[] = [];
   const deps: CliDependencies = {
-    request: async (method, path, body) => { calls.push({ method, path, body }); return { ok: true, ask_id: null }; },
+    request: async (method, path, body) => {
+      calls.push({ method, path, body });
+      return path === '/agents/comm'
+        ? { ok: true, message_id: 'message-1', ask_id: null }
+        : { ok: true, phase: 'bytes_sent', message_id: 'message-1', source_agent_id: 'source', targets: [], bytes_sent: 1, staged: true, event_ids: [] };
+    },
     stdout: () => {}, stderr: () => {},
   };
   try {
@@ -25,14 +30,19 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
   process.env.AGENT_ID = 'source';
   const calls: unknown[] = [];
   const errors: string[] = [];
+  let sequence = 0;
   const deps: CliDependencies = {
-    request: async (method, path, body) => { calls.push({ method, path, body }); return { ok: true, ask_id: null }; },
+    request: async (method, path, body) => {
+      calls.push({ method, path, body });
+      if (path === '/agents/comm') return { ok: true, message_id: `message-${++sequence}`, ask_id: null };
+      return { ok: true, phase: 'bytes_sent', message_id: `message-${sequence}`, source_agent_id: 'source', targets: [], bytes_sent: 1, staged: true, event_ids: [] };
+    },
     stdout: () => {}, stderr: (line) => errors.push(line),
   };
   try {
     expect(await runCli(['comm', 'council:custodes', 'command=compact', '--', 'hard'], deps)).toBe(0);
     expect(await runCli(['comm', 'palace:N', 'skill=openai-docs', '--', 'models'], deps)).toBe(0);
-    expect(calls).toEqual([
+    expect(calls.filter((call) => (call as { path: string }).path === '/agents/comm')).toEqual([
       { method: 'POST', path: '/agents/comm', body: {
         schema_version: 11, source_agent_id: 'source', target: 'council:custodes',
         intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
@@ -42,6 +52,7 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
         intent: { kind: 'skill', name: 'openai-docs', args: ['models'] }, ask: false, reply: false,
       } },
     ]);
+    expect(calls.filter((call) => (call as { path: string }).path === '/agents/comm/receipt')).toHaveLength(2);
     for (const argv of [
       ['comm', 'palace:N', 'skill=/openai-docs'],
       ['comm', 'palace:N', 'skill=$openai-docs'],
@@ -49,6 +60,57 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
       ['comm', '--page', 'palace', 'command=compact'],
     ]) expect(await runCli(argv, deps)).toBe(1);
     expect(errors.join('\n')).not.toContain('choose an engine');
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('tier 1: an on-time delivery attestation is the sole comm return value', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const stdout: string[] = [];
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const deps: CliDependencies = {
+    request: async (_method, path, body) => {
+      calls.push({ path, body });
+      if (path === '/agents/comm') return { ok: true, message_id: 'message-1', ask_id: null };
+      return {
+        ok: true,
+        phase: 'delivery_confirmed',
+        message_id: 'message-1',
+        source_agent_id: 'source',
+        deliveries: [{ target: { agent_id: 'target', seat_id: 'palace:W', persona: null }, delivered: true, asserted_at: '2026-08-15T17:00:01.000Z', assertion_event_id: 42 }],
+      };
+    },
+    stdout: (line) => stdout.push(line),
+    stderr: () => {},
+  };
+  try {
+    expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
+    expect(calls.map((call) => call.path)).toEqual(['/agents/comm', '/agents/comm/receipt']);
+    expect(calls[1]?.body).toEqual({ schema_version: 11, message_id: 'message-1', source_agent_id: 'source' });
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0]!).phase).toBe('delivery_confirmed');
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('tier 2: the bounded wait returns bytes sent as the sole comm return value', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const stdout: string[] = [];
+  const deps: CliDependencies = {
+    request: async (_method, path) => path === '/agents/comm'
+      ? { ok: true, message_id: 'message-2', ask_id: null }
+      : { ok: true, phase: 'bytes_sent', message_id: 'message-2', source_agent_id: 'source', bytes_sent: 5, staged: true, targets: [] },
+    stdout: (line) => stdout.push(line),
+    stderr: () => {},
+  };
+  try {
+    expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
+    expect(stdout).toHaveLength(1);
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ phase: 'bytes_sent', bytes_sent: 5 });
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }
