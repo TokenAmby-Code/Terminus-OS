@@ -65,3 +65,47 @@ test('seat_cleared releases the launch composition that acquired the seat', asyn
   expect(p.freelist).toEqual([{ seat_id: 'seatR', pane_state: 'live' }]);
   await s.close();
 });
+
+test('estate rotation completion releases launch occupancy from the replaced estate', async () => {
+  const s = new MemoryEventStore();
+  for (const seat of ['council:custodes', 'council:orchestrator']) {
+    await s.append(e({ entity_id: seat, event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
+    await s.append(e({
+      entity_id: seat,
+      event_type: 'reg.launch_composed',
+      payload: {
+        pane_generation: `${seat}-generation`,
+        agent_id: `${seat}-agent`,
+        launch_nonce: `${seat}-nonce`,
+        target_machine: seat === 'council:orchestrator' ? 'k12-work' : null,
+        worktree: null,
+      },
+    }));
+    await s.append(e({
+      entity_id: seat,
+      event_type: 'reg.transport_claimed',
+      payload: {
+        pane_generation: `${seat}-generation`,
+        kind: seat === 'council:orchestrator' ? 'ssh' : 'local',
+        target_machine: seat === 'council:orchestrator' ? 'k12-work' : null,
+        launch_nonce: `${seat}-nonce`,
+        envelope_session: null,
+      },
+    }));
+  }
+  const beforeRotation = buildProjections(await s.readAll());
+  expect(beforeRotation.launchCompositions.size).toBe(2);
+  expect(beforeRotation.transportClaims.size).toBe(2);
+
+  await s.append(e({
+    entity_type: 'estate',
+    entity_id: 'rotation-1',
+    event_type: 'estate.rotation_completed',
+    payload: { canonical_seats: 16 },
+  }));
+
+  const p = buildProjections(await s.readAll());
+  expect(p.launchCompositions.size).toBe(0);
+  expect(p.transportClaims.size).toBe(0);
+  await s.close();
+});

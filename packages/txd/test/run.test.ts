@@ -192,9 +192,9 @@ test('a binding mid-birth blocks the shell branch: the arriving agent owns that 
 
 test('a failed composer stage refuses loud and still records the attempt fact', async () => {
   const { store, tmux, d } = estate();
-  await register(d, tmux, 'council:pax', crypto.randomUUID(), 'pax', 'claude');
-  tmux.failAgentRun('council:pax');
-  await expect(d.run({ schema_version: SCHEMA_VERSION, target: 'pax', command: 'echo x' }))
+  await register(d, tmux, 'council:custodes', crypto.randomUUID(), 'custodes', 'claude');
+  tmux.failAgentRun('council:custodes');
+  await expect(d.run({ schema_version: SCHEMA_VERSION, target: 'custodes', command: 'echo x' }))
     .rejects.toThrow('run_not_staged: composer_corrupted');
   const injected = (await store.readAll()).filter((e) => e.event_type === 'act.agent_input_injected');
   expect(injected).toHaveLength(1);

@@ -203,6 +203,10 @@ export function buildProjections(events: EventRecord[]): Projections {
           }
         }
         break;
+      case 'estate.rotation_completed':
+        launchCompositions.clear();
+        transportClaims.clear();
+        break;
       case 'reg.seat_decommissioned':
         decommissionedSeats.add(e.entity_id);
         paneBySeat.delete(e.entity_id);
