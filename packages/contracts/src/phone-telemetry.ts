@@ -13,7 +13,7 @@ const EventPayload = z.strictObject({ event: Label });
 const ProbePayload = z.strictObject({ probe: Label });
 const PlaybackPayload = z.strictObject({
   app: Label,
-  playing: z.union([z.boolean(), z.enum(["true", "false"])]),
+  playing: z.union([z.boolean(), z.enum(["true", "false", "True", "False"])]),
 });
 
 /** A passive phone observation emitted by a Fleet-managed MacroDroid macro. */

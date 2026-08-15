@@ -75,7 +75,7 @@ test("decodes and records the MacroDroid phone hook envelope", async () => {
     schema_version: 1,
     event_type: "phone.spotify",
     source: "phone.macrodroid",
-    payload: { app: "Spotify", playing: "true" },
+    payload: { app: "Spotify", playing: "True" },
     occurred_at: "1786752000123",
   } as const;
 
@@ -114,6 +114,13 @@ test("accepts every enabled MacroDroid hook envelope from the live export", asyn
     },
     {
       schema_version: 1,
+      event_type: "phone.youtube",
+      source: "phone.macrodroid",
+      payload: { app: "Youtube", playing: "False" },
+      occurred_at: "1786752000125",
+    },
+    {
+      schema_version: 1,
       event_type: "phone.proxy_egress_macro_probe",
       source: "phone.macrodroid",
       payload: { probe: "proxy-egress-70473da" },
@@ -128,8 +135,10 @@ test("accepts every enabled MacroDroid hook envelope from the live export", asyn
   expect(store.phoneHooks.map(({ event_type }) => event_type)).toEqual([
     "phone.application",
     "phone.geofence",
+    "phone.youtube",
     "phone.proxy_egress_macro_probe",
   ]);
+  expect(store.phoneHooks[2]?.payload).toEqual({ app: "Youtube", playing: false });
 });
 
 test("rejects a forged phone source and unknown phone hook type", async () => {

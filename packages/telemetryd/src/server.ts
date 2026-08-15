@@ -54,7 +54,9 @@ export function makeServer(options: {
         const payload = phone.data.event_type === "phone.spotify" || phone.data.event_type === "phone.youtube"
           ? {
               ...phone.data.payload,
-              playing: phone.data.payload.playing === true || phone.data.payload.playing === "true",
+              playing: phone.data.payload.playing === true
+                || (typeof phone.data.payload.playing === "string"
+                  && phone.data.payload.playing.toLowerCase() === "true"),
             }
           : phone.data.payload;
         const record = PhoneMacroDroidHookRecord.parse({
