@@ -12,7 +12,6 @@ export type TxdPublishedEventType =
   | 'agent.perpetual_seat_vacant'
   | 'agent.retired'
   | 'agent.unregistered_closed'
-  | 'agent.headless_consumed'
   | 'agent.composer_interactive';
 
 function eventIdentity(eventType: TxdPublishedEventType, payload: Record<string, unknown>): string {

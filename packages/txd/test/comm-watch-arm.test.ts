@@ -59,7 +59,6 @@ test('behavioral pin: a painted newborn backfills durable composer interactivity
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
-    commStreams: {},
     publish: async (type: string, payload: Record<string, unknown>) => {
       order.push(`publish:${type}`);
       published.push({ type, payload });
@@ -117,7 +116,6 @@ test('behavioral pin: concurrent comms publish one composer observation per pane
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
-    commStreams: {},
     publish: async (type: string, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
@@ -153,7 +151,6 @@ test('behavioral pin: a pane rebind after observation cannot publish stale compo
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
-    commStreams: {},
     publish: async (type: string, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
@@ -218,7 +215,6 @@ test('behavioral pin: an unpainted newborn receives no bytes before lcd releases
     message_id: accepted.message_id,
     target_agent_id: 'worker',
     source_agent_id: 'sender',
-    stream_class: 'interactive',
     composer_interactive_observed: false,
   }]);
 });
@@ -290,46 +286,6 @@ test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on it
   expect((await d.commDelivery(accepted.message_id)).complete).toBe(true);
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted'))
     .toHaveLength(1);
-});
-
-test('behavioral pin: a declared headless stream asserts delivery without prompt_submitted', async () => {
-  const { store, tmux } = await fixture(null);
-  const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
-  const sends: string[] = [];
-  const originalHeadlessSend = tmux.sendToSeat.bind(tmux);
-  tmux.sendToSeat = async (seat, text) => {
-    sends.push(`headless:${seat}`);
-    return originalHeadlessSend(seat, text);
-  };
-  const originalInteractiveSend = tmux.sendVerifiedToSeat.bind(tmux);
-  tmux.sendVerifiedToSeat = async (seat, id, text) => {
-    sends.push(`interactive:${seat}`);
-    return originalInteractiveSend(seat, id, text);
-  };
-  const d = new Daemon(store, tmux, undefined, undefined, {
-    machine: 'test',
-    configuration: { generation: 'g', digest: 'd' },
-    agentWrapper: '/wrapper',
-    perpetual: {},
-    commStreams: { 'palace:W': 'headless' },
-    publish: async (type, payload) => { published.push({ type, payload }); },
-  }, null, async (input) => {
-    expect(input.stream_class).toBe('headless');
-  });
-
-  const accepted = await d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'headless control', ask: false, reply: false });
-  const delivery = await d.commDelivery(accepted.message_id);
-
-  expect(delivery.complete).toBe(true);
-  expect(delivery.deliveries[0]?.delivered).toBe(true);
-  expect(delivery.deliveries[0]?.asserted_at).not.toBeNull();
-  expect(sends).toEqual(['headless:palace:W']);
-  expect(published).toEqual([{ type: 'agent.headless_consumed', payload: {
-    schema_version: SCHEMA_VERSION,
-    agent_id: 'worker',
-    message_id: accepted.message_id,
-    seat_id: 'palace:W',
-  } }]);
 });
 
 test('machine-feed injection shares the composer gate and carries no comm envelope', async () => {

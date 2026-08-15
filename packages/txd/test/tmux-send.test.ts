@@ -1,117 +1,45 @@
 import { expect, test } from 'bun:test';
 import { RealTmux, type TmuxCommandResult } from '../src/tmux.ts';
 
-// tmux can prove it PUT BYTES IN A PANE. It cannot prove the receiving agent
-// consumed them: submission is a fact of the engine, reported by its
-// UserPromptSubmit hook and attested as `act.comm_delivery_asserted`. So the
-// send path stages and says exactly that, and nothing below the membrane may
-// use a word that means received.
-test('sendToSeat stages the text with one discrete Enter and claims only staging', async () => {
-  const calls: string[][] = [];
-  const payloads: string[] = [];
-  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
-    calls.push(args);
-    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    if (args[0] === 'load-buffer') payloads.push(new TextDecoder().decode(stdin));
-    return { code: 0, stdout: '', stderr: '' };
-  };
-  const tmux = new RealTmux('scratch', { run });
-
-  const outcome = await tmux.sendToSeat('palace:S', 'dispatch the worker');
-
-  expect(outcome.verdict).toBe('staged');
-  expect(outcome.bytes).toBe(19);
-  expect(payloads).toEqual(['dispatch the worker']);
-  expect(calls.some((args) => args[0] === 'load-buffer' && args.at(-1) === '-')).toBe(true);
-  expect(calls.some((args) => args[0] === 'paste-buffer' && args.includes('-p') && args.includes('-d'))).toBe(true);
-  expect(calls.filter((args) => args[0] === 'send-keys')).toEqual([['send-keys', '-t', '%7', 'Enter']]);
-});
-
-test('behavioral pin: headless delivery preserves a multi-KB multiline Unicode payload past 523 characters', async () => {
-  const payload = `opening “quote” Ω🔥\n${'x'.repeat(4096)}\nclosing 'quote' $HOME \\ literal`;
-  let loaded = '';
+test('behavioral pin: concurrent verified deliveries to one pane are serialized as whole submissions', async () => {
+  const buffers = new Map<string, string>();
   let composer = '';
+  const submitted: string[] = [];
   const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    if (args[0] === 'load-buffer') {
-      loaded = new TextDecoder().decode(stdin);
-      return { code: 0, stdout: '', stderr: '' };
+    if (args[0] === 'capture-pane') return { code: 0, stdout: `> ${composer}\n`, stderr: '' };
+    if (args[0] === 'load-buffer') buffers.set(args[2]!, new TextDecoder().decode(stdin));
+    if (args[0] === 'paste-buffer') composer += buffers.get(args[args.indexOf('-b') + 1]!) ?? '';
+    if (args[0] === 'send-keys' && args.at(-1) === 'Enter') {
+      submitted.push(composer);
+      composer = '';
     }
-    if (args[0] === 'paste-buffer') composer += loaded;
-    // Model the live failure: send-keys accepts success but parks only the
-    // first 523 characters in the interactive engine's composer.
-    if (args[0] === 'send-keys' && args.includes('-l')) composer += [...args.at(-1)!].slice(0, 523).join('');
     return { code: 0, stdout: '', stderr: '' };
   };
-  const tmux = new RealTmux('scratch', { run });
+  const tmux = new RealTmux('scratch', {
+    run,
+    audit: () => undefined,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('no further pane output');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+  const first = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nfirst';
+  const second = '[tx comm 22222222-2222-4222-8222-222222222222 from sender]\nsecond';
 
-  const outcome = await tmux.sendToSeat('palace:S', payload);
+  const outcomes = await Promise.all([
+    tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', first),
+    tmux.sendVerifiedToSeat('palace:S', '22222222-2222-4222-8222-222222222222', second),
+  ]);
 
-  expect(outcome).toEqual({ bytes: Buffer.byteLength(payload), verdict: 'staged' });
-  expect(composer).toBe(payload);
-});
-
-test('a pane that cannot take the literal delivers nothing and says so', async () => {
-  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
-    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    if (args[0] === 'paste-buffer') return { code: 1, stdout: '', stderr: 'no such pane' };
-    return { code: 0, stdout: '', stderr: '' };
-  };
-  const tmux = new RealTmux('scratch', { run });
-
-  const outcome = await tmux.sendToSeat('palace:S', 'dispatch the worker');
-
-  expect(outcome.verdict).toBe('failed_none_delivered');
-  expect(outcome.bytes).toBe(0);
-});
-
-// An Enter that does not land is a failed STAGE, not a quiet success: the bytes
-// sit in a composer nobody submitted, which is the husk this repair exists to
-// stop manufacturing.
-test('an Enter that does not land refuses to report staged', async () => {
-  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
-    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    if (args[0] === 'send-keys' && args.at(-1) === 'Enter') return { code: 1, stdout: '', stderr: 'lost server' };
-    return { code: 0, stdout: '', stderr: '' };
-  };
-  const tmux = new RealTmux('scratch', { run });
-
-  const outcome = await tmux.sendToSeat('palace:S', 'dispatch the worker');
-
-  expect(outcome.verdict).toBe('failed_none_delivered');
-});
-
-// ── Adversarial: the false-positive verifier stays dead ────────────────────
-//
-// The excised verify() took the last non-empty line as a needle, read
-// #{cursor_y}, captured that ONE row, and returned true when the needle was
-// ABSENT from it. A composer holding an unsubmitted message leaves the cursor
-// on a fresh BLANK row, which contains no needle — so the predicate was
-// satisfied by the exact failure it existed to detect and answered
-// `delivered`. On 2026-08-03 it attested four briefs to palace:N as delivered
-// while that engine emitted a single UserPromptSubmit.
-//
-// It may not return in any form: no composer readback, no retry ladder, no
-// backoff before the submit.
-test('the send path never reads the composer back to guess at submission', async () => {
-  const calls: string[][] = [];
-  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
-    calls.push(args);
-    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    // A blank cursor row: precisely the reading that fooled the old predicate.
-    if (args[0] === 'capture-pane') return { code: 0, stdout: '> \n', stderr: '' };
-    if (args[0] === 'display-message') return { code: 0, stdout: '12\n', stderr: '' };
-    return { code: 0, stdout: '', stderr: '' };
-  };
-  const tmux = new RealTmux('scratch', { run });
-
-  const outcome = await tmux.sendToSeat('palace:S', 'a multi-paragraph brief\n\nwith a trailing line');
-
-  expect(calls.some((args) => args[0] === 'capture-pane')).toBe(false);
-  expect(calls.some((args) => args[0] === 'display-message')).toBe(false);
-  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
-  // Whatever the composer looked like, the outcome is staged — never delivered.
-  expect(outcome.verdict).toBe('staged');
+  expect(outcomes.map((outcome) => outcome.verdict)).toEqual(['staged', 'staged']);
+  expect(submitted).toEqual([first, second]);
 });
 
 // The backoff knob is gone with the retry ladder it paced. A construction
@@ -124,20 +52,6 @@ test('there is no knob to delay or repeat the submit', () => {
     expect(text).not.toInclude('TXD_SEND_ENTER_DELAY_MS');
     expect(text).not.toInclude('verify_submit');
   });
-});
-
-test('no send outcome can spell a word that means the agent received it', async () => {
-  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
-    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
-    return { code: 0, stdout: '', stderr: '' };
-  };
-  const tmux = new RealTmux('scratch', { run });
-
-  const outcome = await tmux.sendToSeat('palace:S', 'anything at all');
-
-  expect(['staged', 'failed_none_delivered']).toContain(outcome.verdict);
-  expect(outcome.verdict).not.toBe('delivered');
-  expect(outcome.verdict).not.toBe('partial_delivered');
 });
 
 test('verified send waits for a pane-output event before observing the composer', async () => {

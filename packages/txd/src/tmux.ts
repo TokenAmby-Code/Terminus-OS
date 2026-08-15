@@ -89,9 +89,7 @@ export type WrapperPlacementAttestation =
 // Submission is a fact of the receiving engine — its UserPromptSubmit hook,
 // which txd folds into `act.comm_delivery_asserted`. That is the only fact
 // permitted to mean delivered, and no verdict here may spell that word.
-export type SendOutcome =
-  | { verdict: 'staged'; bytes: number }
-  | { verdict: 'failed_none_delivered'; bytes: 0 };
+export type SendOutcome = { verdict: 'staged'; bytes: number };
 
 // The redrive verdicts obey the same membrane: 'enter_redriven' says a parked,
 // verified-intact frame was submitted with one Enter — it still does not say
@@ -165,8 +163,6 @@ export interface TmuxControlPlane {
   seatGeneration(seatId: string): Promise<string | undefined>;
   /** Resolve a wrapper PID to canonical pane truth through /proc ancestry and tmux witnesses. */
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
-  /** Type text into the seat's pane. Reports full/partial/none delivery. Resolves %id below the membrane. */
-  sendToSeat(seatId: string, text: string): Promise<SendOutcome>;
   sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex'): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
   /**
    * Stage one shell command in an AGENT pane through the engine's own shell
@@ -632,6 +628,7 @@ export class RealTmux implements TmuxControlPlane {
   private outputObserver: PaneOutputObserver;
   private composerObserveTimeoutMs: number;
   private waitFor: WaitForSignal;
+  private paneInputQueues = new Map<string, Promise<unknown>>();
 
   constructor(
     private socket: string,
@@ -717,6 +714,23 @@ export class RealTmux implements TmuxControlPlane {
       stderr_category: this.stderrCategory(result),
     });
     return result;
+  }
+
+  /**
+   * Serialize one complete composer transaction per pane. The in-process queue
+   * preserves call order. The predecessor's completion is the event that
+   * releases the next waiter; there is no retry loop or timeout layered over a
+   * hung input operation.
+   */
+  private serializePaneInput<T>(seatId: string, operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.paneInputQueues.get(seatId) ?? Promise.resolve();
+    const run = predecessor.then(operation);
+    const settled = run.then(() => undefined, () => undefined);
+    this.paneInputQueues.set(seatId, settled);
+    settled.finally(() => {
+      if (this.paneInputQueues.get(seatId) === settled) this.paneInputQueues.delete(seatId);
+    });
+    return run;
   }
 
   /**
@@ -1820,7 +1834,12 @@ export class RealTmux implements TmuxControlPlane {
     return captured.code === 0 && RealTmux.composerInteractive(captured.stdout);
   }
 
-  async redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
+  redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
+    return this.serializePaneInput(seatId, () =>
+      this.redriveSeatCommUnlocked(seatId, messageId, expectedFrame));
+  }
+
+  private async redriveSeatCommUnlocked(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return 'seat_unresolved';
     // Live pane only, joined lines, no scrollback: a parked frame is a LIVE
@@ -1839,23 +1858,12 @@ export class RealTmux implements TmuxControlPlane {
     return enter.code === 0 ? 'enter_redriven' : 'seat_unresolved';
   }
 
-  async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
-    const paneId = await this.resolvePane(seatId);
-    if (!paneId) return { bytes: 0, verdict: 'failed_none_delivered' };
-    const literal = await this.pasteLiteral(seatId, paneId, text, 'paste_literal_unverified');
-    if (!literal) return { bytes: 0, verdict: 'failed_none_delivered' };
-    const bytes = Buffer.byteLength(text, 'utf8');
-
-    // One discrete Enter, outside the literal burst. If tmux accepted both
-    // commands the text is staged in the pane; whether the engine has consumed
-    // it is not a question this side can answer, and the answer arrives on its
-    // own as `hook.user_prompt_submit`.
-    const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-    if (enter.code !== 0) return { bytes: 0, verdict: 'failed_none_delivered' };
-    return { bytes, verdict: 'staged' };
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex') {
+    return this.serializePaneInput(seatId, () =>
+      this.sendVerifiedToSeatUnlocked(seatId, correlationId, text, tabAfterPrefix, engine));
   }
 
-  async sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex') {
+  private async sendVerifiedToSeatUnlocked(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex') {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const baseline = await this.command('observe_input_baseline', seatId, [
@@ -2606,15 +2614,11 @@ export class FakeTmux implements TmuxControlPlane {
   private paneTexts = new Map<string, string>();
   private redriveEnterCounts = new Map<string, number>();
 
-  async sendToSeat(seatId: string, text: string): Promise<SendOutcome> {
-    const s = this.seats.get(seatId);
-    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'failed_none_delivered' };
-    this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
-    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' };
-  }
   async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string, _engine?: 'claude' | 'codex') {
-    const sent = await this.sendToSeat(seatId, text);
-    return sent;
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'seat_unresolved' as const };
+    this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
+    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' as const };
   }
   async observeComposerInteractive(seatId: string): Promise<boolean> {
     const s = this.seats.get(seatId);

@@ -11,7 +11,7 @@ test('tx is an endpoint client and has no truth-owning dependency', async () => 
 
   for (const forbidden of [
     'EventStore', 'PostgresEventStore', 'MemoryEventStore', 'buildProjections',
-    'TmuxControlPlane', 'RealTmux', 'FakeTmux', 'sendToSeat', "Bun.spawn(['tmux'",
+    'TmuxControlPlane', 'RealTmux', 'FakeTmux', 'sendVerifiedToSeat', "Bun.spawn(['tmux'",
   ]) expect(source).not.toContain(forbidden);
   expect(source).not.toMatch(/from ['"]\.\.\/\.\.\/txd\//);
 });
