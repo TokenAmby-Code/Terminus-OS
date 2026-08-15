@@ -127,7 +127,7 @@ test('handler errors are sanitized before structured logging', async () => {
   }
 });
 
-test('no tmux id appears in any /agents/*, /ingress/bus, /tmux/read, or /ctl response', async () => {
+test('no tmux id appears in any /agents/*, /tmux/read, or /ctl response', async () => {
   const d = new Daemon(new MemoryEventStore(), new FakeTmux());
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
   try {
@@ -135,16 +135,6 @@ test('no tmux id appears in any /agents/*, /ingress/bus, /tmux/read, or /ctl res
     const bodies: unknown[] = [];
     bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' })).json());
     bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 11 })).json());
-    bodies.push(await (await post('/ingress/bus', {
-      schema_version: 1,
-      subscription: 'txd',
-      event: {
-        seq: 1, event_type: 'hook.stop', source: 'claude',
-        payload: { agent_id: 'i1', schema_version: 11 },
-        provenance: { ingress: 'hooks', transport_receipt: 'edge_proxy', machine: 'test' },
-        occurred_at: '2026-07-22T00:00:00.000Z', recorded_at: '2026-07-22T00:00:00.100Z',
-      },
-    })).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`)).json());
     bodies.push(await (await post('/ctl/reconcile', {})).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/ctl/health`)).json());

@@ -9,7 +9,8 @@ import { Daemon, type CommWatchArmInput } from './core.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
 import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
-import { makeBusPublisher } from './events.ts';
+import { makeJournalPublisher } from './events.ts';
+import { createTxdEventJournal, createTxdJournalConnection } from './event-journal.ts';
 import { realRemoteEnvelopeLister } from './envelopes.ts';
 
 const build: BuildInfo = {
@@ -59,19 +60,6 @@ const tmux = new RealTmux(cfg.tmuxSocket, {
   composerObserveTimeoutMs: cfg.commWatchTimeoutMs,
 });
 const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
-const physicalRegistration = cfg.physicalRegistration
-  ? {
-      machine: cfg.machine,
-      configuration: {
-        generation: cfg.physicalRegistration.generation,
-        digest: cfg.physicalRegistration.digest,
-      },
-      agentWrapper: cfg.agentWrapper,
-      perpetual: cfg.physicalRegistration.perpetual,
-      commStreams: cfg.physicalRegistration.commStreams ?? {},
-      publish: makeBusPublisher(cfg.physicalRegistration.busUrl),
-    }
-  : null;
 // The pre-send comm watch, armed against lifecycled's local ingress socket.
 // The await is bounded by the same transport contract as lifecycled's delivery
 // awaits; a refusal or timeout surfaces
@@ -93,7 +81,35 @@ const composerGate = cfg.lifecycledSocket
       await postLifecycledGate('/agents/composer/gate', { schema_version: 1, ...input }, 'lifecycled_composer_gate');
     }
   : null;
+// The journal connection owns both txd's durable cursor and its producer.
+// It is opened before physical registration is exposed so no outcome can
+// accidentally fall back to a transport service.
+if (cfg.db.kind !== 'socket') throw new Error('txd journal requires the production socket endpoint');
+const journalConnection = createTxdJournalConnection(cfg.db);
+const physicalRegistration = cfg.physicalRegistration
+  ? {
+      machine: cfg.machine,
+      configuration: {
+        generation: cfg.physicalRegistration.generation,
+        digest: cfg.physicalRegistration.digest,
+      },
+      agentWrapper: cfg.agentWrapper,
+      perpetual: cfg.physicalRegistration.perpetual,
+      commStreams: cfg.physicalRegistration.commStreams ?? {},
+      publish: makeJournalPublisher(journalConnection.sql, cfg.machine),
+    }
+  : null;
 const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration, realRemoteEnvelopeLister, commWatchArm, composerGate);
+const eventJournal = createTxdEventJournal({
+  machine: cfg.machine,
+  endpoint: cfg.db,
+  daemon,
+  ...journalConnection,
+});
+await eventJournal.consumer.initialize();
+await eventJournal.listener.start();
+await eventJournal.listener.registered();
+await eventJournal.consumer.requestDrain();
 const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
 
 console.log(
@@ -138,9 +154,18 @@ if (est === null) {
 async function shutdown() {
   // Graceful, but bounded: let in-flight requests finish, yet never let a stuck
   // request block termination — close the store and exit after 5s regardless.
-  await Promise.race([server.stop(), Bun.sleep(5_000)]);
-  await store.close();
-  process.exit(0);
+  const failures: unknown[] = [];
+  for (const cleanup of [
+    () => Promise.race([server.stop(), Bun.sleep(5_000)]),
+    () => eventJournal.listener.stop(),
+    () => eventJournal.consumer.settle(),
+    () => eventJournal.sql.close(),
+    () => store.close(),
+  ]) {
+    try { await cleanup(); } catch (error) { failures.push(error); }
+  }
+  for (const error of failures) console.error(error);
+  process.exit(failures.length === 0 ? 0 : 1);
 }
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);

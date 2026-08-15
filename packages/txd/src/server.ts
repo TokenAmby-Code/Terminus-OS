@@ -2,13 +2,6 @@
 // grouped by caller/trust plane:
 //
 //   /ctl/*            daemon ops (health, reconcile)
-//   /ingress/bus      the central-bus delivery door (central-bus ruling,
-//                     supersedes the direct /ingress/hooks/* surface — REMOVED,
-//                     no crumbs). Hook fan-in terminates at busd; txd consumes
-//                     `hook.stop` / `hook.user_prompt_submit` as a normal bus
-//                     subscriber and MUST 2xx-ack every other delivered event
-//                     (ack ≠ consume) — bus delivery is head-of-line per
-//                     subscription, so a non-2xx would wedge txd's own lane.
 //   /ingress/tmux     managed tmux lifecycle witness events; txd resolves the
 //                     page against its declaration and reconstructs if damaged.
 //   /agents/*         the deliberate-action plane: every route directly under
@@ -31,35 +24,26 @@
 // header as the transport receipt woven into event provenance.
 
 import {
-  BUS_SCHEMA_VERSION,
   MAX_CLIPBOARD_BYTES,
   SCHEMA_VERSION,
-  BusDeliverySchema,
   CloseRequestSchema,
   ClipboardPullRequestSchema,
   ClipboardPushRequestSchema,
   ClipboardSelectionRequestSchema,
-  CommHookSchema,
   CommRequestSchema,
   AgentInjectRequestSchema,
   CommRedriveRequestSchema,
   CommWaitRequestSchema,
-  DispatchRequestedSchema,
   EstateRotateRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
-  PhysicalDeclarationSchema,
-  AgentSchema,
-  RegistrationAbortedSchema,
   RunRequestSchema,
-  StopRequestSchema,
   TmuxLifecycleEventRequestSchema,
   WrapperStartHookSchema,
   LcdServiceDeliverySchema,
   type EstateReadResponse,
 } from '@terminus-os/contracts';
 import type { Daemon } from './core.ts';
-import { makeBusReceipt } from './bus-receipt.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 
@@ -72,32 +56,6 @@ export type Route = {
   label: string;
   handler: (req: Request, params: Record<string, string>) => Promise<Response>;
 };
-
-// The bus event types txd consumes off its `hook.%` subscription. Everything
-// else delivered on the lane is acked untouched (ack ≠ consume).
-export const CONSUMED_BUS_EVENT_TYPES = [
-  'hook.wrapper_start',
-  'agent.dispatch_requested',
-  'agent.physical_declared',
-  'agent.registered',
-  'hook.stop',
-  'hook.user_prompt_submit',
-] as const;
-
-const PHYSICAL_REFUSALS = new Set([
-  'physical_registration_unconfigured',
-  'physical_configuration_skew',
-  'physical_declaration_contradicted',
-  'persona_seat_incoherent',
-  'physical_declaration_conflict',
-  'physical_binding_conflict',
-  'tint_attestation_failed',
-  'physical_binding_incomplete',
-  'registered_agent_physical_conflict',
-  'registered_agent_package_conflict',
-  'abort_of_registered_agent',
-  'abort_reap_failed',
-]);
 
 // Every comm frame the flush carried, not just the one that happened to land
 // first. A frame always begins its own line, so the line anchor still refuses
@@ -114,32 +72,6 @@ export function commFrameMessageIds(prompt: string | undefined): string[] {
   const seen = new Set<string>();
   for (const match of prompt.matchAll(TX_COMM_FRAME)) seen.add(match[1]!);
   return [...seen];
-}
-
-function stringField(payload: Record<string, unknown>, field: string): string | undefined {
-  const value = payload[field];
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function stopHookInput(payload: Record<string, unknown>, seq: number): unknown {
-  return {
-    agent_id: payload.agent_id,
-    schema_version: payload.schema_version ?? SCHEMA_VERSION,
-    content: stringField(payload, 'content') ?? stringField(payload, 'last_assistant_message'),
-    stop_event_id: stringField(payload, 'stop_event_id') ?? `bus:${seq}`,
-  };
-}
-
-function promptHookInput(payload: Record<string, unknown>): unknown {
-  const prompt = stringField(payload, 'prompt');
-  return {
-    agent_id: payload.agent_id,
-    schema_version: payload.schema_version ?? SCHEMA_VERSION,
-    message_ids: commFrameMessageIds(prompt),
-    content: prompt,
-    stop_event_id: stringField(payload, 'stop_event_id'),
-    session_id: stringField(payload, 'session_id'),
-  };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -523,24 +455,11 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         return json(res, res.ok ? 200 : 409);
       },
     },
-    // ── /ingress/bus — the central-bus delivery door ────────────────────────
-    // busd POSTs one full journal row per delivery (BusDeliverySchema) and
-    // retries the SAME event until 2xx — head-of-line, never a skip. So the
-    // honest outcomes here are: 422 ONLY for envelope/contract skew (which
-    // SHOULD block loudly), and 2xx for everything else — with `consumed`
-    // reporting whether txd actually ingested the event. A refused stop
-    // (ghost) or malformed hook payload is acked-not-consumed: exactly the
-    // no-footprint outcome of the old direct door, without wedging the lane.
-    //
-    // NOTE: no whole-body raw-tmux-id pre-scan (unlike parseMutation): the
-    // lane carries all hook.% payloads, and unconsumed ones may legitimately
-    // contain %N-shaped text (tool output). The membrane applies to what txd
-    // actually ingests — the unwrapped consumed payloads — below.
     // The lcd typed lifecycle-fact door — txd as a service subscriber of
     // lifecycled's typed subscription plane. lcd retries a non-2xx delivery
     // under its lane backoff and never skips a fact, so the honest outcomes
-    // mirror /ingress/bus: 422 ONLY for envelope skew, 2xx for everything
-    // else with `consumed` reporting whether txd ingested the fact.
+    // 422 only for envelope skew, 2xx for everything else with `consumed`
+    // reporting whether txd ingested the fact.
     {
       method: 'POST',
       match: exact('/ingress/lifecycle'),
@@ -558,103 +477,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
           if (!hook.success) return ack(false, 'invalid_wrapper_start_payload');
           const result = await daemon.attestWrapperStart(hook.data);
           return ack(result.attested, result.reason);
-        }
-        return ack(false, 'not_consumed');
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/ingress/bus'),
-      label: 'POST /ingress/bus',
-      handler: async (req) => {
-        const parsed = BusDeliverySchema.safeParse(await readJson(req));
-        if (!parsed.success) {
-          return json({ ok: false, error: 'invalid_bus_delivery', field: issuePath(parsed.error.issues[0]?.path ?? []) }, 422);
-        }
-        if (parsed.data.schema_version !== BUS_SCHEMA_VERSION) {
-          return json({ ok: false, error: 'invalid_bus_delivery', field: '$.schema_version' }, 422);
-        }
-        const { event } = parsed.data;
-        // The transport receipt now points into the bus journal row that
-        // delivered this event — attributable straight back to bus.events.seq.
-        const busReceipt = makeBusReceipt(event.seq);
-        const ack = (consumed: boolean, reason: string | null, extra: Record<string, unknown> = {}) =>
-          json({ ok: true, seq: event.seq, consumed, reason, ...extra });
-        const physicalAck = async (operation: () => Promise<void>) => {
-          try {
-            await operation();
-            return ack(true, null);
-          } catch (error) {
-            const reason = error instanceof Error ? error.message : String(error);
-            if (PHYSICAL_REFUSALS.has(reason)) return ack(false, reason);
-            throw error;
-          }
-        };
-        if (event.event_type === 'hook.wrapper_start') {
-          const hook = WrapperStartHookSchema.safeParse(event.payload);
-          if (!hook.success) return ack(false, 'invalid_wrapper_start_payload');
-          const result = await daemon.attestWrapperStart(hook.data);
-          return ack(result.attested, result.reason);
-        }
-        if (event.event_type === 'agent.dispatch_requested') {
-          const requested = DispatchRequestedSchema.safeParse(event.payload);
-          // A dispatch is the one bus fact with a caller holding its answer
-          // open: registrationd returns only when txd terminalizes. Acking a
-          // payload this contract cannot read consumed the dispatch, published
-          // nothing, and left that caller waiting on a clock — three briefed
-          // births vanished exactly this way when `prompt` reached the wire
-          // ahead of this mirror. There is no seat-level truth to publish
-          // about a request that cannot be read, so the delivery fails: busd
-          // blocks the lane, names it, and the skew is loud from the first
-          // dispatch instead of the fifth.
-          if (!requested.success) {
-            const issue = requested.error.issues[0];
-            throw new Error(`unreadable_dispatch_request ${issue?.code ?? 'unknown'} at ${issuePath(issue?.path ?? [])}`);
-          }
-          if (requested.data.machine !== machine) return ack(false, 'foreign_machine');
-          return physicalAck(() => daemon.dispatch(requested.data));
-        }
-        if (event.event_type === 'agent.physical_declared') {
-          const declaration = PhysicalDeclarationSchema.safeParse(event.payload);
-          if (!declaration.success) return ack(false, 'invalid_physical_declaration');
-          return physicalAck(() => daemon.recordPhysicalDeclaration(declaration.data, busReceipt));
-        }
-        if (event.event_type === 'agent.registration_aborted') {
-          const abort = RegistrationAbortedSchema.safeParse(event.payload);
-          if (!abort.success) return ack(false, 'invalid_registration_abort');
-          return physicalAck(() => daemon.abortRegistration(abort.data, busReceipt));
-        }
-        if (event.event_type === 'agent.registered') {
-          const agent = AgentSchema.safeParse(event.payload);
-          if (!agent.success) return ack(false, 'invalid_registered_agent');
-          return physicalAck(() => daemon.activateRegisteredAgent(agent.data));
-        }
-        if (event.event_type === 'hook.stop') {
-          const stop = StopRequestSchema.safeParse(stopHookInput(event.payload, event.seq));
-          if (!stop.success) return ack(false, 'invalid_stop_payload');
-          const res = await daemon.stop(stop.data, busReceipt);
-          // Ghost/schema refusal records nothing (the old door's loud refusal),
-          // but the DELIVERY is acked — a ghost must not wedge the lane.
-          if ('refused' in res) return ack(false, res.reason);
-          if (stop.data.content !== undefined) {
-            await daemon.commStop(stop.data.agent_id, stop.data.content, stop.data.stop_event_id ?? null, busReceipt);
-          }
-          return ack(true, null, { receipt: res });
-        }
-        if (event.event_type === 'hook.user_prompt_submit') {
-          const hook = CommHookSchema.safeParse(promptHookInput(event.payload));
-          if (!hook.success) return ack(false, 'invalid_user_prompt_submit_payload');
-          try {
-            return ack(true, null, { receipt: await daemon.promptSubmitted(hook.data, busReceipt) });
-          } catch (error) {
-            // Deterministic domain refusal — a natural prompt-submit with no
-            // comm-message context — must not wedge the lane. Anything else
-            // (infra failure) propagates to 500 so busd retries it.
-            if (error instanceof Error && error.message === 'message_target_mismatch') {
-              return ack(false, 'message_target_mismatch');
-            }
-            throw error;
-          }
         }
         return ack(false, 'not_consumed');
       },

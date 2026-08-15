@@ -74,7 +74,7 @@ import {
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
 } from '@terminus-os/contracts';
-import { busEventSeqFromReceipt } from './bus-receipt.ts';
+import { journalEventSeqFromReceipt } from './journal-receipt.ts';
 import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
 import { findTmuxId } from './ids.ts';
@@ -274,12 +274,56 @@ export class Daemon {
    * seat is started with the sanctioned wrapper and the birth proceeds from
    * the wrapper's own hook.
    */
-  dispatch(request: DispatchRequested): Promise<void> {
+  dispatch(request: DispatchRequested, receipt: string | null = null): Promise<void> {
     return this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const publish = this.physicalRegistration.publish;
       const machine = this.physicalRegistration.machine;
-      const refuse = (reason: DispatchRefused['reason'], seats: DispatchRefused['seats'] = []) => publish(
+      const priorEvents = await this.store.readByEntity(request.agent_id);
+      const priorRequest = priorEvents.find((event) =>
+        event.event_type === 'reg.dispatch_requested'
+        && event.payload.dispatch_id === request.dispatch_id
+        && event.payload.request !== undefined);
+      if (priorRequest && JSON.stringify(priorRequest.payload.request) !== JSON.stringify(request)) {
+        throw new Error('dispatch_request_conflict');
+      }
+      const priorTerminal = priorEvents.findLast((event) =>
+        event.event_type === 'reg.dispatch_requested'
+        && event.payload.dispatch_id === request.dispatch_id
+        && typeof event.payload.outcome_event_type === 'string'
+        && event.payload.outcome !== undefined);
+      if (priorTerminal) {
+        await publish(
+          priorTerminal.payload.outcome_event_type as TxdPublishedEventType,
+          priorTerminal.payload.outcome as Record<string, unknown>,
+        );
+        return;
+      }
+      if (!priorRequest) {
+        await this.store.append({
+          entity_type: 'agent',
+          entity_id: request.agent_id,
+          event_type: 'reg.dispatch_requested',
+          payload: { dispatch_id: request.dispatch_id, request },
+          provenance: this.prov('observer', receipt),
+          occurred_at: this.now(),
+        });
+      }
+      const terminalize = async (
+        eventType: 'agent.dispatch_attested' | 'agent.dispatch_refused',
+        outcome: Record<string, unknown>,
+      ): Promise<void> => {
+        await this.store.append({
+          entity_type: 'agent',
+          entity_id: request.agent_id,
+          event_type: 'reg.dispatch_requested',
+          payload: { dispatch_id: request.dispatch_id, outcome_event_type: eventType, outcome },
+          provenance: this.prov('observer', receipt),
+          occurred_at: this.now(),
+        });
+        await publish(eventType, outcome);
+      };
+      const refuse = async (reason: DispatchRefused['reason'], seats: DispatchRefused['seats'] = []) => terminalize(
         'agent.dispatch_refused',
         DispatchRefusedSchema.parse({
           schema_version: request.schema_version,
@@ -430,6 +474,7 @@ export class Daemon {
           }
         }
       }
+      let launchComposed = false;
       try {
         const paneGeneration = await this.tmux.seatGeneration(seatId);
         if (!paneGeneration) {
@@ -475,7 +520,8 @@ export class Daemon {
           provenance: this.prov('observer', null),
           occurred_at: this.now(),
         });
-        await publish('agent.dispatch_attested', DispatchAttestedSchema.parse({
+        launchComposed = true;
+        await terminalize('agent.dispatch_attested', DispatchAttestedSchema.parse({
           schema_version: request.schema_version,
           dispatch_id: request.dispatch_id,
           machine,
@@ -484,6 +530,26 @@ export class Daemon {
           engine: request.engine,
         }));
       } catch (error) {
+        if (launchComposed && !mintedStackSeat) {
+          const terminalPersisted = (await this.store.readByEntity(request.agent_id)).some((event) =>
+            event.event_type === 'reg.dispatch_requested'
+            && event.payload.dispatch_id === request.dispatch_id
+            && typeof event.payload.outcome_event_type === 'string'
+            && event.payload.outcome !== undefined);
+          if (!terminalPersisted) {
+            if (!(await this.tmux.resetSeat(seatId))) {
+              throw new AggregateError([error], `txd could not reset failed launch at ${seatId}`);
+            }
+            await this.store.append({
+              entity_type: 'seat',
+              entity_id: seatId,
+              event_type: 'reg.seat_cleared',
+              payload: {},
+              provenance: this.prov('observer', null),
+              occurred_at: this.now(),
+            });
+          }
+        }
         await decommissionMintedStackSeat();
         throw error;
       }
@@ -1639,7 +1705,7 @@ export class Daemon {
             entity_id: deadLetterId,
             event_type: 'act.comm_delivery_confirmation_dead_lettered',
             payload: {
-              bus_event_seq: busEventSeqFromReceipt(receipt),
+              journal_event_seq: journalEventSeqFromReceipt(receipt),
               message_id: messageId,
               source_agent_id: accepted.payload.source_agent_id,
               delivery_target_agent_id: hook.agent_id,
@@ -2404,13 +2470,13 @@ export class Daemon {
     return true;
   }
 
-  // ── stop ingestion — the stop-hook's door (rung 3; delivered via /ingress/bus) ─────────────
+  // ── stop ingestion — projected from lifecycled's agent journal facts ──────
   // Three honest outcomes, no blind swallow: record a fresh stop (bound + live),
   // dedupe a repeat/late stop (act.receipt_deduped), or REFUSE a ghost — a stop for
   // an id that never walked through /agents/launch. The ghost is refused at
   // admission, so nothing is recorded. The stop-hook is a REAL but UNTRUSTED
-  // witness; what other services do with a stop is their correlation, consumed
-  // from the bus — txd only folds the turn axis.
+  // witness; lifecycled publishes the correlated agent journal fact and txd
+  // folds only the turn axis.
   stop(req: StopRequest, transportReceipt: string | null = null): Promise<StopReceipt | StopRefusal> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) {

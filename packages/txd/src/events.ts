@@ -1,10 +1,6 @@
-import {
-  BUS_SCHEMA_VERSION,
-  BusPublishResponseSchema,
-  type BusPublishRequest,
-} from '@terminus-os/contracts';
-
-type RequestFunction = (input: string | URL, init?: RequestInit) => Promise<Response>;
+import { createHash, randomUUID } from 'node:crypto';
+import type { SQL } from 'bun';
+import { PostgresJournalPublisher } from './journal/publisher.ts';
 
 export type TxdPublishedEventType =
   | 'agent.dispatch_attested'
@@ -19,25 +15,54 @@ export type TxdPublishedEventType =
   | 'agent.headless_consumed'
   | 'agent.composer_interactive';
 
-export function makeBusPublisher(
-  busUrl: string,
-  request: RequestFunction = fetch,
+function eventIdentity(eventType: TxdPublishedEventType, payload: Record<string, unknown>): string {
+  const occurrence = payload.dispatch_id
+    ?? payload.hook_request_id
+    ?? payload.birth_generation
+    ?? payload.message_id
+    ?? payload.observed_at
+    ?? payload.retired_at
+    ?? payload.closed_at
+    // A vacancy is an observation that may recur after a later occupant leaves;
+    // it has no producer-owned occurrence id, so each observation is distinct.
+    ?? randomUUID();
+  const subject = ['agent_id', 'seat_id', 'target_agent_id', 'machine']
+    .filter((field) => payload[field] !== undefined && payload[field] !== null)
+    .map((field) => `${field}=${String(payload[field])}`)
+    .join('|');
+  return `${eventType}:${subject}:${String(occurrence)}`;
+}
+
+function eventId(key: string): string {
+  const bytes = createHash('sha256').update('txd-journal-v1\0').update(key).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function occurredAt(payload: Record<string, unknown>): string {
+  for (const field of ['observed_at', 'retired_at', 'closed_at']) {
+    if (typeof payload[field] === 'string') return payload[field];
+  }
+  return new Date().toISOString();
+}
+
+export function makeJournalPublisher(
+  sql: Pick<SQL, 'begin'>,
+  machine: string,
 ): (eventType: TxdPublishedEventType, payload: Record<string, unknown>) => Promise<void> {
-  const endpoint = new URL('/ingress/events', busUrl);
+  const publisher = new PostgresJournalPublisher(sql, 'txd');
   return async (eventType, payload) => {
-    const body: BusPublishRequest = {
-      schema_version: BUS_SCHEMA_VERSION,
-      event_type: eventType,
-      source: 'txd',
+    const key = eventIdentity(eventType, payload);
+    await publisher.publish({
+      eventId: eventId(key),
+      eventType,
+      schemaVersion: 1,
+      idempotencyKey: key,
+      occurredAt: occurredAt(payload),
       payload,
-      occurred_at: new Date().toISOString(),
-    };
-    const response = await request(endpoint, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
+      provenance: { ingress: 'txd', machine },
     });
-    if (!response.ok) throw new Error(`bus_publish_refused:${response.status}`);
-    BusPublishResponseSchema.parse(await response.json());
   };
 }
