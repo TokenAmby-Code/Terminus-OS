@@ -141,7 +141,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(() => CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [] }, engine: "codex" })).toThrow();
   });
 
-  test("behavioral pin: comm receipt wait has a fixed 30-second ceiling and two return tiers", () => {
+  test("behavioral pin: comm receipt wait has a fixed ceiling, two success tiers, and a typed refusal", () => {
     expect(COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toBe(30_000);
     expect(CommReceiptWaitRequestSchema.parse({
       schema_version: 11,
@@ -178,6 +178,25 @@ describe("txd lifecycle vocabulary", () => {
       staged: true,
       event_ids: [41],
     }).phase).toBe("bytes_sent");
+    const refused = {
+      ok: false,
+      schema_version: 11,
+      phase: "transport_refused",
+      message_id: "message-3",
+      source_agent_id: "source",
+      targets: [{ agent_id: "target", seat_id: "palace:W", persona: null }],
+      bytes_sent: 0,
+      submit_verdict: "composer_corrupted",
+      refusals: [{
+        target: { agent_id: "target", seat_id: "palace:W", persona: null },
+        bytes: 0,
+        submit_verdict: "composer_corrupted",
+        event_id: 43,
+      }],
+      event_ids: [43],
+    } as const;
+    expect(CommReceiptSchema.parse(refused).phase).toBe("transport_refused");
+    expect(() => CommReceiptSchema.parse({ ...refused, refusals: [] })).toThrow();
   });
 
   test("health names the service txd — nothing k12-named survives of the daemon", () => {

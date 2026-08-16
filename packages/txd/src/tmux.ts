@@ -1748,8 +1748,20 @@ export class RealTmux implements TmuxControlPlane {
     }
     if (promptLine < 0) return null;
 
+    const isClaudeComposerBoundary = (index: number): boolean =>
+      /^\s*[─━]{8,}\s*$/.test(lines[index]!)
+      && lines.slice(index + 1, index + 3).some((line) =>
+        /Context .* used|bypass permissions on|for shortcuts|← for agents/.test(line));
     let promptBlockEnd = promptLine + 1;
-    while (promptBlockEnd < lines.length && lines[promptBlockEnd]!.trim() !== '') promptBlockEnd += 1;
+    while (promptBlockEnd < lines.length
+      && lines[promptBlockEnd]!.trim() !== ''
+      // Claude 2.1.233 paints the lower composer border immediately after the
+      // active prompt, with no blank row before its status chrome. That border
+      // terminates the editor; folding it into the payload makes both a truly
+      // empty composer and an intact pasted frame look corrupted.
+      // Opaque payload may itself contain a horizontal-rule line, so the rule
+      // is a boundary only when Claude's adjacent status chrome attests it.
+      && !isClaudeComposerBoundary(promptBlockEnd)) promptBlockEnd += 1;
     const promptBlock = lines.slice(promptLine, promptBlockEnd);
     promptBlock[0] = promptBlock[0]!.replace(/^\s*[│┃]?\s*[›❯>]\s?/, '');
     return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');

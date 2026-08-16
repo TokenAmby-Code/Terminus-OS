@@ -83,8 +83,9 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
     schema_version: SCHEMA_VERSION,
     message_id: accepted.message_id,
     source_agent_id: agentSource('comm'),
-  });
+  }) as { ok?: boolean };
   write(receipt);
+  if (receipt.ok === false) return 1;
   if (!ask) return 0;
   const result = await request('POST', '/agents/comm/wait', {
     schema_version: SCHEMA_VERSION, ask_id: accepted.ask_id, subscriber_agent_id: agentSource('comm'), timeout_ms: COMM_WAIT_TIMEOUT_MS,
