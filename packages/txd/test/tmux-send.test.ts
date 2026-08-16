@@ -70,6 +70,19 @@ test('behavioral pin: Claude 2.1.233 bordered empty composer is writable but a d
   expect(RealTmux.composerEmpty(pane('operator draft'), 'claude')).toBe(false);
 });
 
+test('behavioral pin: opaque Claude payload may contain a horizontal-rule line', () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\nfirst\n${'─'.repeat(80)}\nlast`;
+  const pane = [
+    `❯ ${frame}`,
+    '─'.repeat(80),
+    '  /workspace • Context 9% used • Fable 5',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n');
+
+  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('intact');
+});
+
 test('verified send waits for a pane-output event before observing the composer', async () => {
   const calls: string[] = [];
   let releaseOutput!: () => void;

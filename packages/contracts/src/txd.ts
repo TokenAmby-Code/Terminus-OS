@@ -766,7 +766,7 @@ export const CommTransportRefusedReceiptSchema = z.object({
     bytes: z.number().int().nonnegative(),
     submit_verdict: z.enum(['composer_corrupted', 'frame_absent', 'seat_unresolved']),
     event_id: z.number().int(),
-  })),
+  })).min(1),
   event_ids: z.array(z.number().int()),
 });
 export const CommReceiptSchema = z.discriminatedUnion('phase', [

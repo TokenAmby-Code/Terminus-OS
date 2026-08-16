@@ -178,7 +178,7 @@ describe("txd lifecycle vocabulary", () => {
       staged: true,
       event_ids: [41],
     }).phase).toBe("bytes_sent");
-    expect(CommReceiptSchema.parse({
+    const refused = {
       ok: false,
       schema_version: 11,
       phase: "transport_refused",
@@ -194,7 +194,9 @@ describe("txd lifecycle vocabulary", () => {
         event_id: 43,
       }],
       event_ids: [43],
-    }).phase).toBe("transport_refused");
+    } as const;
+    expect(CommReceiptSchema.parse(refused).phase).toBe("transport_refused");
+    expect(() => CommReceiptSchema.parse({ ...refused, refusals: [] })).toThrow();
   });
 
   test("health names the service txd — nothing k12-named survives of the daemon", () => {
