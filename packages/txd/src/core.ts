@@ -1844,6 +1844,27 @@ export class Daemon {
     let cancel = () => {};
     try {
       let current = await state();
+      const targets = (current.accepted.payload.targets ?? []) as CommTarget[];
+      const unstaged = current.sent.filter((row) => row.payload.submit_verdict !== 'staged');
+      if (current.sent.length === targets.length && unstaged.length > 0) {
+        const verdicts = new Set(unstaged.map((row) => String(row.payload.submit_verdict)));
+        return {
+          ok: false, schema_version: SCHEMA_VERSION, phase: 'transport_refused',
+          message_id: req.message_id, source_agent_id: req.source_agent_id,
+          targets,
+          bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
+          submit_verdict: verdicts.size === 1
+            ? [...verdicts][0] as 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'
+            : 'multiple',
+          refusals: unstaged.map((row) => ({
+            target: targets.find((target) => target.agent_id === row.payload.target_agent_id)!,
+            bytes: Number(row.payload.bytes ?? 0),
+            submit_verdict: String(row.payload.submit_verdict) as 'composer_corrupted' | 'frame_absent' | 'seat_unresolved',
+            event_id: row.seq,
+          })),
+          event_ids: current.sent.map((row) => row.seq),
+        };
+      }
       if (!current.delivery.complete) {
         await Promise.race([
           event,
@@ -1860,7 +1881,6 @@ export class Daemon {
           deliveries: current.delivery.deliveries,
         };
       }
-      const targets = (current.accepted.payload.targets ?? []) as CommTarget[];
       return {
         ok: true, schema_version: SCHEMA_VERSION, phase: 'bytes_sent',
         message_id: req.message_id, source_agent_id: req.source_agent_id,

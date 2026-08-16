@@ -752,9 +752,27 @@ export const CommBytesSentReceiptSchema = z.object({
   staged: z.boolean(),
   event_ids: z.array(z.number().int()),
 });
+export const CommTransportRefusedReceiptSchema = z.object({
+  ok: z.literal(false),
+  schema_version: z.number().int(),
+  phase: z.literal('transport_refused'),
+  message_id: CanonicalIdSchema,
+  source_agent_id: CanonicalIdSchema,
+  targets: z.array(CommTargetSchema),
+  bytes_sent: z.number().int().nonnegative(),
+  submit_verdict: z.enum(['composer_corrupted', 'frame_absent', 'seat_unresolved', 'multiple']),
+  refusals: z.array(z.object({
+    target: CommTargetSchema,
+    bytes: z.number().int().nonnegative(),
+    submit_verdict: z.enum(['composer_corrupted', 'frame_absent', 'seat_unresolved']),
+    event_id: z.number().int(),
+  })),
+  event_ids: z.array(z.number().int()),
+});
 export const CommReceiptSchema = z.discriminatedUnion('phase', [
   CommDeliveryConfirmedReceiptSchema,
   CommBytesSentReceiptSchema,
+  CommTransportRefusedReceiptSchema,
 ]);
 export type CommReceipt = z.infer<typeof CommReceiptSchema>;
 

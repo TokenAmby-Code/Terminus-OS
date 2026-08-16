@@ -115,3 +115,35 @@ test('tier 2: the bounded wait returns bytes sent as the sole comm return value'
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }
 });
+
+test('behavioral pin: a typed comm transport refusal is printed and exits non-zero', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const stdout: string[] = [];
+  const deps: CliDependencies = {
+    request: async (_method, path) => path === '/agents/comm'
+      ? { ok: true, message_id: 'message-refused', ask_id: null }
+      : {
+          ok: false,
+          phase: 'transport_refused',
+          message_id: 'message-refused',
+          source_agent_id: 'source',
+          targets: [{ agent_id: 'target', seat_id: 'palace:W', persona: null }],
+          bytes_sent: 0,
+          submit_verdict: 'composer_corrupted',
+          event_ids: [99],
+        },
+    stdout: (line) => stdout.push(line),
+    stderr: () => {},
+  };
+  try {
+    expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(1);
+    expect(JSON.parse(stdout[0]!)).toMatchObject({
+      ok: false,
+      phase: 'transport_refused',
+      submit_verdict: 'composer_corrupted',
+    });
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});

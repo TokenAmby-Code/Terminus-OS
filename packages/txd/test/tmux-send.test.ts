@@ -54,6 +54,22 @@ test('there is no knob to delay or repeat the submit', () => {
   });
 });
 
+test('behavioral pin: Claude 2.1.233 bordered empty composer is writable but a draft is not', () => {
+  const pane = (draft: string) => [
+    '╭─── Claude Code v2.1.233 ───╮',
+    '',
+    `❯ ${draft}`,
+    '─'.repeat(80),
+    '  /workspace • Context 9% used • Fable 5',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    '[txd-council:claude* "✳ Claude Code"]',
+  ].join('\n');
+
+  expect(RealTmux.composerInteractive(pane(''))).toBe(true);
+  expect(RealTmux.composerEmpty(pane(''), 'claude')).toBe(true);
+  expect(RealTmux.composerEmpty(pane('operator draft'), 'claude')).toBe(false);
+});
+
 test('verified send waits for a pane-output event before observing the composer', async () => {
   const calls: string[] = [];
   let releaseOutput!: () => void;
