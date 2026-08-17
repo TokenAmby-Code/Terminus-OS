@@ -45,6 +45,34 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
   }
 });
 
+test('GET /tmux/read/diagnostics/hooks serves a bounded typed journal view', async () => {
+  const limits: number[] = [];
+  const srv = makeServer({
+    bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test',
+    hookDiagnostics: async (limit) => {
+      limits.push(limit);
+      return [{ recorded_at: '2026-08-17T17:00:00.000Z', priority: 3, message: 'Unable to connect' }];
+    },
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/diagnostics/hooks?limit=7`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      schema_version: SCHEMA_VERSION,
+      source: 'systemd-journal',
+      identifier: 'txd-tmux-hook',
+      diagnostics: [{ recorded_at: '2026-08-17T17:00:00.000Z', priority: 3, message: 'Unable to connect' }],
+    });
+    expect(limits).toEqual([7]);
+
+    expect((await fetch(`http://127.0.0.1:${srv.port}/tmux/read/diagnostics/hooks?limit=0`)).status).toBe(422);
+    expect(limits).toEqual([7]);
+  } finally {
+    srv.stop(true);
+  }
+});
+
 test('GET /tmux/read/zombies translates envelope inventory failures', async () => {
   const d = new Daemon(
     new MemoryEventStore(),

@@ -65,11 +65,16 @@ async function constructAt(width: number, height: number): Promise<Record<'palac
   const socket = `txd-geometry-${process.pid}-${width}x${height}`;
   sockets.push(socket);
   await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
-  await new RealTmux(socket).ensureEstate();
+  const control = new RealTmux(socket);
+  await control.ensureEstate();
 
   const result = {} as Record<'palace' | 'somnium' | 'council', Pane[]>;
   for (const window of ['palace', 'somnium', 'council'] as const) {
     await tmux(socket, 'resize-window', '-t', `main:${window}`, '-x', String(width), '-y', String(height));
+    // Rebuild Council at the projected terminal dimensions. tmux layout trees
+    // retain absolute split sizes across a detached resize; txd's owned
+    // default is the geometry it constructs at the real attached window size.
+    if (window === 'council') await control.rebuildPage(window);
     const rows = await tmux(
       socket, 'list-panes', '-t', `main:${window}`, '-F', '#{@canonical_id}\t#{pane_width}\t#{pane_height}\t#{pane_left}\t#{pane_top}',
     );
@@ -138,7 +143,10 @@ describe('disposable canonical estate geometry', () => {
 
       for (const panes of Object.values(geometry)) {
         expect(Math.min(...panes.map(({ width: paneWidth }) => paneWidth))).toBeGreaterThanOrEqual(16);
-        expect(Math.min(...panes.map(({ height: paneHeight }) => paneHeight))).toBeGreaterThanOrEqual(9);
+        for (const pane of panes) {
+          const minimum = pane.seat === 'council:fabricator-general' || pane.seat === 'council:orchestrator' ? 6 : 9;
+          expect(pane.height).toBeGreaterThanOrEqual(minimum);
+        }
       }
 
       const palace = Object.fromEntries(geometry.palace.map((pane) => [pane.seat, pane]));
@@ -167,8 +175,11 @@ describe('disposable canonical estate geometry', () => {
       expect(council['council:orchestrator']!.top).toBeGreaterThan(0);
       for (const pane of geometry.council) {
         expectRatio(pane.width, width, 0.45, 0.52);
-        expectRatio(pane.height, height, 0.42, 0.52);
       }
+      expectRatio(council['council:custodes']!.height, height, 0.60, 0.70);
+      expectRatio(council['council:pax']!.height, height, 0.60, 0.70);
+      expectRatio(council['council:fabricator-general']!.height, height, 0.25, 0.36);
+      expectRatio(council['council:orchestrator']!.height, height, 0.25, 0.36);
     });
   }
 
@@ -390,10 +401,14 @@ describe('disposable canonical estate geometry', () => {
     );
     const panes = rows.split('\n').map((row) => row.split('\t'));
     expect(panes.map(([seat]) => seat).sort()).toEqual([...TXD_WINDOWS.council].sort());
-    for (const [, width, height] of panes) {
+    for (const [, width] of panes) {
       expectRatio(Number(width), 160, 0.45, 0.55);
-      expectRatio(Number(height), 48, 0.45, 0.55);
     }
+    const bySeat = new Map(panes.map(([seat, , height]) => [seat!, Number(height)]));
+    expectRatio(bySeat.get('council:custodes')!, 48, 0.60, 0.70);
+    expectRatio(bySeat.get('council:pax')!, 48, 0.60, 0.70);
+    expectRatio(bySeat.get('council:fabricator-general')!, 48, 0.25, 0.36);
+    expectRatio(bySeat.get('council:orchestrator')!, 48, 0.25, 0.36);
   });
 
   test('seat repair refuses when the page window itself is gone', async () => {

@@ -243,10 +243,10 @@ const REPAIR_SPLITS: Record<string, { source: string; flags: string[]; size?: st
   'somnium:S': { source: 'somnium:N', flags: ['-v'] },
   'somnium:NE': { source: 'somnium:SE', flags: ['-v', '-b'] },
   'somnium:SE': { source: 'somnium:NE', flags: ['-v'] },
-  'council:custodes': { source: 'council:fabricator-general', flags: ['-v', '-b'] },
-  'council:fabricator-general': { source: 'council:custodes', flags: ['-v'] },
-  'council:pax': { source: 'council:orchestrator', flags: ['-v', '-b'] },
-  'council:orchestrator': { source: 'council:pax', flags: ['-v'] },
+  'council:custodes': { source: 'council:fabricator-general', flags: ['-v', '-b'], size: '67%' },
+  'council:fabricator-general': { source: 'council:custodes', flags: ['-v'], size: '33%' },
+  'council:pax': { source: 'council:orchestrator', flags: ['-v', '-b'], size: '67%' },
+  'council:orchestrator': { source: 'council:pax', flags: ['-v'], size: '33%' },
 };
 
 const CANON_OPT = '@canonical_id';
@@ -1032,6 +1032,7 @@ export class RealTmux implements TmuxControlPlane {
         && se.left === ne.left && se.top === ne.top + ne.height + 1
         && nw.width === sw.width && ne.width === se.width
         && nw.height === ne.height && sw.height === se.height
+        && Math.abs(nw.height - (2 * sw.height)) <= 2
         && ne.left + ne.width === nw.windowWidth
         && sw.top + sw.height === nw.windowHeight
         && se.top + se.height === nw.windowHeight;
@@ -1193,12 +1194,12 @@ export class RealTmux implements TmuxControlPlane {
         page,
       );
       const southwest = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '50%', '-t', first],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '33%', '-t', first],
         'split council southwest',
         page,
       );
       const southeast = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '50%', '-t', northeast],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '33%', '-t', northeast],
         'split council southeast',
         page,
       );
@@ -1404,11 +1405,11 @@ export class RealTmux implements TmuxControlPlane {
         'split council east column',
       );
       const councilSW = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:fabricator-general'), '-c', this.homeDirectory(), '-l', '50%', '-t', council],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:fabricator-general'), '-c', this.homeDirectory(), '-l', '33%', '-t', council],
         'split council southwest',
       );
       const councilSE = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:orchestrator'), '-c', this.homeDirectory(), '-l', '50%', '-t', councilNE],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:orchestrator'), '-c', this.homeDirectory(), '-l', '33%', '-t', councilNE],
         'split council southeast',
       );
       const councilPanes = [council, councilSW, councilNE, councilSE];
