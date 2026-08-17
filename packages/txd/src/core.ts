@@ -3216,7 +3216,7 @@ export class Daemon {
     return {
       ok: open === 0
         && tmux_reachable
-        && (activation_pending || estate_generation === 'canonical')
+        && estate_generation === 'canonical'
         && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
