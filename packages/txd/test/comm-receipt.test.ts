@@ -65,10 +65,10 @@ test('tier 2 returns bytes sent at the bound, then a late attestation emits a re
   ]);
 });
 
-test('behavioral pin: an unstaged zero-byte send is an immediate typed transport refusal', async () => {
+test('behavioral pin: a draft-present zero-byte send is an immediate honest transport refusal', async () => {
   const { daemon, tmux, scheduledMs } = await rig();
   const control: TmuxControlPlane = tmux;
-  control.sendVerifiedToSeat = async () => ({ bytes: 0, verdict: 'composer_corrupted' as const });
+  control.sendVerifiedToSeat = async () => ({ bytes: 0, verdict: 'composer_draft_present' as const });
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION,
     source_agent_id: 'sender',
@@ -88,7 +88,7 @@ test('behavioral pin: an unstaged zero-byte send is an immediate typed transport
     ok: false,
     phase: 'transport_refused',
     bytes_sent: 0,
-    submit_verdict: 'composer_corrupted',
+    submit_verdict: 'composer_draft_present',
   });
   expect(scheduledMs()).toBeUndefined();
 });

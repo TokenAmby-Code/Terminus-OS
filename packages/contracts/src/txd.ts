@@ -760,11 +760,11 @@ export const CommTransportRefusedReceiptSchema = z.object({
   source_agent_id: CanonicalIdSchema,
   targets: z.array(CommTargetSchema),
   bytes_sent: z.number().int().nonnegative(),
-  submit_verdict: z.enum(['composer_corrupted', 'frame_absent', 'seat_unresolved', 'multiple']),
+  submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved', 'multiple']),
   refusals: z.array(z.object({
     target: CommTargetSchema,
     bytes: z.number().int().nonnegative(),
-    submit_verdict: z.enum(['composer_corrupted', 'frame_absent', 'seat_unresolved']),
+    submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved']),
     event_id: z.number().int(),
   })).min(1),
   event_ids: z.array(z.number().int()),

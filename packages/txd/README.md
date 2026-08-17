@@ -112,7 +112,12 @@ each route is the ruled daemon behavior, unchanged.
   one-use tmux buffer over stdin and injects it as one bracketed paste before
   exact composer verification and Enter. Callers never split, spill, encode,
   or select a transport; a buffer/paste failure refuses loudly without
-  submitting a prefix.
+  submitting a prefix. Pre-input readiness has three observed states: an
+  `empty_ready` composer may be staged, `draft_present` refuses with
+  `composer_draft_present`, and an indeterminate paint refuses with
+  `composer_unreadable`. `composer_corrupted` is reserved for an observed
+  mismatch after staging or exact redrive verification; a parse failure alone
+  never mints corruption.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an

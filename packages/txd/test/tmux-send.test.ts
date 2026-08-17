@@ -70,6 +70,23 @@ test('behavioral pin: Claude 2.1.233 bordered empty composer is writable but a d
   expect(RealTmux.composerEmpty(pane('operator draft'), 'claude')).toBe(false);
 });
 
+test('behavioral pin: a wide Claude labeled boundary leaves the visible-empty composer ready', () => {
+  // Reproduced from council:custodes at 106x79 immediately before txd event
+  // 34317 falsely refused message 3d2e4ca6 as composer_corrupted/zero bytes.
+  const pane = [
+    '✻ Worked for 1m 29s',
+    '',
+    '─'.repeat(74) + ' custodes-continuation-resume ──',
+    '❯ ',
+    '─'.repeat(106),
+    '  /home/tokenamby/.local/share/obsidian-vaults/Imperium-ENV/Perpetuals/Custodes • Context 13% used • Fab…',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent',
+  ].join('\n');
+
+  expect(RealTmux.composerReadiness(pane, 'claude')).toBe('empty_ready');
+  expect(RealTmux.composerEmpty(pane, 'claude')).toBe(true);
+});
+
 test('behavioral pin: opaque Claude payload may contain a horizontal-rule line', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
   const frame = `[tx comm ${messageId} from sender]\nfirst\n${'─'.repeat(80)}\nlast`;
@@ -150,12 +167,43 @@ for (const existing of [
       'codex',
     );
 
-    expect(outcome).toEqual({ bytes: 0, verdict: 'composer_corrupted' });
+    expect(outcome).toEqual({ bytes: 0, verdict: 'composer_draft_present' });
     expect(calls.filter((args) => ['load-buffer', 'paste-buffer', 'send-keys'].includes(args[0]!))).toHaveLength(0);
     expect(calls.filter((args) => args[0] === 'capture-pane')).toHaveLength(1);
     expect(baseline).toBe(`transcript\n\n› ${existing}\n\n  gpt-5.6-sol medium`);
   });
 }
+
+test('behavioral pin: an unreadable composer has its own zero-effect refusal', async () => {
+  const baseline = [
+    '❯ prior operator prompt',
+    '',
+    '● still working on the current turn',
+    '',
+    '  gpt-5.6-sol medium',
+  ].join('\n');
+  const calls: string[][] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'capture-pane') return { code: 0, stdout: baseline, stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    observePaneOutput: async () => { throw new Error('unreadable composer must refuse before arming'); },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat(
+    'palace:S',
+    '11111111-1111-4111-8111-111111111111',
+    '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nnew frame',
+    undefined,
+    'codex',
+  );
+
+  expect(outcome).toEqual({ bytes: 0, verdict: 'composer_unreadable' });
+  expect(calls.filter((args) => ['load-buffer', 'paste-buffer', 'send-keys'].includes(args[0]!))).toHaveLength(0);
+});
 
 for (const profile of [
   {
