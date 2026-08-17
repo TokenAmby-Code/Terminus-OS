@@ -291,7 +291,7 @@ export const COMMANDS: readonly Command[] = [
   },
   {
     path: ['estate', 'abandon'],
-    summary: 'Attest already-flagged absent, unbound noncanonical seats decommissioned',
+    summary: 'Attest already-flagged absent, unbound noncanonical seats abandoned',
     run: async ({ args, request, write }) => {
       if (args.length === 0 || args.some((arg) => arg.startsWith('-'))) {
         throw new Error('usage: tx estate abandon <seat> [<seat> ...]');

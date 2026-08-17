@@ -141,7 +141,7 @@ test('a scoped reset releases an unbound composed birth for redispatch', async (
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W' }));
 
   expect((await d.resetEstateScope({
-    schema_version: 11,
+    schema_version: 12,
     force: true,
     scope: 'pane',
     pane: 'palace:W',
@@ -175,7 +175,7 @@ test('the mechanicus pool mints a fresh stack pane directly', async () => {
   ]);
 });
 
-test('a minted stack pane is decommissioned when its engine cannot start', async () => {
+test('a minted stack pane is abandoned when its engine cannot start', async () => {
   class FailingStackTmux extends FakeTmux {
     override async startSeatEngine(launch: Parameters<FakeTmux['startSeatEngine']>[0]): Promise<boolean> {
       if (launch.seatId.startsWith('mechanicus:')) return false;
@@ -199,7 +199,7 @@ test('a minted stack pane is decommissioned when its engine cannot start', async
   expect(published).toMatchObject([{ type: 'agent.dispatch_refused', payload: { reason: 'seat_start_failed' } }]);
   const dynamic = (await store.readAll()).filter((event) => event.entity_id.startsWith('mechanicus:')
     && event.entity_id !== 'mechanicus:new');
-  expect(dynamic.map((event) => event.event_type)).toEqual(['reg.pane_created', 'reg.seat_decommissioned']);
+  expect(dynamic.map((event) => event.event_type)).toEqual(['reg.pane_created', 'reg.seat_abandoned']);
   expect((await tmux.listSeats()).find((seat) => seat.seat_id === dynamic[0]!.entity_id)?.pane).toBe('dead');
 });
 

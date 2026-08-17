@@ -248,6 +248,24 @@ describe('disposable canonical estate geometry', () => {
     for (const [seat, pid] of before) expect(after.get(seat)).toBe(pid);
   });
 
+  test('reconcile canonicalizes display-only zoom without waiting for a daemon restart', async () => {
+    const socket = `txd-geometry-reconcile-zoom-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const adapter = new RealTmux(socket);
+    const store = new (await import('../src/store.ts')).MemoryEventStore();
+    const daemon = new (await import('../src/core.ts')).Daemon(store, adapter);
+    await daemon.constructEstate();
+    await tmux(socket, 'resize-pane', '-Z', '-t', 'main:council.0');
+    expect(await adapter.estateGeneration()).toBe('recoverable');
+    expect((await daemon.health('test', { version: 'test', git_sha: 'test', bun: Bun.version })).ok).toBe(false);
+
+    await daemon.reconcile();
+
+    expect(await adapter.estateGeneration()).toBe('canonical');
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('0');
+  });
+
   // Enforcement that provably cannot converge still fails — once, and loud, and
   // naming the page and the exact divergence, so the operator has something to
   // act on instead of an anonymous postcondition and a restart loop.

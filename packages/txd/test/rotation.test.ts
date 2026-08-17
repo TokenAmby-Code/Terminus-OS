@@ -128,6 +128,48 @@ test('a dead pane retires alone: pane-died resets only the faulted pane and boun
   expect(events.filter((event) => event.event_type === 'reg.retired').map((event) => event.entity_id)).toEqual(['south']);
 });
 
+test('a dead dynamic worker pane is retired and removed immediately on its lifecycle edge', async () => {
+  const { store, tmux, daemon } = await setup();
+  const seat = 'palace_fleet:11111111-1111-4111-8111-111111111111';
+  await tmux.createStackSeat('palace_fleet', seat);
+  await store.append({
+    entity_type: 'seat', entity_id: seat, event_type: 'reg.pane_created',
+    payload: { pane_state: 'live' },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: new Date().toISOString(),
+  });
+  await daemon.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity: 'worker', persona: 'astartes', tint: '#111111' });
+  tmux.killOutOfBand(seat);
+
+  const result = await daemon.handleTmuxLifecycleEvent({
+    schema_version: SCHEMA_VERSION,
+    event: 'pane-died',
+    page: 'palace_fleet',
+  });
+
+  expect(result).toMatchObject({ ok: true, reconstructed: true, reset_seats: [seat] });
+  expect((await daemon.estateRows()).some((row) => row.seat_id === seat)).toBe(false);
+  expect((await store.readByEntity('worker')).map((event) => event.event_type)).toContain('reg.retired');
+});
+
+test('boot reconciles a dead dynamic worker instead of failing ensureEstate', async () => {
+  const { store, tmux, daemon } = await setup();
+  const seat = 'palace_fleet:22222222-2222-4222-8222-222222222222';
+  await tmux.createStackSeat('palace_fleet', seat);
+  await store.append({
+    entity_type: 'seat', entity_id: seat, event_type: 'reg.pane_created',
+    payload: { pane_state: 'live' },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: new Date().toISOString(),
+  });
+  await daemon.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity: 'worker', persona: 'astartes', tint: '#111111' });
+  tmux.killOutOfBand(seat);
+
+  const restarted = new Daemon(store, tmux);
+  await expect(restarted.constructEstate()).resolves.toBeDefined();
+  expect((await restarted.estateRows()).some((row) => row.seat_id === seat)).toBe(false);
+});
+
 test('two dead panes earn two loud pane-scoped resets, never a page rebuild', async () => {
   const { store, tmux, daemon } = await setup();
   await daemon.launch({ seat_id: 'palace:N', schema_version: SCHEMA_VERSION, identity: 'north', persona: 'astartes', tint: '#1' });

@@ -367,7 +367,7 @@ export class Daemon {
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
       // One candidate's seat-level truth, first disqualifier in a fixed order.
       const disqualify = (candidate: string): Exclude<SeatDisqualifier, 'foreign_process'> | null => {
-        if (projections.decommissionedSeats.has(candidate)) return 'decommissioned';
+        if (projections.abandonedSeats.has(candidate)) return 'abandoned';
         if (pendingResetSeats.has(candidate)) return 'reset_pending';
         if (bound.has(candidate)) return 'bound';
         if (launching.has(candidate)) return 'launching';
@@ -378,7 +378,7 @@ export class Daemon {
       const idle = (candidate: string) => workloads.get(candidate)?.idle ?? false;
       let seatId: string;
       let mintedStackSeat: string | null = null;
-      const decommissionMintedStackSeat = async (): Promise<void> => {
+      const abandonMintedStackSeat = async (): Promise<void> => {
         if (!mintedStackSeat) return;
         const seat = mintedStackSeat;
         await this.tmux.killSeat(seat);
@@ -388,7 +388,7 @@ export class Daemon {
         await this.store.append({
           entity_type: 'seat',
           entity_id: seat,
-          event_type: 'reg.seat_decommissioned',
+          event_type: 'reg.seat_abandoned',
           payload: {},
           provenance: this.prov('observer', null),
           occurred_at: this.now(),
@@ -413,7 +413,7 @@ export class Daemon {
             occurred_at: this.now(),
           });
         } catch (error) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           throw error;
         }
         return candidate;
@@ -482,7 +482,7 @@ export class Daemon {
             const reason = ({
               bound: 'seat_bound',
               launching: 'seat_launching',
-              decommissioned: 'seat_decommissioned',
+              abandoned: 'seat_abandoned',
               reset_pending: 'seat_reset_pending',
               dead: 'pane_dead',
             } as const)[state];
@@ -495,7 +495,7 @@ export class Daemon {
       try {
         const paneGeneration = await this.tmux.seatGeneration(seatId);
         if (!paneGeneration) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_generation_unattested');
           return;
         }
@@ -517,7 +517,7 @@ export class Daemon {
           ...(sshTarget ? { sshTarget } : {}),
           ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
         }))) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_start_failed');
           return;
         }
@@ -567,7 +567,7 @@ export class Daemon {
             });
           }
         }
-        await decommissionMintedStackSeat();
+        await abandonMintedStackSeat();
         throw error;
       }
     });
@@ -1499,7 +1499,7 @@ export class Daemon {
       // No registered binding answers to this identity, so the only reading
       // left is a bare declared seat. Anything else is absent — loud.
       if (!TXD_ESTATE.includes(req.target)) throw new Error(`identity_absent: ${req.target}`);
-      if (proj.decommissionedSeats.has(req.target)) throw new Error(`seat_decommissioned: ${req.target}`);
+      if (proj.abandonedSeats.has(req.target)) throw new Error(`seat_abandoned: ${req.target}`);
       // A binding mid-birth is an agent arriving; racing its registration
       // with a shell line would type into its wrapper.
       if (proj.currentBindings.some((binding) => binding.seat_id === req.target)) {
@@ -2014,13 +2014,13 @@ export class Daemon {
           reason: `scoped_reset_pending: ${req.seat_id}`,
         };
       }
-      if (proj.decommissionedSeats.has(req.seat_id)) {
+      if (proj.abandonedSeats.has(req.seat_id)) {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `seat_decommissioned: ${req.seat_id}`,
+          reason: `seat_abandoned: ${req.seat_id}`,
         };
       }
       const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
@@ -2167,6 +2167,8 @@ export class Daemon {
       if (generation === 'foreign') {
         throw new Error('txd refused non-canonical existing tmux estate');
       }
+
+      await this.reconcileDeadStackSeatsUnlocked(null);
 
       await this.recoverScopedResets();
 
@@ -2569,7 +2571,7 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     if (isStackSeat(binding.seat_id)) {
-      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_decommissioned', payload: {}, provenance: prov, occurred_at });
+      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_abandoned', payload: {}, provenance: prov, occurred_at });
     }
     await this.store.appendAll(inputs);
     await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
@@ -2652,6 +2654,7 @@ export class Daemon {
   async reconcile(transportReceipt: string | null = null): Promise<ReconcileResponse> {
     let councilRebuilt = false;
     const response = await this.locked(async () => {
+      await this.tmux.reconcilePresentation();
       councilRebuilt = await this.recoverScopedResets();
       const events = await this.store.readAll();
       const t0 = performance.now();
@@ -2738,7 +2741,7 @@ export class Daemon {
         }
       }
       // Phantom seat: the ledger still projects a pane tmux does not report at
-      // all. `paneBySeat` is only ever removed from by reg.seat_decommissioned —
+      // all. `paneBySeat` is only ever removed from by reg.seat_abandoned —
       // reg.seat_cleared clears the binding and leaves the pane axis untouched
       // by design, and reg.process_reaped has no pane effect — so a seat that
       // was reaped and cleared, or quietly dropped from the estate declaration,
@@ -2755,7 +2758,7 @@ export class Daemon {
         await flag(
           row.seat_id,
           'pane_absent',
-          'seat_decommissioned',
+          'seat_abandoned',
           `seat is projected (pane=${row.pane}, unbound) but tmux reports no pane for it — every estate read counts a seat that does not exist`,
         );
       }
@@ -2814,7 +2817,7 @@ export class Daemon {
         const contradiction = proj.openContradictions.find((candidate) =>
           candidate.entity_id === seat
           && candidate.kind === 'pane_absent'
-          && candidate.missing_attestation === 'seat_decommissioned');
+          && candidate.missing_attestation === 'seat_abandoned');
         if (!contradiction) return refused(`seat_not_flagged_absent: ${seat}`);
       }
       const occurred_at = this.now();
@@ -2822,7 +2825,7 @@ export class Daemon {
       await this.store.appendAll(req.seats.map((seat) => ({
         entity_type: 'seat' as const,
         entity_id: seat,
-        event_type: 'reg.seat_decommissioned',
+        event_type: 'reg.seat_abandoned',
         payload: { contradiction: 'pane_absent' },
         provenance,
         occurred_at,
@@ -3057,6 +3060,12 @@ export class Daemon {
       let reconstructed = false;
       let reason: string | null = null;
       let faultedPages = 0;
+      const retiredStackSeats = await this.reconcileDeadStackSeatsUnlocked(transportReceipt, new Set(pages));
+      if (retiredStackSeats.length > 0) {
+        reset_seats.push(...retiredStackSeats);
+        reconstructed = true;
+        faultedPages += new Set(retiredStackSeats.map((seat) => seat.split(':', 1)[0])).size;
+      }
       for (const target of pages) {
         const expected = [...TXD_WINDOWS[target]];
         const pageObserved = observed.filter((seat) => seat.seat_id.startsWith(`${target}:`));
@@ -3132,6 +3141,43 @@ export class Daemon {
     return inputs;
   }
 
+  private async reconcileDeadStackSeatsUnlocked(
+    transportReceipt: string | null,
+    pages: ReadonlySet<TxdPage> | null = null,
+  ): Promise<string[]> {
+    const observed = await this.tmux.listSeats();
+    const paneBySeat = new Map(observed.map((seat) => [seat.seat_id, seat.pane]));
+    const proj = await this.projections();
+    const candidates = new Set<string>();
+    for (const seat of observed) {
+      const page = seat.seat_id.split(':', 1)[0] as TxdPage;
+      if (seat.pane === 'dead' && isStackSeat(seat.seat_id) && !TXD_ESTATE.includes(seat.seat_id)
+        && (pages === null || pages.has(page))) candidates.add(seat.seat_id);
+    }
+    for (const binding of proj.currentBindings) {
+      const page = binding.seat_id.split(':', 1)[0] as TxdPage;
+      if (isStackSeat(binding.seat_id) && !TXD_ESTATE.includes(binding.seat_id)
+        && paneBySeat.get(binding.seat_id) !== 'live' && (pages === null || pages.has(page))) {
+        candidates.add(binding.seat_id);
+      }
+    }
+    const retired: string[] = [];
+    for (const seat of candidates) {
+      const binding = proj.currentBindings.find((candidate) => candidate.seat_id === seat);
+      if (binding) {
+        if (!(await this.executeClose(binding, transportReceipt))) continue;
+      } else {
+        await this.tmux.killSeat(seat);
+        await this.store.append({
+          entity_type: 'seat', entity_id: seat, event_type: 'reg.seat_abandoned', payload: {},
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+        });
+      }
+      retired.push(seat);
+    }
+    return retired;
+  }
+
   async executeEstateRotation(): Promise<void> {
     // The whole server dies: every staged pane run's completion signal with it.
     for (const seatId of this.paneRuns.keys()) this.abortPaneRuns(seatId);
@@ -3170,7 +3216,8 @@ export class Daemon {
     return {
       ok: open === 0
         && tmux_reachable
-        && (activation_pending || tints.every((tint) => tint.state === 'ready')),
+        && (activation_pending || estate_generation === 'canonical')
+        && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,

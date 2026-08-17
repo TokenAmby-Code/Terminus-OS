@@ -128,7 +128,7 @@ test('boot defers a foreign pre-rotation shape without mutating or resolving it'
 
   const health = await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version });
   expect(health).toMatchObject({
-    ok: true,
+    ok: false,
     estate_generation: 'foreign',
     activation_pending: true,
     tmux_reachable: true,

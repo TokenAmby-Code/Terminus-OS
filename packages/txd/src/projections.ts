@@ -40,7 +40,7 @@ export type Projections = {
   everBoundAgents: Set<string>;
   physicalDeclarations: Map<string, PhysicalDeclaration>;
   placementAttestedAgents: Set<string>;
-  decommissionedSeats: Set<string>;
+  abandonedSeats: Set<string>;
   // Latest launch composition per seat: the identity, nonce, and target txd
   // set on the pane environment at dispatch. The nonce is the cross-kernel
   // correlation an ssh wrapper must echo before its placement is believed.
@@ -96,7 +96,7 @@ export function buildProjections(events: EventRecord[]): Projections {
   const lastSeqByEntity = new Map<string, number>();
   const entityKey = (type: string, id: string): string => `${type}\x00${id}`;
   const contradictions: OpenContradiction[] = [];
-  const decommissionedSeats = new Set<string>();
+  const abandonedSeats = new Set<string>();
   const launchCompositions = new Map<string, LaunchComposition>();
   const transportClaims = new Map<string, TransportClaim>();
 
@@ -207,8 +207,8 @@ export function buildProjections(events: EventRecord[]): Projections {
         launchCompositions.clear();
         transportClaims.clear();
         break;
-      case 'reg.seat_decommissioned':
-        decommissionedSeats.add(e.entity_id);
+      case 'reg.seat_abandoned':
+        abandonedSeats.add(e.entity_id);
         paneBySeat.delete(e.entity_id);
         bindingBySeat.delete(e.entity_id);
         break;
@@ -280,7 +280,7 @@ export function buildProjections(events: EventRecord[]): Projections {
     everBoundAgents,
     physicalDeclarations,
     placementAttestedAgents,
-    decommissionedSeats,
+    abandonedSeats,
     launchCompositions,
     transportClaims,
   };

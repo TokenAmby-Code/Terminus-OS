@@ -143,6 +143,8 @@ export interface TmuxControlPlane {
   ensureEstate(): Promise<EstateEnsureResult>;
   /** Classify the observed estate; an unrecognized topology is foreign, never repaired blind. */
   estateGeneration(): Promise<EstateGeneration>;
+  /** Correct display-only drift without replacing a pane process. */
+  reconcilePresentation(): Promise<void>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
   /** Split one dynamic pane into a mitosis page and tile the page once. */
@@ -428,6 +430,7 @@ function spawnTmuxProcess(
   // respawn-pane -e below.
   const environment = { ...process.env };
   delete environment[AGENT_ID_ENV];
+  delete environment.TMUX;
   return Bun.spawn(['tmux', '-L', socket, ...args], { ...options, env: environment });
 }
 
@@ -1121,6 +1124,27 @@ export class RealTmux implements TmuxControlPlane {
     return recoverable ? 'recoverable' : 'foreign';
   }
 
+  async reconcilePresentation(): Promise<void> {
+    for (const page of Object.keys(TXD_WINDOWS)) {
+      if (isStackPage(page)) continue;
+      await this.clearPageZoom(page, `${TXD_SESSION}:=${page}`);
+    }
+  }
+
+  async ensureLifecycleHooks(): Promise<void> {
+    const commands = {
+      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page \\"#{window_name}\\""',
+      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page \\"#{window_name}\\""',
+    } as const;
+    for (const [hook, command] of Object.entries(commands)) {
+      await this.checked(['set-hook', '-g', hook, command], `install ${hook} lifecycle witness`);
+      const observed = await this.checked(['show-hooks', '-g', hook], `attest ${hook} lifecycle witness`);
+      if (!observed.includes(`tx estate event ${hook}`)) {
+        throw new Error(`txd could not attest ${hook} lifecycle witness`);
+      }
+    }
+  }
+
   private async tag(paneId: string, seatId: string): Promise<void> {
     await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`, seatId);
     await this.checked(['set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID()], `tag ${seatId} generation`, seatId);
@@ -1325,6 +1349,7 @@ export class RealTmux implements TmuxControlPlane {
     if (!(await this.clearDefaultAgentEnvironment())) {
       throw new Error('txd could not clear the tmux server agent environment');
     }
+    await this.ensureLifecycleHooks();
     const rows = await this.estateRows();
     if (rows.length > 0) {
       const recoverable = rows.every((row) => {
@@ -1976,13 +2001,13 @@ export class RealTmux implements TmuxControlPlane {
         const tab = await this.command('commit_surface_name', seatId, ['send-keys', '-t', paneId, 'Tab']);
         if (tab.code !== 0) {
           await restoreComposer([...prefix].length);
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return { bytes: 0, verdict: 'seat_unresolved' as const };
         }
         if (suffix.length > 0) {
           const argsLiteral = await this.pasteLiteral(seatId, paneId, suffix, 'paste_literal_args');
           if (!argsLiteral) {
             await restoreComposer([...prefix].length);
-            return { bytes, verdict: 'seat_unresolved' as const };
+            return { bytes: 0, verdict: 'seat_unresolved' as const };
           }
         }
       }
@@ -2000,20 +2025,20 @@ export class RealTmux implements TmuxControlPlane {
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
           await restoreComposer([...text].length);
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return { bytes: 0, verdict: 'seat_unresolved' as const };
         }
         lastVerdict = RealTmux.composerVerdict(captured.stdout, correlationId, text);
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
         await restoreComposer([...text].length);
-        return { bytes, verdict: 'seat_unresolved' as const };
+        return { bytes: 0, verdict: 'seat_unresolved' as const };
       }
       const restored = await restoreComposer([...text].length);
-      if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
+      if (!restored) return { bytes: 0, verdict: 'seat_unresolved' as const };
       return lastVerdict === 'absent'
-        ? { bytes, verdict: 'frame_absent' as const }
-        : { bytes, verdict: 'composer_corrupted' as const };
+        ? { bytes: 0, verdict: 'frame_absent' as const }
+        : { bytes: 0, verdict: 'composer_corrupted' as const };
     } finally {
       output.close();
     }
@@ -2118,20 +2143,20 @@ export class RealTmux implements TmuxControlPlane {
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
           await restoreComposer();
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return { bytes: 0, verdict: 'seat_unresolved' as const };
         }
         lastVerdict = RealTmux.shellComposerVerdict(captured.stdout, command);
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
         await restoreComposer();
-        return { bytes, verdict: 'seat_unresolved' as const };
+        return { bytes: 0, verdict: 'seat_unresolved' as const };
       }
       const restored = await restoreComposer();
-      if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
+      if (!restored) return { bytes: 0, verdict: 'seat_unresolved' as const };
       return lastVerdict === 'absent'
-        ? { bytes, verdict: 'frame_absent' as const }
-        : { bytes, verdict: 'composer_corrupted' as const };
+        ? { bytes: 0, verdict: 'frame_absent' as const }
+        : { bytes: 0, verdict: 'composer_corrupted' as const };
     } finally {
       output.close();
     }
@@ -2490,6 +2515,7 @@ export class FakeTmux implements TmuxControlPlane {
     });
     return recoverable ? 'recoverable' : 'foreign';
   }
+  async reconcilePresentation(): Promise<void> {}
   estateShape(): { sessions: string[]; windows: Record<string, string[]> } {
     return structuredClone(this.shape);
   }

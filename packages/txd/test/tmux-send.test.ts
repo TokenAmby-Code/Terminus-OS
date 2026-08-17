@@ -566,6 +566,45 @@ test('behavioral pin: a failed bulk paste submits no prefix and fails loudly', a
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
 
+test('a pane lost after staging reports zero bytes and cannot claim a partial transport effect', async () => {
+  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nall or nothing';
+  let composer = '';
+  let loaded = '';
+  let capture = 0;
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'load-buffer') {
+      loaded = new TextDecoder().decode(stdin);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'paste-buffer') {
+      composer += loaded;
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'capture-pane') {
+      capture += 1;
+      if (capture === 1) return { code: 0, stdout: '> \n', stderr: '' };
+      if (capture === 2) return { code: 0, stdout: `> ${composer}\n`, stderr: '' };
+      return { code: 1, stdout: '', stderr: 'target pane vanished' };
+    }
+    if (args[0] === 'send-keys' && args.at(-1) === 'Enter') {
+      return { code: 1, stdout: '', stderr: 'target pane vanished' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
+  });
+
+  expect(await tmux.sendVerifiedToSeat(
+    'palace:S',
+    '11111111-1111-4111-8111-111111111111',
+    frame,
+  )).toEqual({ bytes: 0, verdict: 'seat_unresolved' });
+});
+
 test('behavioral pin: a failed verified send attests byte-identical restoration to its empty baseline', async () => {
   const baseline = 'transcript keeps $ and unicode Ω\n\n> \n\nfooter';
   const injected = '[lcd event lane2.transport_proof seq=227817]\n{"nonce":"one-event"}';

@@ -76,7 +76,7 @@ each route is the ruled daemon behavior, unchanged.
 - `tx estate abandon <seat>...` is the repair leg for a reconcile-proven
   phantom. The batch is atomic and overseer-gated; every target must be
   noncanonical, projected unbound, absent from tmux, and carry an open
-  `pane_absent` contradiction naming `seat_decommissioned`. Canonical seats
+  `pane_absent` contradiction naming `seat_abandoned`. Canonical seats
   remain reconstruction work and a live or merely unobserved target refuses.
 - After `/agents/comm` stages the bytes, `tx comm` waits on
   `act.comm_delivery_asserted` for at most 30 seconds. An on-time receiving
@@ -110,7 +110,7 @@ each route is the ruled daemon behavior, unchanged.
   truncation reported). Refusals are loud and typed: `identity_absent`,
   `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
   `seat_binding_pending`, `scoped_reset_pending`, `pane_dead`,
-  `seat_decommissioned`, `engine_unattested`, `stage_failed`,
+  `seat_abandoned`, `engine_unattested`, `stage_failed`,
   `run_not_staged`, and a mid-run pane replacement fails the run with
   `pane_lost_mid_run` instead of hanging on a dead signal.
 - Ordinary comm payloads are opaque and have no caller-visible length mode or

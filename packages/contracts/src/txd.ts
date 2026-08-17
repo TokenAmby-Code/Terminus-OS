@@ -23,14 +23,15 @@ import { z } from 'zod';
 // replay under the vocabulary that wrote them via `provenance.emitter_version`.
 //
 // v6: additive — explicit estate rotation request/refusal/completion lifecycle.
-// v7: additive — Council topology migration and canonical seat decommissioning.
+// v7: additive — Council topology migration and canonical seat retirement.
 // v8: physical persona-tint apply/read-back, fail-dark reset, and readiness.
 // v9: typed, engine-aware plan-mode transition request/attestation lifecycle.
 // v10: registrationd-owned identity and generation-bound physical facts.
 // v11: breaking — lifecycle correlation moves to lifecycled; the txd-internal
 //      close-on-stop subscription vocabulary is gone, and plan approval gains
 //      its mechanical intent (approve_plan, dialog_accept).
-export const SCHEMA_VERSION = 11;
+// v12: breaking — absent dynamic seats use the estate's abandon vocabulary.
+export const SCHEMA_VERSION = 12;
 
 // A caller-supplied identifier: a canonical seat name (`somnium:NE`), an agent
 // id, or a page. Raw tmux ids — pane `%N`, window `@N`, session `$N` — live
@@ -200,7 +201,7 @@ export const REG_EVENT_NAMES = [
   'process_reaped',
   'retired',
   'seat_cleared',
-  'seat_decommissioned',
+  'seat_abandoned',
 ] as const;
 
 // act.* — agent behavior (feeds the `activity` axis) + comm activity.
@@ -253,7 +254,7 @@ export const EVENT_TYPES = [
   'reg.process_reaped',
   'reg.retired',
   'reg.seat_cleared',
-  'reg.seat_decommissioned',
+  'reg.seat_abandoned',
   'act.prompt_submitted',
   'act.stop_reported',
   'act.receipt_deduped',
@@ -612,7 +613,7 @@ export type EstateRotateResponse = z.infer<typeof EstateRotateResponseSchema>;
 // Operator attestation for phantoms already proven by reconcile. This is not
 // a delete-by-name surface: txd admits only noncanonical seats which its fold
 // projects unbound, tmux proves absent, and an open pane_absent contradiction
-// names seat_decommissioned as the missing fact. The exact list is atomic.
+// names seat_abandoned as the missing fact. The exact list is atomic.
 export const EstateAbandonRequestSchema = z.object({
   schema_version: z.number().int(),
   source_agent_id: CanonicalIdSchema,
