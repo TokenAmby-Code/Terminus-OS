@@ -609,6 +609,28 @@ export const EstateRotateResponseSchema = z.object({
 });
 export type EstateRotateResponse = z.infer<typeof EstateRotateResponseSchema>;
 
+// Operator attestation for phantoms already proven by reconcile. This is not
+// a delete-by-name surface: txd admits only noncanonical seats which its fold
+// projects unbound, tmux proves absent, and an open pane_absent contradiction
+// names seat_decommissioned as the missing fact. The exact list is atomic.
+export const EstateDecommissionRequestSchema = z.object({
+  schema_version: z.number().int(),
+  source_agent_id: CanonicalIdSchema,
+  seats: z.array(CanonicalIdSchema).min(1).max(256),
+}).superRefine((value, ctx) => {
+  if (new Set(value.seats).size !== value.seats.length) {
+    ctx.addIssue({ code: 'custom', path: ['seats'], message: 'seats must be unique' });
+  }
+});
+export type EstateDecommissionRequest = z.infer<typeof EstateDecommissionRequestSchema>;
+
+export const EstateDecommissionResponseSchema = z.object({
+  ok: z.boolean(),
+  decommissioned: z.array(CanonicalIdSchema),
+  reason: z.string().nullable(),
+});
+export type EstateDecommissionResponse = z.infer<typeof EstateDecommissionResponseSchema>;
+
 // `pane-died`/`pane-exited` fire in the dying pane's own hook context, so
 // their page claim is trustworthy and required. A kill command fires only
 // `after-kill-*`, whose format context is the ACTIVE window — any page named

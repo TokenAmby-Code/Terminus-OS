@@ -53,6 +53,7 @@ each route is the ruled daemon behavior, unchanged.
 |--------|-------------------------|--------------------------------------------------|
 | GET    | `/ctl/health`           | Honest liveness + build + tmux/tint attestation  |
 | POST   | `/ctl/reconcile`        | Replay-driven reconcile; p0 on contradiction     |
+| POST   | `/ctl/estate/decommission` | Overseer attestation for exact noncanonical seats already proven unbound and physically absent |
 | POST   | `/ctl/estate/rotate`    | Explicit estate, border-total page, or pane reset |
 | POST   | `/ctl/clipboard/push`   | Read the transient `tx-clipboard` buffer for an explicit client-side push |
 | POST   | `/ctl/clipboard/pull`   | Load UTF-8 into the transient, non-executing `tx-clipboard` buffer |
@@ -72,6 +73,11 @@ each route is the ruled daemon behavior, unchanged.
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
+- `tx estate decommission <seat>...` is the repair leg for a reconcile-proven
+  phantom. The batch is atomic and overseer-gated; every target must be
+  noncanonical, projected unbound, absent from tmux, and carry an open
+  `pane_absent` contradiction naming `seat_decommissioned`. Canonical seats
+  remain reconstruction work and a live or merely unobserved target refuses.
 - After `/agents/comm` stages the bytes, `tx comm` waits on
   `act.comm_delivery_asserted` for at most 30 seconds. An on-time receiving
   engine hook returns the delivery-confirmed receipt directly. At the bound,

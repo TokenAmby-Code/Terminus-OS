@@ -331,6 +331,38 @@ test('POST /ctl/estate/rotate resets a page in-process instead of killing the es
   } finally { srv.stop(true); }
 });
 
+test('POST /ctl/estate/decommission routes the exact overseer attestation request', async () => {
+  const d = daemon();
+  let received: unknown;
+  d.decommissionSeats = async (request) => {
+    received = request;
+    return { ok: true, decommissioned: request.seats, reason: null };
+  };
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/decommission`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'council-custodes-agent',
+        seats: ['palace_fleet:dead-seat'],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(received).toEqual({
+      schema_version: SCHEMA_VERSION,
+      source_agent_id: 'council-custodes-agent',
+      seats: ['palace_fleet:dead-seat'],
+    });
+    expect(await response.json()).toEqual({
+      ok: true, decommissioned: ['palace_fleet:dead-seat'], reason: null,
+    });
+  } finally {
+    srv.stop(true);
+  }
+});
+
 test('POST /ingress/tmux repairs the lost canonical seat after a pane exits', async () => {
   const tmux = new FakeTmux();
   const d = new Daemon(new MemoryEventStore(), tmux);

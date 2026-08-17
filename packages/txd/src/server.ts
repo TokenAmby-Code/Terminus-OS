@@ -37,6 +37,7 @@ import {
   CommRedriveRequestSchema,
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
+  EstateDecommissionRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
   RunRequestSchema,
@@ -469,6 +470,17 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         } catch (error) {
           return clipboardFailure(error, 'selection');
         }
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ctl/estate/decommission'),
+      label: 'POST /ctl/estate/decommission',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, EstateDecommissionRequestSchema, 'invalid_estate_decommission_request');
+        if (parsed instanceof Response) return parsed;
+        const result = await daemon.decommissionSeats(parsed, receipt(req));
+        return json(result, result.ok ? 200 : 409);
       },
     },
     {

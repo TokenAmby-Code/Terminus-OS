@@ -47,6 +47,8 @@ import {
   type Health,
   type EstateRotateRequest,
   type EstateRotateResponse,
+  type EstateDecommissionRequest,
+  type EstateDecommissionResponse,
   type LaunchRequest,
   type LaunchResponse,
   type ModeTransitionRequest,
@@ -2784,6 +2786,49 @@ export class Daemon {
     });
     if (councilRebuilt) await this.announceVacantPerpetualSeats();
     return response;
+  }
+
+  decommissionSeats(
+    req: EstateDecommissionRequest,
+    transportReceipt: string | null = null,
+  ): Promise<EstateDecommissionResponse> {
+    return this.locked(async () => {
+      const refused = (reason: string): EstateDecommissionResponse => ({
+        ok: false, decommissioned: [], reason,
+      });
+      if (req.schema_version !== SCHEMA_VERSION) {
+        return refused(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`);
+      }
+      const proj = await this.projections();
+      const source = proj.currentBindings.find((binding) =>
+        binding.registered && binding.agent_id === req.source_agent_id);
+      if (!source || source.rank !== CLOSE_REQUIRED_RANK) {
+        return refused(`not_authorized: estate decommission requires rank ${CLOSE_REQUIRED_RANK}`);
+      }
+      const observedSeats = new Set((await this.tmux.listSeats()).map((seat) => seat.seat_id));
+      for (const seat of req.seats) {
+        if (TXD_ESTATE.includes(seat)) return refused(`canonical_seat_requires_reconstruction: ${seat}`);
+        const row = proj.seatBoard.find((candidate) => candidate.seat_id === seat);
+        if (!row || row.binding !== 'unbound') return refused(`seat_not_projected_unbound: ${seat}`);
+        if (observedSeats.has(seat)) return refused(`seat_still_observed: ${seat}`);
+        const contradiction = proj.openContradictions.find((candidate) =>
+          candidate.entity_id === seat
+          && candidate.kind === 'pane_absent'
+          && candidate.missing_attestation === 'seat_decommissioned');
+        if (!contradiction) return refused(`seat_not_flagged_absent: ${seat}`);
+      }
+      const occurred_at = this.now();
+      const provenance = this.prov('wrapper', transportReceipt);
+      await this.store.appendAll(req.seats.map((seat) => ({
+        entity_type: 'seat' as const,
+        entity_id: seat,
+        event_type: 'reg.seat_decommissioned',
+        payload: { contradiction: 'pane_absent' },
+        provenance,
+        occurred_at,
+      })));
+      return { ok: true, decommissioned: [...req.seats], reason: null };
+    });
   }
 
   // ── Read model (spec §7 rung 6, reshaped [[txd-extraction-spec]] §6) ────────

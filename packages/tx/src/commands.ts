@@ -290,6 +290,22 @@ export const COMMANDS: readonly Command[] = [
     },
   },
   {
+    path: ['estate', 'decommission'],
+    summary: 'Attest already-flagged absent, unbound noncanonical seats decommissioned',
+    run: async ({ args, request, write }) => {
+      if (args.length === 0 || args.some((arg) => arg.startsWith('-'))) {
+        throw new Error('usage: tx estate decommission <seat> [<seat> ...]');
+      }
+      const response = await request('POST', '/ctl/estate/decommission', {
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: agentSource('estate decommission'),
+        seats: args,
+      }) as { ok: boolean };
+      write(response);
+      return response.ok ? 0 : 1;
+    },
+  },
+  {
     path: ['estate', 'event'],
     summary: 'Forward a tmux pane lifecycle event to txd',
     run: async ({ args, request, write }) => {
