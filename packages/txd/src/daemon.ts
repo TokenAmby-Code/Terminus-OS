@@ -22,9 +22,9 @@ const build: BuildInfo = {
 };
 
 const cfg = await loadConfig();
-// The server owns a five-minute composer wait. One second is the health
-// contract for a local unix-socket round trip, so the client remains strictly
-// outside the server ceiling without an unlabelled multiplier.
+// The lifecycle gate owns its five-minute contract. Composer repaint has its
+// own short event-driven verifier inside RealTmux; conflating these two waits
+// let one pane monopolize txd long enough for hook delivery to time out.
 const LIFECYCLED_LOCAL_RESPONSE_MARGIN_MS = 1_000;
 const lifecycledFetchCeilingMs = cfg.commWatchTimeoutMs + LIFECYCLED_LOCAL_RESPONSE_MARGIN_MS;
 
@@ -55,10 +55,7 @@ async function postLifecycledGate(
 }
 // Connect + migrate (forward-only, shared migrations home) — fail loud at boot.
 const store = await PostgresEventStore.connect(cfg.db);
-const tmux = new RealTmux(cfg.tmuxSocket, {
-  machine: cfg.machine,
-  composerObserveTimeoutMs: cfg.commWatchTimeoutMs,
-});
+const tmux = new RealTmux(cfg.tmuxSocket, { machine: cfg.machine });
 const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
 // The pre-send comm watch, armed against lifecycled's local ingress socket.
 // The await is bounded by the same transport contract as lifecycled's delivery

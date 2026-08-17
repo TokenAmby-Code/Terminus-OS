@@ -47,6 +47,8 @@ import {
   type Health,
   type EstateRotateRequest,
   type EstateRotateResponse,
+  type EstateAbandonRequest,
+  type EstateAbandonResponse,
   type LaunchRequest,
   type LaunchResponse,
   type ModeTransitionRequest,
@@ -1377,7 +1379,7 @@ export class Daemon {
       return this.armCommWatch(prepared.messageId, req.source_agent_id, target.agent_id, transportReceipt);
     }));
 
-    return this.locked(async () => {
+    const plans = await this.locked(async () => {
       const proj = await this.projections();
       const events = await this.store.readAll();
       const pendingResetSeats = this.pendingScopedResetSeats(events);
@@ -1387,20 +1389,41 @@ export class Daemon {
         if (!binding) throw new Error(`target_binding_changed: ${target.agent_id}`);
         if (pendingResetSeats.has(target.seat_id)) throw new Error(`scoped_reset_pending: ${target.seat_id}`);
       }
-
-      const event_ids = [...prepared.eventIds];
-      let allStaged = true;
-      for (const target of prepared.targets) {
+      return prepared.targets.map((target) => {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
         const frame = prepared.renderedIntent?.frame
           ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
-        const sent = await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame, prepared.renderedIntent?.tabAfter, binding.engine ?? undefined);
+        return { target, binding, frame };
+      });
+    });
+
+    // Tmux repaint is an external wait. It must never hold the journal mutex:
+    // UserPromptSubmit can arrive as soon as Enter is driven, and that hook is
+    // the effect fact this transaction exists to record. Event 37076 proved
+    // the old inversion: staging held this.locked for five minutes, edge-proxy
+    // reached txd with the hook, and timed out before txd could admit it.
+    const outcomes: Array<{ plan: typeof plans[number]; sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>> }> = [];
+    for (const plan of plans) {
+      const sent = await this.tmux.sendVerifiedToSeat(
+        plan.target.seat_id,
+        prepared.messageId,
+        plan.frame,
+        prepared.renderedIntent?.tabAfter,
+        plan.binding.engine ?? undefined,
+      );
+      outcomes.push({ plan, sent });
+    }
+
+    return this.locked(async () => {
+      const event_ids = [...prepared.eventIds];
+      let allStaged = true;
+      for (const { plan, sent } of outcomes) {
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
-            target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes,
+            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: sent.bytes,
             submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
-            name: req.intent?.name ?? null, rendered_frame: frame,
+            name: req.intent?.name ?? null, rendered_frame: plan.frame,
             receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
@@ -1688,7 +1711,12 @@ export class Daemon {
           && event.entity_id === messageId
           && event.payload.target_agent_id === hook.agent_id);
         const deadline = Date.parse(String(bytesSent?.payload.receipt_deadline_at ?? ''));
-        const asynchronous = !Number.isFinite(deadline) || this.commReceiptRuntime.now() >= deadline;
+        // A hook may win the race against the post-stage bytes receipt now
+        // that composer I/O no longer owns the journal mutex. That is the
+        // fastest tier-1 success, not evidence that the 30-second bound passed.
+        const asynchronous = bytesSent !== undefined
+          && Number.isFinite(deadline)
+          && this.commReceiptRuntime.now() >= deadline;
         if (!confirmationStaged && asynchronous) {
           confirmations.set(sourceAgentId, [...(confirmations.get(sourceAgentId) ?? []), messageId]);
         }
@@ -2758,6 +2786,49 @@ export class Daemon {
     });
     if (councilRebuilt) await this.announceVacantPerpetualSeats();
     return response;
+  }
+
+  abandonSeats(
+    req: EstateAbandonRequest,
+    transportReceipt: string | null = null,
+  ): Promise<EstateAbandonResponse> {
+    return this.locked(async () => {
+      const refused = (reason: string): EstateAbandonResponse => ({
+        ok: false, abandoned: [], reason,
+      });
+      if (req.schema_version !== SCHEMA_VERSION) {
+        return refused(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`);
+      }
+      const proj = await this.projections();
+      const source = proj.currentBindings.find((binding) =>
+        binding.registered && binding.agent_id === req.source_agent_id);
+      if (!source || source.rank !== CLOSE_REQUIRED_RANK) {
+        return refused(`not_authorized: estate abandon requires rank ${CLOSE_REQUIRED_RANK}`);
+      }
+      const observedSeats = new Set((await this.tmux.listSeats()).map((seat) => seat.seat_id));
+      for (const seat of req.seats) {
+        if (TXD_ESTATE.includes(seat)) return refused(`canonical_seat_requires_reconstruction: ${seat}`);
+        const row = proj.seatBoard.find((candidate) => candidate.seat_id === seat);
+        if (!row || row.binding !== 'unbound') return refused(`seat_not_projected_unbound: ${seat}`);
+        if (observedSeats.has(seat)) return refused(`seat_still_observed: ${seat}`);
+        const contradiction = proj.openContradictions.find((candidate) =>
+          candidate.entity_id === seat
+          && candidate.kind === 'pane_absent'
+          && candidate.missing_attestation === 'seat_decommissioned');
+        if (!contradiction) return refused(`seat_not_flagged_absent: ${seat}`);
+      }
+      const occurred_at = this.now();
+      const provenance = this.prov('wrapper', transportReceipt);
+      await this.store.appendAll(req.seats.map((seat) => ({
+        entity_type: 'seat' as const,
+        entity_id: seat,
+        event_type: 'reg.seat_decommissioned',
+        payload: { contradiction: 'pane_absent' },
+        provenance,
+        occurred_at,
+      })));
+      return { ok: true, abandoned: [...req.seats], reason: null };
+    });
   }
 
   // ── Read model (spec §7 rung 6, reshaped [[txd-extraction-spec]] §6) ────────

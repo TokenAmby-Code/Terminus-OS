@@ -37,6 +37,7 @@ import {
   CommRedriveRequestSchema,
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
+  EstateAbandonRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
   RunRequestSchema,
@@ -469,6 +470,17 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         } catch (error) {
           return clipboardFailure(error, 'selection');
         }
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/ctl/estate/abandon'),
+      label: 'POST /ctl/estate/abandon',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, EstateAbandonRequestSchema, 'invalid_estate_abandon_request');
+        if (parsed instanceof Response) return parsed;
+        const result = await daemon.abandonSeats(parsed, receipt(req));
+        return json(result, result.ok ? 200 : 409);
       },
     },
     {
