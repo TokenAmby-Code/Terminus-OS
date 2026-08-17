@@ -87,6 +87,24 @@ test('behavioral pin: a wide Claude labeled boundary leaves the visible-empty co
   expect(RealTmux.composerEmpty(pane, 'claude')).toBe(true);
 });
 
+test('behavioral pin: Claude dim prompt-suggestion chrome is empty-ready', () => {
+  // Exact active-composer paint captured with `tmux capture-pane -e` from
+  // council:pax after event 34984. SGR 2 is Claude's tab-to-accept ghost
+  // suggestion; these are presentation glyphs, not operator-committed bytes.
+  const pane = [
+    '\x1b[38;5;246m✻ Brewed for 4m 47s',
+    '',
+    `\x1b[38;5;244m${'─'.repeat(53)}`,
+    '\x1b[39m❯ \x1b[2mok logged in, adc is live — run the askcivic grants',
+    `\x1b[0m\x1b[38;5;244m${'─'.repeat(53)}`,
+    '\x1b[39m  \x1b[92m/home/tokenamby/.local/share/obsidian-vaults/Pax-…',
+    '\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle) · ←…',
+  ].join('\n');
+
+  expect(RealTmux.composerReadiness(pane, 'claude')).toBe('empty_ready');
+  expect(RealTmux.composerEmpty(pane, 'claude')).toBe(true);
+});
+
 test('behavioral pin: opaque Claude payload may contain a horizontal-rule line', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
   const frame = `[tx comm ${messageId} from sender]\nfirst\n${'─'.repeat(80)}\nlast`;
@@ -102,6 +120,7 @@ test('behavioral pin: opaque Claude payload may contain a horizontal-rule line',
 
 test('verified send waits for a pane-output event before observing the composer', async () => {
   const calls: string[] = [];
+  const captures: string[][] = [];
   let releaseOutput!: () => void;
   let literalStarted!: () => void;
   let pasted = false;
@@ -115,7 +134,10 @@ test('verified send waits for a pane-output event before observing the composer'
       pasted = true;
       literalStarted();
     }
-    if (args[0] === 'capture-pane') return { code: 0, stdout: `> ${pasted ? frame : ''}\n`, stderr: '' };
+    if (args[0] === 'capture-pane') {
+      captures.push(args);
+      return { code: 0, stdout: `> ${pasted ? frame : ''}\n`, stderr: '' };
+    }
     return { code: 0, stdout: '', stderr: '' };
   };
   const tmux = new RealTmux('scratch', {
@@ -130,6 +152,7 @@ test('verified send waits for a pane-output event before observing the composer'
   const pending = tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', frame);
   await literal;
   expect(calls).toEqual(['list-panes', 'capture-pane', 'arm:%7', 'load-buffer', 'paste-buffer']);
+  expect(captures[0]).toContain('-e');
   expect(calls.filter((call) => call === 'capture-pane')).toHaveLength(1);
 
   releaseOutput();
