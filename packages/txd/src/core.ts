@@ -47,8 +47,8 @@ import {
   type Health,
   type EstateRotateRequest,
   type EstateRotateResponse,
-  type EstateDecommissionRequest,
-  type EstateDecommissionResponse,
+  type EstateAbandonRequest,
+  type EstateAbandonResponse,
   type LaunchRequest,
   type LaunchResponse,
   type ModeTransitionRequest,
@@ -2788,13 +2788,13 @@ export class Daemon {
     return response;
   }
 
-  decommissionSeats(
-    req: EstateDecommissionRequest,
+  abandonSeats(
+    req: EstateAbandonRequest,
     transportReceipt: string | null = null,
-  ): Promise<EstateDecommissionResponse> {
+  ): Promise<EstateAbandonResponse> {
     return this.locked(async () => {
-      const refused = (reason: string): EstateDecommissionResponse => ({
-        ok: false, decommissioned: [], reason,
+      const refused = (reason: string): EstateAbandonResponse => ({
+        ok: false, abandoned: [], reason,
       });
       if (req.schema_version !== SCHEMA_VERSION) {
         return refused(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`);
@@ -2803,7 +2803,7 @@ export class Daemon {
       const source = proj.currentBindings.find((binding) =>
         binding.registered && binding.agent_id === req.source_agent_id);
       if (!source || source.rank !== CLOSE_REQUIRED_RANK) {
-        return refused(`not_authorized: estate decommission requires rank ${CLOSE_REQUIRED_RANK}`);
+        return refused(`not_authorized: estate abandon requires rank ${CLOSE_REQUIRED_RANK}`);
       }
       const observedSeats = new Set((await this.tmux.listSeats()).map((seat) => seat.seat_id));
       for (const seat of req.seats) {
@@ -2827,7 +2827,7 @@ export class Daemon {
         provenance,
         occurred_at,
       })));
-      return { ok: true, decommissioned: [...req.seats], reason: null };
+      return { ok: true, abandoned: [...req.seats], reason: null };
     });
   }
 

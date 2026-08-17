@@ -37,7 +37,7 @@ import {
   CommRedriveRequestSchema,
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
-  EstateDecommissionRequestSchema,
+  EstateAbandonRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
   RunRequestSchema,
@@ -474,12 +474,12 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
     },
     {
       method: 'POST',
-      match: exact('/ctl/estate/decommission'),
-      label: 'POST /ctl/estate/decommission',
+      match: exact('/ctl/estate/abandon'),
+      label: 'POST /ctl/estate/abandon',
       handler: async (req) => {
-        const parsed = await parseMutation(req, EstateDecommissionRequestSchema, 'invalid_estate_decommission_request');
+        const parsed = await parseMutation(req, EstateAbandonRequestSchema, 'invalid_estate_abandon_request');
         if (parsed instanceof Response) return parsed;
-        const result = await daemon.decommissionSeats(parsed, receipt(req));
+        const result = await daemon.abandonSeats(parsed, receipt(req));
         return json(result, result.ok ? 200 : 409);
       },
     },

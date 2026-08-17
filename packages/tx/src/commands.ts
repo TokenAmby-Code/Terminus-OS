@@ -290,15 +290,15 @@ export const COMMANDS: readonly Command[] = [
     },
   },
   {
-    path: ['estate', 'decommission'],
+    path: ['estate', 'abandon'],
     summary: 'Attest already-flagged absent, unbound noncanonical seats decommissioned',
     run: async ({ args, request, write }) => {
       if (args.length === 0 || args.some((arg) => arg.startsWith('-'))) {
-        throw new Error('usage: tx estate decommission <seat> [<seat> ...]');
+        throw new Error('usage: tx estate abandon <seat> [<seat> ...]');
       }
-      const response = await request('POST', '/ctl/estate/decommission', {
+      const response = await request('POST', '/ctl/estate/abandon', {
         schema_version: SCHEMA_VERSION,
-        source_agent_id: agentSource('estate decommission'),
+        source_agent_id: agentSource('estate abandon'),
         seats: args,
       }) as { ok: boolean };
       write(response);

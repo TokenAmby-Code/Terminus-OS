@@ -171,20 +171,20 @@ test('an overseer can attest exact flagged phantoms decommissioned and restore h
   tmux.deleteOutOfBand('proof:bus');
   expect((await d.reconcile()).p0).toBe(true);
 
-  const result = await d.decommissionSeats({
+  const result = await d.abandonSeats({
     schema_version: 11,
     source_agent_id: OVERSEER_SOURCE,
     seats: ['proof:bus'],
   });
 
-  expect(result).toEqual({ ok: true, decommissioned: ['proof:bus'], reason: null });
+  expect(result).toEqual({ ok: true, abandoned: ['proof:bus'], reason: null });
   expect((await d.reconcile()).p0).toBe(false);
   expect((await d.estateRows()).some((row) => row.seat_id === 'proof:bus')).toBe(false);
   expect((await store.readByEntity('proof:bus')).filter((event) => event.event_type === 'reg.seat_decommissioned'))
     .toHaveLength(1);
 });
 
-test('phantom decommission is atomic and refuses a seat without exact absence evidence', async () => {
+test('phantom abandonment is atomic and refuses a seat without exact absence evidence', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
     seat_id: 'proof:gone', schema_version: 11, identity: 'gone', persona: 'astartes', tint: '#101010',
@@ -197,18 +197,18 @@ test('phantom decommission is atomic and refuses a seat without exact absence ev
   tmux.deleteOutOfBand('proof:gone');
   await d.reconcile();
 
-  const result = await d.decommissionSeats({
+  const result = await d.abandonSeats({
     schema_version: 11,
     source_agent_id: OVERSEER_SOURCE,
     seats: ['proof:gone', 'proof:present'],
   });
 
-  expect(result).toEqual({ ok: false, decommissioned: [], reason: 'seat_still_observed: proof:present' });
+  expect(result).toEqual({ ok: false, abandoned: [], reason: 'seat_still_observed: proof:present' });
   expect((await store.readByEntity('proof:gone')).some((event) => event.event_type === 'reg.seat_decommissioned'))
     .toBe(false);
 });
 
-test('phantom decommission refuses a registered non-overseer without changing the seat', async () => {
+test('phantom abandonment refuses a registered non-overseer without changing the seat', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
     seat_id: 'proof:gone', schema_version: 11, identity: 'gone', persona: 'astartes', tint: '#101010',
@@ -227,14 +227,14 @@ test('phantom decommission refuses a registered non-overseer without changing th
     occurred_at: '2026-08-01T00:00:00.000Z',
   });
 
-  const result = await d.decommissionSeats({
+  const result = await d.abandonSeats({
     schema_version: 11,
     source_agent_id: 'worker-source',
     seats: ['proof:gone'],
   });
 
   expect(result).toEqual({
-    ok: false, decommissioned: [], reason: 'not_authorized: estate decommission requires rank overseer',
+    ok: false, abandoned: [], reason: 'not_authorized: estate abandon requires rank overseer',
   });
   expect((await store.readByEntity('proof:gone')).some((event) => event.event_type === 'reg.seat_decommissioned'))
     .toBe(false);

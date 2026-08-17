@@ -331,16 +331,16 @@ test('POST /ctl/estate/rotate resets a page in-process instead of killing the es
   } finally { srv.stop(true); }
 });
 
-test('POST /ctl/estate/decommission routes the exact overseer attestation request', async () => {
+test('POST /ctl/estate/abandon routes the exact overseer abandonment request', async () => {
   const d = daemon();
   let received: unknown;
-  d.decommissionSeats = async (request) => {
+  d.abandonSeats = async (request) => {
     received = request;
-    return { ok: true, decommissioned: request.seats, reason: null };
+    return { ok: true, abandoned: request.seats, reason: null };
   };
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
-    const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/decommission`, {
+    const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/abandon`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -356,7 +356,7 @@ test('POST /ctl/estate/decommission routes the exact overseer attestation reques
       seats: ['palace_fleet:dead-seat'],
     });
     expect(await response.json()).toEqual({
-      ok: true, decommissioned: ['palace_fleet:dead-seat'], reason: null,
+      ok: true, abandoned: ['palace_fleet:dead-seat'], reason: null,
     });
   } finally {
     srv.stop(true);
