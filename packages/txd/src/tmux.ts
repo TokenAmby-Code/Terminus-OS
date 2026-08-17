@@ -104,6 +104,9 @@ export type ComposerRefusal =
   | 'seat_unresolved';
 export type CommRedriveDriveOutcome = 'enter_redriven' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved';
 
+const ANSI_CSI = /\x1b\[([0-?]*)([ -/]*)([@-~])/g;
+const stripAnsi = (text: string): string => text.replace(ANSI_CSI, '');
+
 export type AgentModeTransitionOutcome = {
   before: AgentModeState;
   after: AgentModeState;
@@ -1744,8 +1747,9 @@ export class RealTmux implements TmuxControlPlane {
     return inactive.code === 0 && active.code === 0 && await this.seatTint(seatId) === tint;
   }
 
-  private static activeComposer(pane: string): string | null {
-    const lines = pane.split('\n');
+  private static activeComposerPaint(pane: string): { text: string; dimOnly: boolean } | null {
+    const rawLines = pane.split('\n');
+    const lines = rawLines.map(stripAnsi);
     let promptLine = -1;
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       if (/^\s*[│┃]?\s*[›❯>]\s?/.test(lines[index]!)) {
@@ -1773,15 +1777,47 @@ export class RealTmux implements TmuxControlPlane {
       && !isClaudeComposerBoundary(promptBlockEnd)) promptBlockEnd += 1;
     const promptBlock = lines.slice(promptLine, promptBlockEnd);
     promptBlock[0] = promptBlock[0]!.replace(/^\s*[│┃]?\s*[›❯>]\s?/, '');
-    return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
+    const text = promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
+
+    // `capture-pane -e` preserves Claude's SGR 2 paint. Claude uses dim text
+    // after the active prompt exclusively for a tab-to-accept suggestion; it
+    // is editor chrome and no input byte has been committed. tmux's ordinary
+    // capture erases that distinction, which made suggestion paint look like
+    // an operator draft. Observe the style, but keep it out of frame matching.
+    const glyphs: Array<{ char: string; dim: boolean }> = [];
+    const rawPromptBlock = rawLines.slice(promptLine, promptBlockEnd).join('\n');
+    let dim = false;
+    let cursor = 0;
+    for (const match of rawPromptBlock.matchAll(ANSI_CSI)) {
+      for (const char of rawPromptBlock.slice(cursor, match.index)) glyphs.push({ char, dim });
+      if (match[3] === 'm') {
+        const params = match[1] === '' ? [0] : match[1]!.split(';').map((value) => Number.parseInt(value, 10));
+        for (const param of params) {
+          if (param === 0 || param === 22) dim = false;
+          if (param === 2) dim = true;
+        }
+      }
+      cursor = match.index + match[0].length;
+    }
+    for (const char of rawPromptBlock.slice(cursor)) glyphs.push({ char, dim });
+    const marker = glyphs.findIndex(({ char }) => /[›❯>]/u.test(char));
+    const payloadGlyphs = marker < 0 ? [] : glyphs.slice(marker + 1);
+    if (payloadGlyphs[0] && /\s/u.test(payloadGlyphs[0].char)) payloadGlyphs.shift();
+    const contentGlyphs = payloadGlyphs.filter(({ char }) => !/[\s│┃]/u.test(char));
+    return { text, dimOnly: contentGlyphs.length > 0 && contentGlyphs.every(({ dim: paintedDim }) => paintedDim) };
+  }
+
+  private static activeComposer(pane: string): string | null {
+    return RealTmux.activeComposerPaint(pane)?.text ?? null;
   }
 
   static composerReadiness(pane: string, engine?: 'claude' | 'codex'): ComposerReadiness {
     if (!RealTmux.composerInteractive(pane)) return 'unreadable';
-    const composer = RealTmux.activeComposer(pane);
+    const composer = RealTmux.activeComposerPaint(pane);
     if (composer === null) return 'unreadable';
-    const paint = composer.trim().replace(/\s+/g, ' ');
+    const paint = composer.text.trim().replace(/\s+/g, ' ');
     if (paint === '') return 'empty_ready';
+    if (engine === 'claude' && composer.dimOnly) return 'empty_ready';
     if (engine === undefined) return 'draft_present';
     const profile = ENGINE_IDLE_COMPOSER_PAINTS[engine];
     return profile.patterns.some((pattern) => pattern.test(paint))
@@ -1828,6 +1864,19 @@ export class RealTmux implements TmuxControlPlane {
       return Number(collapsedPaste[1]) === [...expectedFrame].length ? 'intact' : 'corrupted';
     }
 
+    // Claude collapses a bracketed multiline paste to a numbered native
+    // receipt. The ordinal identifies Claude's paste attachment, while the
+    // `+N lines` count is the exact number of newlines accepted from the
+    // already-attested tmux buffer. Accept only the whole, otherwise-empty
+    // composer receipt with the expected line shape. A receipt embedded in a
+    // draft, or one for a differently shaped paste, is corruption.
+    const claudeCollapsedPaste = visibleRegion
+      .match(/^\[Pastedtext#\d+\+(\d+)lines\]$/);
+    if (claudeCollapsedPaste) {
+      const expectedNewlines = expectedFrame.match(/\n/g)?.length ?? 0;
+      return Number(claudeCollapsedPaste[1]) === expectedNewlines ? 'intact' : 'corrupted';
+    }
+
     if (visibleRegion === expected) return 'intact';
     const minimumProofLength = 32;
     if (visibleRegion.length >= minimumProofLength && expected.endsWith(visibleRegion)) return 'intact';
@@ -1839,7 +1888,7 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   static composerInteractive(pane: string): boolean {
-    const lines = pane.split('\n');
+    const lines = pane.split('\n').map(stripAnsi);
     const lastContent = lines.reduce((last, line, index) => line.trim() ? index : last, -1);
     if (lastContent < 0) return false;
     const lastPrompt = lines.reduce(
@@ -1895,7 +1944,7 @@ export class RealTmux implements TmuxControlPlane {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const baseline = await this.command('observe_input_baseline', seatId, [
-      'capture-pane', '-p', '-J', '-t', paneId,
+      'capture-pane', '-p', '-e', '-J', '-t', paneId,
     ]);
     if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
@@ -1916,7 +1965,7 @@ export class RealTmux implements TmuxControlPlane {
     try {
       const attestBaseline = async () => {
         const restored = await this.command('attest_input_baseline', seatId, [
-          'capture-pane', '-p', '-J', '-t', paneId,
+          'capture-pane', '-p', '-e', '-J', '-t', paneId,
         ]);
         return restored.code === 0 && restored.stdout === baseline.stdout;
       };
@@ -1940,13 +1989,13 @@ export class RealTmux implements TmuxControlPlane {
         const tab = await this.command('commit_surface_name', seatId, ['send-keys', '-t', paneId, 'Tab']);
         if (tab.code !== 0) {
           await restoreComposer([...prefix].length);
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return { bytes, verdict: 'composer_corrupted' as const };
         }
         if (suffix.length > 0) {
           const argsLiteral = await this.pasteLiteral(seatId, paneId, suffix, 'paste_literal_args');
           if (!argsLiteral) {
             await restoreComposer([...prefix].length);
-            return { bytes, verdict: 'seat_unresolved' as const };
+            return { bytes, verdict: 'composer_corrupted' as const };
           }
         }
       }
@@ -1964,17 +2013,17 @@ export class RealTmux implements TmuxControlPlane {
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
           await restoreComposer([...text].length);
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return { bytes, verdict: 'composer_corrupted' as const };
         }
         lastVerdict = RealTmux.composerVerdict(captured.stdout, correlationId, text);
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
         await restoreComposer([...text].length);
-        return { bytes, verdict: 'seat_unresolved' as const };
+        return { bytes, verdict: 'composer_corrupted' as const };
       }
       const restored = await restoreComposer([...text].length);
-      if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
+      if (!restored) return { bytes, verdict: 'composer_corrupted' as const };
       return lastVerdict === 'absent'
         ? { bytes, verdict: 'frame_absent' as const }
         : { bytes, verdict: 'composer_corrupted' as const };
@@ -2038,7 +2087,7 @@ export class RealTmux implements TmuxControlPlane {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const baseline = await this.command('observe_input_baseline', seatId, [
-      'capture-pane', '-p', '-J', '-t', paneId,
+      'capture-pane', '-p', '-e', '-J', '-t', paneId,
     ]);
     if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
     const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
@@ -2062,7 +2111,7 @@ export class RealTmux implements TmuxControlPlane {
         ]);
         if (restored.code !== 0) return false;
         const attested = await this.command('attest_input_baseline', seatId, [
-          'capture-pane', '-p', '-J', '-t', paneId,
+          'capture-pane', '-p', '-e', '-J', '-t', paneId,
         ]);
         return attested.code === 0 && attested.stdout === baseline.stdout;
       };

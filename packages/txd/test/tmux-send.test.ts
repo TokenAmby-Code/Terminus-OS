@@ -87,6 +87,24 @@ test('behavioral pin: a wide Claude labeled boundary leaves the visible-empty co
   expect(RealTmux.composerEmpty(pane, 'claude')).toBe(true);
 });
 
+test('behavioral pin: Claude dim prompt-suggestion chrome is empty-ready', () => {
+  // Exact active-composer paint captured with `tmux capture-pane -e` from
+  // council:pax after event 34984. SGR 2 is Claude's tab-to-accept ghost
+  // suggestion; these are presentation glyphs, not operator-committed bytes.
+  const pane = [
+    '\x1b[38;5;246m✻ Brewed for 4m 47s',
+    '',
+    `\x1b[38;5;244m${'─'.repeat(53)}`,
+    '\x1b[39m❯ \x1b[2mok logged in, adc is live — run the askcivic grants',
+    `\x1b[0m\x1b[38;5;244m${'─'.repeat(53)}`,
+    '\x1b[39m  \x1b[92m/home/tokenamby/.local/share/obsidian-vaults/Pax-…',
+    '\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle) · ←…',
+  ].join('\n');
+
+  expect(RealTmux.composerReadiness(pane, 'claude')).toBe('empty_ready');
+  expect(RealTmux.composerEmpty(pane, 'claude')).toBe(true);
+});
+
 test('behavioral pin: opaque Claude payload may contain a horizontal-rule line', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
   const frame = `[tx comm ${messageId} from sender]\nfirst\n${'─'.repeat(80)}\nlast`;
@@ -102,6 +120,7 @@ test('behavioral pin: opaque Claude payload may contain a horizontal-rule line',
 
 test('verified send waits for a pane-output event before observing the composer', async () => {
   const calls: string[] = [];
+  const captures: string[][] = [];
   let releaseOutput!: () => void;
   let literalStarted!: () => void;
   let pasted = false;
@@ -115,7 +134,10 @@ test('verified send waits for a pane-output event before observing the composer'
       pasted = true;
       literalStarted();
     }
-    if (args[0] === 'capture-pane') return { code: 0, stdout: `> ${pasted ? frame : ''}\n`, stderr: '' };
+    if (args[0] === 'capture-pane') {
+      captures.push(args);
+      return { code: 0, stdout: `> ${pasted ? frame : ''}\n`, stderr: '' };
+    }
     return { code: 0, stdout: '', stderr: '' };
   };
   const tmux = new RealTmux('scratch', {
@@ -130,6 +152,7 @@ test('verified send waits for a pane-output event before observing the composer'
   const pending = tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', frame);
   await literal;
   expect(calls).toEqual(['list-panes', 'capture-pane', 'arm:%7', 'load-buffer', 'paste-buffer']);
+  expect(captures[0]).toContain('-e');
   expect(calls.filter((call) => call === 'capture-pane')).toHaveLength(1);
 
   releaseOutput();
@@ -324,6 +347,66 @@ test('behavioral pin: Codex collapsed-paste receipt verifies an exact multi-KB f
     messageId,
     frame,
   )).toBe('corrupted');
+});
+
+test('behavioral pin: Claude collapsed-paste receipt verifies the exact multiline frame shape', () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n${'long operator report '.repeat(90)}`;
+
+  expect(RealTmux.composerVerdict(
+    `❯ [Pasted text #21 +1 lines]\n${'─'.repeat(80)}\n  /workspace • Context 9% used`,
+    messageId,
+    frame,
+  )).toBe('intact');
+  expect(RealTmux.composerVerdict(
+    `❯ [Pasted text #21 +2 lines]\n${'─'.repeat(80)}\n  /workspace • Context 9% used`,
+    messageId,
+    frame,
+  )).toBe('corrupted');
+  expect(RealTmux.composerVerdict(
+    `❯ stale draft [Pasted text #21 +1 lines]\n${'─'.repeat(80)}\n  /workspace • Context 9% used`,
+    messageId,
+    frame,
+  )).toBe('corrupted');
+});
+
+test('behavioral pin: verified Claude send submits an exact native multiline-paste receipt', async () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n${'long operator report '.repeat(90)}`;
+  const baseline = `transcript\n\n❯ \n${'─'.repeat(80)}\n  /workspace • Context 9% used`;
+  let pasted = false;
+  const calls: string[][] = [];
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'paste-buffer') pasted = true;
+    if (args[0] === 'capture-pane') return {
+      code: 0,
+      stdout: pasted
+        ? `❯ [Pasted text #21 +1 lines]\n${'─'.repeat(80)}\n  /workspace • Context 9% used`
+        : baseline,
+      stderr: '',
+    };
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observation complete');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  expect(await tmux.sendVerifiedToSeat('palace:S', messageId, frame, undefined, 'claude'))
+    .toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
 });
 
 for (const receipt of [
@@ -600,6 +683,48 @@ test('behavioral pin: a failed verified send attests byte-identical restoration 
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(1);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
   expect(calls.filter((args) => args[0] === 'capture-pane')).toHaveLength(3);
+});
+
+test('behavioral pin: volatile paint after post-stage restoration is composer corruption, not seat resolution', async () => {
+  const baseline = 'transcript\n\n> \n\nfooter clock 12:00';
+  let composer = '';
+  let loaded = '';
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'load-buffer') loaded = new TextDecoder().decode(stdin);
+    if (args[0] === 'paste-buffer') composer += loaded;
+    if (args[0] === 'send-keys' && args.includes('BSpace')) {
+      const count = Number(args[args.indexOf('-N') + 1]);
+      composer = [...composer].slice(0, -count).join('');
+    }
+    if (args[0] === 'capture-pane') return {
+      code: 0,
+      stdout: composer === ''
+        ? (loaded === '' ? baseline : 'transcript\n\n> \n\nfooter clock 12:01')
+        : '> corrupted paint\n',
+      stderr: '',
+    };
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observation complete');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat('palace:S', 'correlation', 'machine input');
+
+  expect(outcome).toEqual({ bytes: Buffer.byteLength('machine input'), verdict: 'composer_corrupted' });
+  expect(composer).toBe('');
 });
 
 for (const profile of [
