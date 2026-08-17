@@ -288,6 +288,44 @@ test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on it
     .toHaveLength(1);
 });
 
+test('behavioral pin: prompt-submit admission cannot wait behind composer staging', async () => {
+  // Event 37076 staged the Pax frame while txd held its global journal lock.
+  // Edge-proxy delivered the resulting UserPromptSubmit hook, but its txd
+  // consumer timed out because promptSubmitted could not acquire that lock.
+  const { store, tmux, d } = await fixture(async () => undefined);
+  let hookReturned = false;
+  tmux.sendVerifiedToSeat = async (_seat, messageId, frame) => {
+    const result = await d.promptSubmitted({
+      schema_version: SCHEMA_VERSION,
+      agent_id: 'worker',
+      message_ids: [messageId],
+      content: frame,
+    });
+    hookReturned = true;
+    expect(result.asserted).toEqual([messageId]);
+    return { bytes: Buffer.byteLength(frame), verdict: 'staged' as const };
+  };
+
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'hook must cross while staging is in flight',
+    ask: false,
+    reply: false,
+  });
+
+  expect(hookReturned).toBe(true);
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted'))
+    .toHaveLength(1);
+}, 500);
+
+test('behavioral pin: the five-minute lifecycle gate cannot become a composer wait', async () => {
+  const source = await Bun.file(new URL('../src/daemon.ts', import.meta.url)).text();
+  expect(source).not.toContain('composerObserveTimeoutMs: cfg.commWatchTimeoutMs');
+});
+
 test('machine-feed injection shares the composer gate and carries no comm envelope', async () => {
   const { store, tmux } = await fixture(null);
   const order: string[] = [];

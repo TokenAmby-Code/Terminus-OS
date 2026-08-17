@@ -1377,7 +1377,7 @@ export class Daemon {
       return this.armCommWatch(prepared.messageId, req.source_agent_id, target.agent_id, transportReceipt);
     }));
 
-    return this.locked(async () => {
+    const plans = await this.locked(async () => {
       const proj = await this.projections();
       const events = await this.store.readAll();
       const pendingResetSeats = this.pendingScopedResetSeats(events);
@@ -1387,20 +1387,41 @@ export class Daemon {
         if (!binding) throw new Error(`target_binding_changed: ${target.agent_id}`);
         if (pendingResetSeats.has(target.seat_id)) throw new Error(`scoped_reset_pending: ${target.seat_id}`);
       }
-
-      const event_ids = [...prepared.eventIds];
-      let allStaged = true;
-      for (const target of prepared.targets) {
+      return prepared.targets.map((target) => {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
         const frame = prepared.renderedIntent?.frame
           ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
-        const sent = await this.tmux.sendVerifiedToSeat(target.seat_id, prepared.messageId, frame, prepared.renderedIntent?.tabAfter, binding.engine ?? undefined);
+        return { target, binding, frame };
+      });
+    });
+
+    // Tmux repaint is an external wait. It must never hold the journal mutex:
+    // UserPromptSubmit can arrive as soon as Enter is driven, and that hook is
+    // the effect fact this transaction exists to record. Event 37076 proved
+    // the old inversion: staging held this.locked for five minutes, edge-proxy
+    // reached txd with the hook, and timed out before txd could admit it.
+    const outcomes: Array<{ plan: typeof plans[number]; sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>> }> = [];
+    for (const plan of plans) {
+      const sent = await this.tmux.sendVerifiedToSeat(
+        plan.target.seat_id,
+        prepared.messageId,
+        plan.frame,
+        prepared.renderedIntent?.tabAfter,
+        plan.binding.engine ?? undefined,
+      );
+      outcomes.push({ plan, sent });
+    }
+
+    return this.locked(async () => {
+      const event_ids = [...prepared.eventIds];
+      let allStaged = true;
+      for (const { plan, sent } of outcomes) {
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
-            target_agent_id: target.agent_id, seat_id: target.seat_id, bytes: sent.bytes,
+            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: sent.bytes,
             submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
-            name: req.intent?.name ?? null, rendered_frame: frame,
+            name: req.intent?.name ?? null, rendered_frame: plan.frame,
             receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
@@ -1688,7 +1709,12 @@ export class Daemon {
           && event.entity_id === messageId
           && event.payload.target_agent_id === hook.agent_id);
         const deadline = Date.parse(String(bytesSent?.payload.receipt_deadline_at ?? ''));
-        const asynchronous = !Number.isFinite(deadline) || this.commReceiptRuntime.now() >= deadline;
+        // A hook may win the race against the post-stage bytes receipt now
+        // that composer I/O no longer owns the journal mutex. That is the
+        // fastest tier-1 success, not evidence that the 30-second bound passed.
+        const asynchronous = bytesSent !== undefined
+          && Number.isFinite(deadline)
+          && this.commReceiptRuntime.now() >= deadline;
         if (!confirmationStaged && asynchronous) {
           confirmations.set(sourceAgentId, [...(confirmations.get(sourceAgentId) ?? []), messageId]);
         }
