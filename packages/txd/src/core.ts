@@ -1854,12 +1854,12 @@ export class Daemon {
           targets,
           bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
           submit_verdict: verdicts.size === 1
-            ? [...verdicts][0] as 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'
+            ? [...verdicts][0] as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'
             : 'multiple',
           refusals: unstaged.map((row) => ({
             target: targets.find((target) => target.agent_id === row.payload.target_agent_id)!,
             bytes: Number(row.payload.bytes ?? 0),
-            submit_verdict: String(row.payload.submit_verdict) as 'composer_corrupted' | 'frame_absent' | 'seat_unresolved',
+            submit_verdict: String(row.payload.submit_verdict) as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved',
             event_id: row.seq,
           })),
           event_ids: current.sent.map((row) => row.seq),

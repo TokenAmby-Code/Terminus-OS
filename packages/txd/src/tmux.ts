@@ -95,6 +95,13 @@ export type SendOutcome = { verdict: 'staged'; bytes: number };
 // verified-intact frame was submitted with one Enter — it still does not say
 // delivered. The other verdicts are refusals to type blind.
 export type ComposerVerdict = 'intact' | 'corrupted' | 'absent';
+export type ComposerReadiness = 'empty_ready' | 'draft_present' | 'unreadable';
+export type ComposerRefusal =
+  | 'composer_draft_present'
+  | 'composer_unreadable'
+  | 'composer_corrupted'
+  | 'frame_absent'
+  | 'seat_unresolved';
 export type CommRedriveDriveOutcome = 'enter_redriven' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved';
 
 export type AgentModeTransitionOutcome = {
@@ -163,7 +170,7 @@ export interface TmuxControlPlane {
   seatGeneration(seatId: string): Promise<string | undefined>;
   /** Resolve a wrapper PID to canonical pane truth through /proc ancestry and tmux witnesses. */
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
-  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex'): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex'): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }>;
   /**
    * Stage one shell command in an AGENT pane through the engine's own shell
    * escape: Claude's bash mode is entered by a literal `!` KEYSTROKE on an
@@ -172,7 +179,7 @@ export interface TmuxControlPlane {
    * verified; Codex parses a literal `!`-prefixed composer line at submit, so
    * the whole `!<command>` line rides the verified send path.
    */
-  runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex'): Promise<SendOutcome | { verdict: 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'; bytes: number }>;
+  runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex'): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }>;
   /**
    * Execute one shell command in a BARE pane's idle shell and harvest its
    * stdout/stderr/exit code. Refuses loud and typed before staging:
@@ -1749,7 +1756,9 @@ export class RealTmux implements TmuxControlPlane {
     if (promptLine < 0) return null;
 
     const isClaudeComposerBoundary = (index: number): boolean =>
-      /^\s*[─━]{8,}\s*$/.test(lines[index]!)
+      // Wide Claude panes render the session name inside this border; narrow
+      // panes collapse it to a bare rule. Both are the same editor boundary.
+      /^\s*[─━]{3,}(?:[^─━].*[─━]{2,})?\s*$/.test(lines[index]!)
       && lines.slice(index + 1, index + 3).some((line) =>
         /Context .* used|bypass permissions on|for shortcuts|← for agents/.test(line));
     let promptBlockEnd = promptLine + 1;
@@ -1767,16 +1776,23 @@ export class RealTmux implements TmuxControlPlane {
     return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
   }
 
-  static composerEmpty(pane: string, engine?: 'claude' | 'codex'): boolean {
+  static composerReadiness(pane: string, engine?: 'claude' | 'codex'): ComposerReadiness {
+    if (!RealTmux.composerInteractive(pane)) return 'unreadable';
     const composer = RealTmux.activeComposer(pane);
-    if (composer === null) return false;
+    if (composer === null) return 'unreadable';
     const paint = composer.trim().replace(/\s+/g, ' ');
-    if (paint === '') return true;
-    if (engine === undefined) return false;
+    if (paint === '') return 'empty_ready';
+    if (engine === undefined) return 'draft_present';
     const profile = ENGINE_IDLE_COMPOSER_PAINTS[engine];
     return profile.patterns.some((pattern) => pattern.test(paint))
       || profile.needles.some((needle) => needle === paint
-        || paint.length >= 16 && needle.startsWith(paint));
+        || paint.length >= 16 && needle.startsWith(paint))
+      ? 'empty_ready'
+      : 'draft_present';
+  }
+
+  static composerEmpty(pane: string, engine?: 'claude' | 'codex'): boolean {
+    return RealTmux.composerReadiness(pane, engine) === 'empty_ready';
   }
 
   /**
@@ -1882,9 +1898,9 @@ export class RealTmux implements TmuxControlPlane {
       'capture-pane', '-p', '-J', '-t', paneId,
     ]);
     if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
-    if (!RealTmux.composerInteractive(baseline.stdout) || !RealTmux.composerEmpty(baseline.stdout, engine)) {
-      return { bytes: 0, verdict: 'composer_corrupted' as const };
-    }
+    const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
+    if (readiness === 'draft_present') return { bytes: 0, verdict: 'composer_draft_present' as const };
+    if (readiness === 'unreadable') return { bytes: 0, verdict: 'composer_unreadable' as const };
     const bytes = Buffer.byteLength(text, 'utf8');
     const signal = AbortSignal.timeout(this.composerObserveTimeoutMs);
     let output: PaneOutputSubscription;
@@ -2025,9 +2041,9 @@ export class RealTmux implements TmuxControlPlane {
       'capture-pane', '-p', '-J', '-t', paneId,
     ]);
     if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
-    if (!RealTmux.composerInteractive(baseline.stdout) || !RealTmux.composerEmpty(baseline.stdout, engine)) {
-      return { bytes: 0, verdict: 'composer_corrupted' as const };
-    }
+    const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
+    if (readiness === 'draft_present') return { bytes: 0, verdict: 'composer_draft_present' as const };
+    if (readiness === 'unreadable') return { bytes: 0, verdict: 'composer_unreadable' as const };
     const bytes = Buffer.byteLength(command, 'utf8');
     const signal = AbortSignal.timeout(this.composerObserveTimeoutMs);
     let output: PaneOutputSubscription;

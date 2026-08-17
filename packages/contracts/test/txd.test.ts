@@ -196,6 +196,16 @@ describe("txd lifecycle vocabulary", () => {
       event_ids: [43],
     } as const;
     expect(CommReceiptSchema.parse(refused).phase).toBe("transport_refused");
+    expect(CommReceiptSchema.parse({
+      ...refused,
+      submit_verdict: "composer_draft_present",
+      refusals: [{ ...refused.refusals[0], submit_verdict: "composer_draft_present" }],
+    })).toMatchObject({ submit_verdict: "composer_draft_present" });
+    expect(CommReceiptSchema.parse({
+      ...refused,
+      submit_verdict: "composer_unreadable",
+      refusals: [{ ...refused.refusals[0], submit_verdict: "composer_unreadable" }],
+    })).toMatchObject({ submit_verdict: "composer_unreadable" });
     expect(() => CommReceiptSchema.parse({ ...refused, refusals: [] })).toThrow();
   });
 

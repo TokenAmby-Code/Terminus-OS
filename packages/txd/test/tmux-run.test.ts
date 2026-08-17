@@ -168,7 +168,7 @@ test('a claude run refuses a painted composer before any key is sent', async () 
     observePaneOutput: async () => { throw new Error('dirty composer must refuse before arming'); },
   });
   const outcome = await tmux.runInAgentComposer('council:custodes', RUN_ID, 'echo x', 'claude');
-  expect(outcome).toEqual({ bytes: 0, verdict: 'composer_corrupted' });
+  expect(outcome).toEqual({ bytes: 0, verdict: 'composer_draft_present' });
   expect(calls.filter((args) => ['send-keys', 'load-buffer', 'paste-buffer'].includes(args[0]!))).toHaveLength(0);
 });
 

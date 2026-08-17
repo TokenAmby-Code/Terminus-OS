@@ -130,7 +130,7 @@ test('behavioral pin: a typed comm transport refusal is printed and exits non-ze
           source_agent_id: 'source',
           targets: [{ agent_id: 'target', seat_id: 'palace:W', persona: null }],
           bytes_sent: 0,
-          submit_verdict: 'composer_corrupted',
+          submit_verdict: 'composer_draft_present',
           event_ids: [99],
         },
     stdout: (line) => stdout.push(line),
@@ -141,7 +141,7 @@ test('behavioral pin: a typed comm transport refusal is printed and exits non-ze
     expect(JSON.parse(stdout[0]!)).toMatchObject({
       ok: false,
       phase: 'transport_refused',
-      submit_verdict: 'composer_corrupted',
+      submit_verdict: 'composer_draft_present',
     });
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
