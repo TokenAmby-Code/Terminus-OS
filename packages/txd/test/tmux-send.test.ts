@@ -689,7 +689,9 @@ test('behavioral pin: volatile paint after post-stage restoration is composer co
   const baseline = 'transcript\n\n> \n\nfooter clock 12:00';
   let composer = '';
   let loaded = '';
+  const calls: string[][] = [];
   const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    calls.push(args);
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
     if (args[0] === 'load-buffer') loaded = new TextDecoder().decode(stdin);
     if (args[0] === 'paste-buffer') composer += loaded;
@@ -725,6 +727,7 @@ test('behavioral pin: volatile paint after post-stage restoration is composer co
 
   expect(outcome).toEqual({ bytes: Buffer.byteLength('machine input'), verdict: 'composer_corrupted' });
   expect(composer).toBe('');
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
 
 for (const profile of [
