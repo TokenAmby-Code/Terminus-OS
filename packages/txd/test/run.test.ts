@@ -22,6 +22,7 @@ function estate() {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (_type: TxdPublishedEventType, _payload: Record<string, unknown>) => {},
   };
   const d = new Daemon(store, tmux, undefined, undefined, runtime);

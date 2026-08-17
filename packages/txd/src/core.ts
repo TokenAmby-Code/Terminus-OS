@@ -88,13 +88,12 @@ import {
   isStackPage,
   isStackSeat,
   isTxdPage,
-  SSH_SEAT_TARGETS,
-  sshSeatTarget,
   TXD_ESTATE,
   TXD_WINDOWS,
   type TxdPage,
   type TxdStackPage,
 } from './estate.ts';
+import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
@@ -146,6 +145,7 @@ export type PhysicalRegistrationRuntime = {
   configuration: { generation: string; digest: string };
   agentWrapper: string;
   perpetual: Record<string, 'claude' | 'codex'>;
+  sshSeatTargets: SshSeatTargets;
   publish: (
     eventType: TxdPublishedEventType,
     payload: Record<string, unknown>,
@@ -223,6 +223,10 @@ export class Daemon {
     private commReceiptRuntime: CommReceiptRuntime = DEFAULT_COMM_RECEIPT_RUNTIME,
   ) {}
 
+  private sshSeatTarget(seatId: string): string | undefined {
+    return this.physicalRegistration?.sshSeatTargets.targetFor(seatId);
+  }
+
   async attestWrapperStart(
     hook: WrapperStartHook,
   ): Promise<{ attested: boolean; reason: string | null }> {
@@ -268,7 +272,7 @@ export class Daemon {
         pane_id: observed.pane_id,
         pane_generation: observed.pane_generation,
         machine: this.physicalRegistration.machine,
-        kind: sshSeatTarget(observed.pane_id) ? 'ssh' : 'local',
+        kind: this.sshSeatTarget(observed.pane_id) ? 'ssh' : 'local',
         agent_id: composition?.agent_id ?? null,
         wrapper_pid: hook.wrapper_pid,
         configuration: this.physicalRegistration.configuration,
@@ -507,7 +511,7 @@ export class Daemon {
         // fresh nonce, so a new binding can never attach a dead generation's
         // envelope.
         const launchNonce = crypto.randomUUID();
-        const sshTarget = sshSeatTarget(seatId);
+        const sshTarget = this.sshSeatTarget(seatId);
         if (!(await this.tmux.startSeatEngine({
           seatId,
           engine: request.engine,
@@ -635,7 +639,7 @@ export class Daemon {
       // with it before any binding stands. Remote start ticks are not
       // comparable across kernels and are never collected — the nonce echo
       // plus the transport is what guards the remote half.
-      const seatTarget = sshSeatTarget(observed.pane_id);
+      const seatTarget = this.sshSeatTarget(observed.pane_id);
       const claim = liveClaim(projections.transportClaims.get(observed.pane_id), observed.pane_generation);
       const composition = liveComposition(projections.launchCompositions.get(observed.pane_id), observed.pane_generation);
       if (seatTarget) {
@@ -865,8 +869,8 @@ export class Daemon {
           // Seat-aware: an ssh seat's registered placement names the seat's
           // configured target and kind 'ssh'; a local seat names this daemon's
           // machine and kind 'local'. Any other combination is a conflict.
-          || agent.placement.machine !== (sshSeatTarget(binding.seat_id) ?? this.physicalRegistration.machine)
-          || agent.placement.kind !== (sshSeatTarget(binding.seat_id) ? 'ssh' : 'local')
+          || agent.placement.machine !== (this.sshSeatTarget(binding.seat_id) ?? this.physicalRegistration.machine)
+          || agent.placement.kind !== (this.sshSeatTarget(binding.seat_id) ? 'ssh' : 'local')
           || binding.tint !== (agent.persona?.tint ?? null)
           // The registered agent must be the agent txd signed off at bind time.
           // registrationd holds the persona authority; txd holds it to the
@@ -914,7 +918,7 @@ export class Daemon {
     const projections = await this.projections();
     const expected = new Set<string>();
     for (const binding of projections.currentBindings) {
-      if (!sshSeatTarget(binding.seat_id) || !binding.pane_generation) continue;
+      if (!this.sshSeatTarget(binding.seat_id) || !binding.pane_generation) continue;
       const composition = liveComposition(
         projections.launchCompositions.get(binding.seat_id),
         binding.pane_generation,
@@ -922,7 +926,7 @@ export class Daemon {
       if (composition) expected.add(envelopeSessionName(binding.seat_id, composition.launch_nonce));
     }
     const zombies: Array<{ target: string; session_name: string }> = [];
-    for (const target of new Set(Object.values(SSH_SEAT_TARGETS))) {
+    for (const target of this.physicalRegistration?.sshSeatTargets.targets ?? []) {
       for (const session of await lister(target)) {
         if (!session.startsWith(ENVELOPE_PREFIX)) continue;
         if (!expected.has(session)) zombies.push({ target, session_name: session });

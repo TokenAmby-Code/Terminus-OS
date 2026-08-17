@@ -15,6 +15,7 @@ import {
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { resolveSshSeatTargets } from '../src/config.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 
 const DISPATCH_ID = '9f1b1f6a-5d4e-4a0f-9a2b-6c3d4e5f6071';
@@ -31,6 +32,10 @@ function setup() {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: resolveSshSeatTargets({
+      pages: { somnium: 'k12-work', somnium_fleet: 'k12-work' },
+      seats: {},
+    }),
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
@@ -190,6 +195,10 @@ test('a minted stack pane is decommissioned when its engine cannot start', async
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: resolveSshSeatTargets({
+      pages: { somnium: 'k12-work', somnium_fleet: 'k12-work' },
+      seats: {},
+    }),
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => { published.push({ type, payload }); },
   });
   await d.constructEstate();

@@ -59,6 +59,7 @@ test('behavioral pin: a painted newborn backfills durable composer interactivity
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: string, payload: Record<string, unknown>) => {
       order.push(`publish:${type}`);
       published.push({ type, payload });
@@ -116,6 +117,7 @@ test('behavioral pin: concurrent comms publish one composer observation per pane
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: string, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
@@ -151,6 +153,7 @@ test('behavioral pin: a pane rebind after observation cannot publish stale compo
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: string, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },

@@ -25,6 +25,7 @@ function setup(options: { failPublish?: boolean } = {}) {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       if (options.failPublish && type === 'agent.retired') throw new Error('bus_publish_refused:503');
       published.push({ type, payload });
