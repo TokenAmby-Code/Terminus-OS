@@ -1952,6 +1952,7 @@ export class Daemon {
         seat_id: prepared.binding.seat_id,
         source_agent_id: req.source_agent_id,
         bytes: prepared.bytes,
+        rendered_frame: prepared.frame,
         outcome: discardOutcome,
       },
       provenance: this.prov('wrapper', transportReceipt), occurred_at: this.now(),

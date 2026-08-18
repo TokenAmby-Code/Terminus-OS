@@ -247,7 +247,8 @@ test('behavioral pin: corrupted recovery discards only when explicitly requested
   const discarded = await d.commRecover({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', discard_corrupted: true });
   expect(discarded.outcome).toBe('discarded');
   expect((await events('act.comm_draft_discarded')).at(-1)?.payload).toMatchObject({
-    message_id: id, bytes: sent.payload.bytes, source_agent_id: 'sender', outcome: 'discarded',
+    message_id: id, bytes: sent.payload.bytes, rendered_frame: sent.payload.rendered_frame,
+    source_agent_id: 'sender', outcome: 'discarded',
   });
 });
 
