@@ -100,7 +100,10 @@ export type ComposerRefusal =
   | 'composer_draft_present'
   | 'composer_unreadable'
   | 'composer_corrupted'
+  | 'composer_rollback_failed'
   | 'frame_absent'
+  | 'submit_failed'
+  | 'transport_failed'
   | 'seat_unresolved';
 export type CommRedriveDriveOutcome = 'enter_redriven' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved';
 
@@ -143,6 +146,8 @@ export interface TmuxControlPlane {
   ensureEstate(): Promise<EstateEnsureResult>;
   /** Classify the observed estate; an unrecognized topology is foreign, never repaired blind. */
   estateGeneration(): Promise<EstateGeneration>;
+  /** Correct display-only drift without replacing a pane process. */
+  reconcilePresentation(): Promise<void>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
   /** Split one dynamic pane into a mitosis page and tile the page once. */
@@ -173,7 +178,7 @@ export interface TmuxControlPlane {
   seatGeneration(seatId: string): Promise<string | undefined>;
   /** Resolve a wrapper PID to canonical pane truth through /proc ancestry and tmux witnesses. */
   attestWrapperPlacement(wrapperPid: number): Promise<WrapperPlacementAttestation>;
-  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex'): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }>;
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }>;
   /**
    * Stage one shell command in an AGENT pane through the engine's own shell
    * escape: Claude's bash mode is entered by a literal `!` KEYSTROKE on an
@@ -182,7 +187,7 @@ export interface TmuxControlPlane {
    * verified; Codex parses a literal `!`-prefixed composer line at submit, so
    * the whole `!<command>` line rides the verified send path.
    */
-  runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex'): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }>;
+  runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }>;
   /**
    * Execute one shell command in a BARE pane's idle shell and harvest its
    * stdout/stderr/exit code. Refuses loud and typed before staging:
@@ -428,6 +433,7 @@ function spawnTmuxProcess(
   // respawn-pane -e below.
   const environment = { ...process.env };
   delete environment[AGENT_ID_ENV];
+  delete environment.TMUX;
   return Bun.spawn(['tmux', '-L', socket, ...args], { ...options, env: environment });
 }
 
@@ -1121,6 +1127,29 @@ export class RealTmux implements TmuxControlPlane {
     return recoverable ? 'recoverable' : 'foreign';
   }
 
+  async reconcilePresentation(): Promise<void> {
+    for (const page of Object.keys(TXD_WINDOWS)) {
+      if (isStackPage(page)) continue;
+      if (!(await this.clearPageZoom(page, `${TXD_SESSION}:=${page}`))) {
+        throw new Error(`txd could not reconcile ${page} presentation zoom`);
+      }
+    }
+  }
+
+  async ensureLifecycleHooks(): Promise<void> {
+    const commands = {
+      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name}"',
+      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page #{q:window_name}"',
+    } as const;
+    for (const [hook, command] of Object.entries(commands)) {
+      await this.checked(['set-hook', '-g', hook, command], `install ${hook} lifecycle witness`);
+      const observed = await this.checked(['show-hooks', '-g', hook], `attest ${hook} lifecycle witness`);
+      if (!observed.includes(`tx estate event ${hook}`)) {
+        throw new Error(`txd could not attest ${hook} lifecycle witness`);
+      }
+    }
+  }
+
   private async tag(paneId: string, seatId: string): Promise<void> {
     await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`, seatId);
     await this.checked(['set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID()], `tag ${seatId} generation`, seatId);
@@ -1325,6 +1354,7 @@ export class RealTmux implements TmuxControlPlane {
     if (!(await this.clearDefaultAgentEnvironment())) {
       throw new Error('txd could not clear the tmux server agent environment');
     }
+    await this.ensureLifecycleHooks();
     const rows = await this.estateRows();
     if (rows.length > 0) {
       const recoverable = rows.every((row) => {
@@ -1681,6 +1711,10 @@ export class RealTmux implements TmuxControlPlane {
   async seatGeneration(seatId: string): Promise<string | undefined> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return undefined;
+    return this.generationForPane(seatId, paneId);
+  }
+
+  private async generationForPane(seatId: string, paneId: string): Promise<string | undefined> {
     const observed = await this.command('observe_seat_generation', seatId, [
       'display-message', '-p', '-t', paneId, `#{${GENERATION_OPT}}`,
     ]);
@@ -1929,18 +1963,22 @@ export class RealTmux implements TmuxControlPlane {
     return enter.code === 0 ? 'enter_redriven' : 'seat_unresolved';
   }
 
-  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex') {
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     return this.serializePaneInput(seatId, () =>
-      this.sendVerifiedToSeatUnlocked(seatId, correlationId, text, tabAfterPrefix, engine));
+      this.sendVerifiedToSeatUnlocked(seatId, correlationId, text, tabAfterPrefix, engine, expectedPaneGeneration));
   }
 
-  private async sendVerifiedToSeatUnlocked(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex') {
+  private async sendVerifiedToSeatUnlocked(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex', expectedPaneGeneration?: string) {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (expectedPaneGeneration !== undefined
+      && await this.generationForPane(seatId, paneId) !== expectedPaneGeneration) {
+      return { bytes: 0, verdict: 'seat_unresolved' as const };
+    }
     const baseline = await this.command('observe_input_baseline', seatId, [
       'capture-pane', '-p', '-e', '-J', '-t', paneId,
     ]);
-    if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (baseline.code !== 0) return { bytes: 0, verdict: 'transport_failed' as const };
     const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
     if (readiness === 'draft_present') return { bytes: 0, verdict: 'composer_draft_present' as const };
     if (readiness === 'unreadable') return { bytes: 0, verdict: 'composer_unreadable' as const };
@@ -1953,7 +1991,7 @@ export class RealTmux implements TmuxControlPlane {
       // capture is driven by those facts, never by a sleep or polling loop.
       output = await this.outputObserver(this.socket, paneId, signal);
     } catch {
-      return { bytes: 0, verdict: 'seat_unresolved' as const };
+      return { bytes: 0, verdict: 'transport_failed' as const };
     }
     let lastVerdict: ComposerVerdict = 'absent';
     let freshClaudeAttachmentObserved = false;
@@ -1974,24 +2012,28 @@ export class RealTmux implements TmuxControlPlane {
         return attestBaseline();
       };
       const restorationCount = () => freshClaudeAttachmentObserved ? 1 : [...text].length;
+      const refuseAfterMutation = async (
+        cleanVerdict: 'composer_corrupted' | 'frame_absent' | 'submit_failed' | 'transport_failed',
+        count: number,
+        possibleBytes = bytes,
+      ) => await restoreComposer(count)
+        ? { bytes: 0, verdict: cleanVerdict }
+        : { bytes: possibleBytes, verdict: 'composer_rollback_failed' as const };
       const prefix = tabAfterPrefix ?? text;
       const suffix = tabAfterPrefix === undefined ? '' : text.slice(tabAfterPrefix.length);
       const literal = await this.pasteLiteral(seatId, paneId, prefix, 'paste_literal');
       if (!literal) {
-        await attestBaseline();
-        return { bytes: 0, verdict: 'seat_unresolved' as const };
+        return { bytes: 0, verdict: 'transport_failed' as const };
       }
       if (tabAfterPrefix !== undefined) {
         const tab = await this.command('commit_surface_name', seatId, ['send-keys', '-t', paneId, 'Tab']);
         if (tab.code !== 0) {
-          await restoreComposer([...prefix].length);
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return refuseAfterMutation('transport_failed', [...prefix].length, Buffer.byteLength(prefix, 'utf8'));
         }
         if (suffix.length > 0) {
           const argsLiteral = await this.pasteLiteral(seatId, paneId, suffix, 'paste_literal_args');
           if (!argsLiteral) {
-            await restoreComposer([...prefix].length);
-            return { bytes, verdict: 'seat_unresolved' as const };
+            return refuseAfterMutation('transport_failed', [...prefix].length, Buffer.byteLength(prefix, 'utf8'));
           }
         }
       }
@@ -2008,8 +2050,7 @@ export class RealTmux implements TmuxControlPlane {
         }
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
-          await restoreComposer(restorationCount());
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return refuseAfterMutation('transport_failed', restorationCount());
         }
         lastVerdict = RealTmux.composerVerdict(captured.stdout, correlationId, text);
         // Claude collapses a large bracketed paste into one opaque attachment.
@@ -2028,14 +2069,9 @@ export class RealTmux implements TmuxControlPlane {
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
-        await restoreComposer(restorationCount());
-        return { bytes, verdict: 'seat_unresolved' as const };
+        return refuseAfterMutation('submit_failed', restorationCount());
       }
-      const restored = await restoreComposer(restorationCount());
-      if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
-      return lastVerdict === 'absent'
-        ? { bytes, verdict: 'frame_absent' as const }
-        : { bytes, verdict: 'composer_corrupted' as const };
+      return refuseAfterMutation(lastVerdict === 'absent' ? 'frame_absent' : 'composer_corrupted', restorationCount());
     } finally {
       output.close();
     }
@@ -2084,21 +2120,25 @@ export class RealTmux implements TmuxControlPlane {
     return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
   }
 
-  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex') {
+  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     if (engine === 'codex') {
       // Codex parses a literal `!`-prefixed composer line at submit, so the
       // whole form rides the ordinary verified send path.
-      return this.sendVerifiedToSeat(seatId, runId, `!${command}`, undefined, 'codex');
+      return this.sendVerifiedToSeat(seatId, runId, `!${command}`, undefined, 'codex', expectedPaneGeneration);
     }
     // Claude: the `!` must be a KEYSTROKE on an empty interactive composer —
     // a bracketed paste of `!` stays text and would submit a prompt instead
     // of entering bash mode.
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (expectedPaneGeneration !== undefined
+      && await this.generationForPane(seatId, paneId) !== expectedPaneGeneration) {
+      return { bytes: 0, verdict: 'seat_unresolved' as const };
+    }
     const baseline = await this.command('observe_input_baseline', seatId, [
       'capture-pane', '-p', '-e', '-J', '-t', paneId,
     ]);
-    if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (baseline.code !== 0) return { bytes: 0, verdict: 'transport_failed' as const };
     const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
     if (readiness === 'draft_present') return { bytes: 0, verdict: 'composer_draft_present' as const };
     if (readiness === 'unreadable') return { bytes: 0, verdict: 'composer_unreadable' as const };
@@ -2108,7 +2148,7 @@ export class RealTmux implements TmuxControlPlane {
     try {
       output = await this.outputObserver(this.socket, paneId, signal);
     } catch {
-      return { bytes: 0, verdict: 'seat_unresolved' as const };
+      return { bytes: 0, verdict: 'transport_failed' as const };
     }
     let lastVerdict: ComposerVerdict = 'absent';
     try {
@@ -2124,12 +2164,17 @@ export class RealTmux implements TmuxControlPlane {
         ]);
         return attested.code === 0 && attested.stdout === baseline.stdout;
       };
+      const refuseAfterMutation = async (
+        cleanVerdict: 'composer_corrupted' | 'frame_absent' | 'submit_failed' | 'transport_failed',
+        possibleBytes = bytes,
+      ) => await restoreComposer()
+        ? { bytes: 0, verdict: cleanVerdict }
+        : { bytes: possibleBytes, verdict: 'composer_rollback_failed' as const };
       const bang = await this.command('enter_shell_mode', seatId, ['send-keys', '-t', paneId, '-l', '!']);
-      if (bang.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      if (bang.code !== 0) return { bytes: 0, verdict: 'transport_failed' as const };
       const literal = await this.pasteLiteral(seatId, paneId, command, 'paste_literal_run');
       if (!literal) {
-        await restoreComposer();
-        return { bytes: 0, verdict: 'seat_unresolved' as const };
+        return refuseAfterMutation('transport_failed', 1);
       }
       while (!signal.aborted) {
         try {
@@ -2139,21 +2184,15 @@ export class RealTmux implements TmuxControlPlane {
         }
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
-          await restoreComposer();
-          return { bytes, verdict: 'seat_unresolved' as const };
+          return refuseAfterMutation('transport_failed');
         }
         lastVerdict = RealTmux.shellComposerVerdict(captured.stdout, command);
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
-        await restoreComposer();
-        return { bytes, verdict: 'seat_unresolved' as const };
+        return refuseAfterMutation('submit_failed');
       }
-      const restored = await restoreComposer();
-      if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
-      return lastVerdict === 'absent'
-        ? { bytes, verdict: 'frame_absent' as const }
-        : { bytes, verdict: 'composer_corrupted' as const };
+      return refuseAfterMutation(lastVerdict === 'absent' ? 'frame_absent' : 'composer_corrupted');
     } finally {
       output.close();
     }
@@ -2512,6 +2551,7 @@ export class FakeTmux implements TmuxControlPlane {
     });
     return recoverable ? 'recoverable' : 'foreign';
   }
+  async reconcilePresentation(): Promise<void> {}
   estateShape(): { sessions: string[]; windows: Record<string, string[]> } {
     return structuredClone(this.shape);
   }
@@ -2541,7 +2581,19 @@ export class FakeTmux implements TmuxControlPlane {
   }
   async killSeat(seatId: string): Promise<void> {
     const s = this.seats.get(seatId);
-    if (s) s.pane = 'dead';
+    if (!s) return;
+    const [page] = seatId.split(':', 1);
+    if (page && isStackPage(page) && !TXD_ESTATE.includes(seatId)) {
+      this.seats.delete(seatId);
+      this.commands.delete(seatId);
+      this.seatEngines.delete(seatId);
+      this.tints.delete(seatId);
+      if (this.shape.windows[page]) {
+        this.shape.windows[page] = this.shape.windows[page]!.filter((seat) => seat !== seatId);
+      }
+      return;
+    }
+    s.pane = 'dead';
   }
   async reapSeat(seatId: string, previousTint?: string | null): Promise<boolean> {
     // Respawn keeps the pane LIVE (bare shell) — a live seat is reapable; a dead
@@ -2700,9 +2752,11 @@ export class FakeTmux implements TmuxControlPlane {
   private paneTexts = new Map<string, string>();
   private redriveEnterCounts = new Map<string, number>();
 
-  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string, _engine?: 'claude' | 'codex') {
+  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string, _engine?: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     const s = this.seats.get(seatId);
-    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (!s || s.pane === 'dead' || (expectedPaneGeneration !== undefined && s.generation !== expectedPaneGeneration)) {
+      return { bytes: 0, verdict: 'seat_unresolved' as const };
+    }
     this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' as const };
   }
@@ -2728,9 +2782,11 @@ export class FakeTmux implements TmuxControlPlane {
   setShellRunResult(seatId: string, outcome: ShellRunOutcome): void { this.shellRunResults.set(seatId, outcome); }
   /** Test control: the seat's shell run never completes on its own (abort paths). */
   holdShellRun(seatId: string): void { this.heldShellRuns.add(seatId); }
-  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex') {
+  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     const s = this.seats.get(seatId);
-    if (!s || s.pane === 'dead') return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (!s || s.pane === 'dead' || (expectedPaneGeneration !== undefined && s.generation !== expectedPaneGeneration)) {
+      return { bytes: 0, verdict: 'seat_unresolved' as const };
+    }
     if (this.agentRunFailures.has(seatId)) return { bytes: 0, verdict: 'composer_corrupted' as const };
     this.agentRuns.push({ seat_id: seatId, run_id: runId, command, engine });
     return { bytes: Buffer.byteLength(command, 'utf8'), verdict: 'staged' as const };

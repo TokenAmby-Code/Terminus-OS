@@ -284,7 +284,7 @@ export type DispatchAttested = z.infer<typeof DispatchAttestedSchema>;
 export const SeatDisqualifierSchema = z.enum([
   "bound",
   "launching",
-  "decommissioned",
+  "abandoned",
   "reset_pending",
   "dead",
   "foreign_process",
@@ -306,7 +306,7 @@ export const DispatchRefusedSchema = z.object({
     "no_free_seat",
     "seat_bound",
     "seat_launching",
-    "seat_decommissioned",
+    "seat_abandoned",
     "seat_reset_pending",
     "pane_dead",
     "seat_generation_unattested",

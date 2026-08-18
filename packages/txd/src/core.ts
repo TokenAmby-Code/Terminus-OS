@@ -200,6 +200,15 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// A normal refusal is proof that rollback restored the pre-call composer.
+// Failed rollback is deliberately different: its byte count is possible live
+// composer effect and must remain visible in journal truth for recovery.
+function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
+  return outcome.verdict === 'staged' || outcome.verdict === 'composer_rollback_failed'
+    ? outcome.bytes
+    : 0;
+}
+
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
@@ -371,7 +380,7 @@ export class Daemon {
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
       // One candidate's seat-level truth, first disqualifier in a fixed order.
       const disqualify = (candidate: string): Exclude<SeatDisqualifier, 'foreign_process'> | null => {
-        if (projections.decommissionedSeats.has(candidate)) return 'decommissioned';
+        if (projections.abandonedSeats.has(candidate)) return 'abandoned';
         if (pendingResetSeats.has(candidate)) return 'reset_pending';
         if (bound.has(candidate)) return 'bound';
         if (launching.has(candidate)) return 'launching';
@@ -382,7 +391,7 @@ export class Daemon {
       const idle = (candidate: string) => workloads.get(candidate)?.idle ?? false;
       let seatId: string;
       let mintedStackSeat: string | null = null;
-      const decommissionMintedStackSeat = async (): Promise<void> => {
+      const abandonMintedStackSeat = async (): Promise<void> => {
         if (!mintedStackSeat) return;
         const seat = mintedStackSeat;
         await this.tmux.killSeat(seat);
@@ -392,7 +401,7 @@ export class Daemon {
         await this.store.append({
           entity_type: 'seat',
           entity_id: seat,
-          event_type: 'reg.seat_decommissioned',
+          event_type: 'reg.seat_abandoned',
           payload: {},
           provenance: this.prov('observer', null),
           occurred_at: this.now(),
@@ -417,7 +426,7 @@ export class Daemon {
             occurred_at: this.now(),
           });
         } catch (error) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           throw error;
         }
         return candidate;
@@ -486,7 +495,7 @@ export class Daemon {
             const reason = ({
               bound: 'seat_bound',
               launching: 'seat_launching',
-              decommissioned: 'seat_decommissioned',
+              abandoned: 'seat_abandoned',
               reset_pending: 'seat_reset_pending',
               dead: 'pane_dead',
             } as const)[state];
@@ -499,7 +508,7 @@ export class Daemon {
       try {
         const paneGeneration = await this.tmux.seatGeneration(seatId);
         if (!paneGeneration) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_generation_unattested');
           return;
         }
@@ -521,7 +530,7 @@ export class Daemon {
           ...(sshTarget ? { sshTarget } : {}),
           ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
         }))) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_start_failed');
           return;
         }
@@ -571,7 +580,7 @@ export class Daemon {
             });
           }
         }
-        await decommissionMintedStackSeat();
+        await abandonMintedStackSeat();
         throw error;
       }
     });
@@ -1409,13 +1418,21 @@ export class Daemon {
     // reached txd with the hook, and timed out before txd could admit it.
     const outcomes: Array<{ plan: typeof plans[number]; sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>> }> = [];
     for (const plan of plans) {
-      const sent = await this.tmux.sendVerifiedToSeat(
-        plan.target.seat_id,
-        prepared.messageId,
-        plan.frame,
-        prepared.renderedIntent?.tabAfter,
-        plan.binding.engine ?? undefined,
-      );
+      // The binding's opaque pane generation is the physical transaction
+      // witness. Re-attest immediately before mutation: a replaced/unreadable
+      // pane refuses with zero effect instead of letting a stale logical seat
+      // address type into whatever now occupies that name.
+      const generation = await this.tmux.seatGeneration(plan.target.seat_id);
+      const sent = generation !== plan.binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(
+          plan.target.seat_id,
+          prepared.messageId,
+          plan.frame,
+          prepared.renderedIntent?.tabAfter,
+          plan.binding.engine ?? undefined,
+          plan.binding.pane_generation,
+        );
       outcomes.push({ plan, sent });
     }
 
@@ -1425,7 +1442,7 @@ export class Daemon {
       for (const { plan, sent } of outcomes) {
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
-            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: sent.bytes,
+            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: plan.frame,
             receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
@@ -1456,9 +1473,12 @@ export class Daemon {
       const binding = proj.currentBindings.find((row) => row.registered
         && row.agent_id === req.target_agent_id && row.seat_id === prepared.binding.seat_id);
       if (!binding) throw new Error(`target_binding_changed: ${req.target_agent_id}`);
-      const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined);
+      const generation = await this.tmux.seatGeneration(binding.seat_id);
+      const sent = generation !== binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined, binding.pane_generation);
       await this.store.append({ entity_type: 'message', entity_id: prepared.correlationId, event_type: 'act.agent_input_injected',
-        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict, input_class: 'machine_feed' },
+        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent), submit_verdict: sent.verdict, input_class: 'machine_feed' },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
       // The HTTP success is lifecycled's acknowledgement boundary. Anything
       // short of a verified Enter must fail the request so its durable bus
@@ -1503,7 +1523,7 @@ export class Daemon {
       // No registered binding answers to this identity, so the only reading
       // left is a bare declared seat. Anything else is absent — loud.
       if (!TXD_ESTATE.includes(req.target)) throw new Error(`identity_absent: ${req.target}`);
-      if (proj.decommissionedSeats.has(req.target)) throw new Error(`seat_decommissioned: ${req.target}`);
+      if (proj.abandonedSeats.has(req.target)) throw new Error(`seat_abandoned: ${req.target}`);
       // A binding mid-birth is an agent arriving; racing its registration
       // with a shell line would type into its wrapper.
       if (proj.currentBindings.some((binding) => binding.seat_id === req.target)) {
@@ -1522,14 +1542,17 @@ export class Daemon {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === prepared.binding.agent_id && row.seat_id === prepared.binding.seat_id);
         if (!binding) throw new Error(`target_binding_changed: ${req.target}`);
-        const sent = await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!);
+        const generation = await this.tmux.seatGeneration(binding.seat_id);
+        const sent = generation !== binding.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!, binding.pane_generation);
         // Payload holds dumb correlation facts only. The command LINE never
         // enters the append-only stream: like inject's text, it can carry
         // credentials, and an event cannot be redacted later — the digest
         // correlates without persisting the bytes.
         const event = await this.store.append({ entity_type: 'message', entity_id: runId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
+            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'harness_shell', command_digest: sha256(req.command),
           },
           provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
@@ -1659,7 +1682,10 @@ export class Daemon {
     if (events.some((e) => e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === askId && e.payload.target_agent_id === targetAgent)) return;
     const accepted = events.find((e) => e.entity_id === snapshot?.payload.message_id && e.event_type === 'reg.comm_accepted');
     const subscriber = String(accepted?.payload.source_agent_id ?? '');
-    const assertionId = source === 'stop' ? `${stopEventId ?? 'stop'}:${subscriber}:${targetAgent}` : `${askId}:${targetAgent}`;
+    // Callback identity belongs to the ask. One lifecycle stop may satisfy
+    // several asks that were already open, but it cannot become a reusable
+    // subscriber/target fact that future asks inherit.
+    const assertionId = `${askId}:${targetAgent}`;
     if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_callback_asserted')) return;
     await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_callback_asserted',
       payload: { ask_id: askId, subscriber_agent_id: subscriber, target_agent_id: targetAgent, content, source, stop_event_id: stopEventId }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
@@ -1770,10 +1796,13 @@ export class Daemon {
         if (!sender) continue;
         const correlationId = crypto.randomUUID();
         const renderedFrame = `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`;
-        const sent = await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined);
+        const generation = await this.tmux.seatGeneration(sender.seat_id);
+        const sent = generation !== sender.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined, sender.pane_generation);
         await this.store.append({ entity_type: 'message', entity_id: correlationId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: sent.bytes,
+            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'delivery_confirmation',
             message_ids: messageIds, rendered_frame: renderedFrame,
           }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
@@ -1951,10 +1980,9 @@ export class Daemon {
       const targets = snapshot.payload.targets as CommTarget[];
       const accepted = events.find((e) => e.entity_id === snapshot.payload.message_id && e.event_type === 'reg.comm_accepted');
       if (accepted?.payload.source_agent_id !== req.subscriber_agent_id) throw new Error('ask_subscriber_mismatch');
-      const targetIds = new Set(targets.map((t) => t.agent_id));
-      const callbacks: CommCallback[] = events.filter((e) => e.event_type === 'act.comm_callback_asserted' && (
-        e.payload.ask_id === req.ask_id || (e.payload.source === 'stop' && e.payload.subscriber_agent_id === req.subscriber_agent_id && targetIds.has(String(e.payload.target_agent_id)))
-      )).map((e) => ({
+      const callbacks: CommCallback[] = events.filter((e) =>
+        e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === req.ask_id,
+      ).map((e) => ({
         target: targets.find((t) => t.agent_id === e.payload.target_agent_id)!, content: String(e.payload.content), assertion_event_id: e.seq, source: e.payload.source as 'reply' | 'stop',
       }));
       const done = new Set(callbacks.map((c) => c.target.agent_id));
@@ -2018,13 +2046,13 @@ export class Daemon {
           reason: `scoped_reset_pending: ${req.seat_id}`,
         };
       }
-      if (proj.decommissionedSeats.has(req.seat_id)) {
+      if (proj.abandonedSeats.has(req.seat_id)) {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `seat_decommissioned: ${req.seat_id}`,
+          reason: `seat_abandoned: ${req.seat_id}`,
         };
       }
       const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
@@ -2171,6 +2199,8 @@ export class Daemon {
       if (generation === 'foreign') {
         throw new Error('txd refused non-canonical existing tmux estate');
       }
+
+      await this.reconcileDeadStackSeatsUnlocked(null);
 
       await this.recoverScopedResets();
 
@@ -2573,7 +2603,7 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     if (isStackSeat(binding.seat_id)) {
-      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_decommissioned', payload: {}, provenance: prov, occurred_at });
+      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_abandoned', payload: {}, provenance: prov, occurred_at });
     }
     await this.store.appendAll(inputs);
     await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
@@ -2656,6 +2686,7 @@ export class Daemon {
   async reconcile(transportReceipt: string | null = null): Promise<ReconcileResponse> {
     let councilRebuilt = false;
     const response = await this.locked(async () => {
+      await this.tmux.reconcilePresentation();
       councilRebuilt = await this.recoverScopedResets();
       const events = await this.store.readAll();
       const t0 = performance.now();
@@ -2742,7 +2773,7 @@ export class Daemon {
         }
       }
       // Phantom seat: the ledger still projects a pane tmux does not report at
-      // all. `paneBySeat` is only ever removed from by reg.seat_decommissioned —
+      // all. `paneBySeat` is only ever removed from by reg.seat_abandoned —
       // reg.seat_cleared clears the binding and leaves the pane axis untouched
       // by design, and reg.process_reaped has no pane effect — so a seat that
       // was reaped and cleared, or quietly dropped from the estate declaration,
@@ -2759,7 +2790,7 @@ export class Daemon {
         await flag(
           row.seat_id,
           'pane_absent',
-          'seat_decommissioned',
+          'seat_abandoned',
           `seat is projected (pane=${row.pane}, unbound) but tmux reports no pane for it — every estate read counts a seat that does not exist`,
         );
       }
@@ -2818,7 +2849,7 @@ export class Daemon {
         const contradiction = proj.openContradictions.find((candidate) =>
           candidate.entity_id === seat
           && candidate.kind === 'pane_absent'
-          && candidate.missing_attestation === 'seat_decommissioned');
+          && candidate.missing_attestation === 'seat_abandoned');
         if (!contradiction) return refused(`seat_not_flagged_absent: ${seat}`);
       }
       const occurred_at = this.now();
@@ -2826,7 +2857,7 @@ export class Daemon {
       await this.store.appendAll(req.seats.map((seat) => ({
         entity_type: 'seat' as const,
         entity_id: seat,
-        event_type: 'reg.seat_decommissioned',
+        event_type: 'reg.seat_abandoned',
         payload: { contradiction: 'pane_absent' },
         provenance,
         occurred_at,
@@ -3061,6 +3092,12 @@ export class Daemon {
       let reconstructed = false;
       let reason: string | null = null;
       let faultedPages = 0;
+      const retiredStackSeats = await this.reconcileDeadStackSeatsUnlocked(transportReceipt, new Set(pages));
+      if (retiredStackSeats.length > 0) {
+        reset_seats.push(...retiredStackSeats);
+        reconstructed = true;
+        faultedPages += new Set(retiredStackSeats.map((seat) => seat.split(':', 1)[0])).size;
+      }
       for (const target of pages) {
         const expected = [...TXD_WINDOWS[target]];
         const pageObserved = observed.filter((seat) => seat.seat_id.startsWith(`${target}:`));
@@ -3136,6 +3173,46 @@ export class Daemon {
     return inputs;
   }
 
+  private async reconcileDeadStackSeatsUnlocked(
+    transportReceipt: string | null,
+    pages: ReadonlySet<TxdPage> | null = null,
+  ): Promise<string[]> {
+    const observed = await this.tmux.listSeats();
+    const paneBySeat = new Map(observed.map((seat) => [seat.seat_id, seat.pane]));
+    const proj = await this.projections();
+    const candidates = new Set<string>();
+    for (const seat of observed) {
+      const page = seat.seat_id.split(':', 1)[0] as TxdPage;
+      if (seat.pane === 'dead' && isStackSeat(seat.seat_id) && !TXD_ESTATE.includes(seat.seat_id)
+        && (pages === null || pages.has(page))) candidates.add(seat.seat_id);
+    }
+    for (const binding of proj.currentBindings) {
+      const page = binding.seat_id.split(':', 1)[0] as TxdPage;
+      if (isStackSeat(binding.seat_id) && !TXD_ESTATE.includes(binding.seat_id)
+        && paneBySeat.get(binding.seat_id) !== 'live' && (pages === null || pages.has(page))) {
+        candidates.add(binding.seat_id);
+      }
+    }
+    const retired: string[] = [];
+    for (const seat of candidates) {
+      const binding = proj.currentBindings.find((candidate) => candidate.seat_id === seat);
+      if (binding) {
+        if (!(await this.executeClose(binding, transportReceipt))) continue;
+      } else {
+        await this.tmux.killSeat(seat);
+        if ((await this.tmux.listSeats()).some((row) => row.seat_id === seat)) {
+          throw new Error(`txd could not verify dynamic stack seat cleanup for ${seat}`);
+        }
+        await this.store.append({
+          entity_type: 'seat', entity_id: seat, event_type: 'reg.seat_abandoned', payload: {},
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+        });
+      }
+      retired.push(seat);
+    }
+    return retired;
+  }
+
   async executeEstateRotation(): Promise<void> {
     // The whole server dies: every staged pane run's completion signal with it.
     for (const seatId of this.paneRuns.keys()) this.abortPaneRuns(seatId);
@@ -3174,7 +3251,8 @@ export class Daemon {
     return {
       ok: open === 0
         && tmux_reachable
-        && (activation_pending || tints.every((tint) => tint.state === 'ready')),
+        && estate_generation === 'canonical'
+        && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,

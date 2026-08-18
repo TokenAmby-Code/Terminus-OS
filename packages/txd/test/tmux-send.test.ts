@@ -400,7 +400,7 @@ test('behavioral pin: a fresh Claude pasted-text attachment stages only in its o
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(0);
 });
 
-test('behavioral pin: a failed submit removes a fresh Claude pasted-text attachment as one object', async () => {
+test('behavioral pin: a failed submit removes a fresh Claude pasted-text attachment with zero residual effect', async () => {
   const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n' + 'x'.repeat(1200);
   const baseline = 'transcript\n\n❯ \n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
   let attachment = false;
@@ -446,10 +446,53 @@ test('behavioral pin: a failed submit removes a fresh Claude pasted-text attachm
     'claude',
   );
 
-  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'seat_unresolved' });
+  expect(outcome).toEqual({ bytes: 0, verdict: 'submit_failed' });
   expect(attachment).toBe(false);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))
     .map((args) => Number(args[args.indexOf('-N') + 1]))).toEqual([1]);
+});
+
+test('behavioral pin: event 50983 rollback failure is not mislabeled as an unresolved seat', async () => {
+  const frame = `/message ${'x'.repeat(596)}`;
+  const prefix = '/message';
+  const baseline = 'transcript\n\n❯ \n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
+  let composer = '';
+  const buffers = new Map<string, string>();
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tcouncil:fabricator-general\n', stderr: '' };
+    if (args[0] === 'load-buffer') buffers.set(args[2]!, new TextDecoder().decode(stdin));
+    if (args[0] === 'paste-buffer') composer += buffers.get(args[args.indexOf('-b') + 1]!) ?? '';
+    if (args[0] === 'send-keys' && args.at(-1) === 'Tab') return { code: 0, stdout: '', stderr: '' };
+    if (args[0] === 'send-keys' && args.includes('BSpace')) {
+      return { code: 1, stdout: '', stderr: 'rollback refused' };
+    }
+    if (args[0] === 'capture-pane') return {
+      code: 0,
+      stdout: composer === '' ? baseline : baseline.replace('❯ ', `❯ ${composer}`),
+      stderr: '',
+    };
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10,
+    observePaneOutput: async () => ({
+      next: async () => { throw new Error('no repaint event'); },
+      close: () => undefined,
+    }),
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat(
+    'council:fabricator-general',
+    '34766e7c-9e06-4a9c-b12a-52ca5f6d440f',
+    frame,
+    prefix,
+    'claude',
+  );
+
+  expect(Buffer.byteLength(frame)).toBe(605);
+  expect(outcome).toEqual({ bytes: 605, verdict: 'composer_rollback_failed' });
+  expect(composer).toBe(frame);
 });
 
 test('behavioral pin: a pre-existing Claude pasted-text attachment refuses before any pane input', async () => {
@@ -538,7 +581,7 @@ test('behavioral pin: malformed Claude attachment spacing never submits in the f
   });
 
   expect(await tmux.sendVerifiedToSeat('palace:S', messageId, frame, undefined, 'claude'))
-    .toEqual({ bytes: Buffer.byteLength(frame), verdict: 'composer_corrupted' });
+    .toEqual({ bytes: 0, verdict: 'composer_corrupted' });
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
 
@@ -753,10 +796,49 @@ test('behavioral pin: a failed bulk paste submits no prefix and fails loudly', a
 
   const outcome = await tmux.sendVerifiedToSeat('palace:S', 'correlation', 'x'.repeat(4096));
 
-  expect(outcome).toEqual({ bytes: 0, verdict: 'seat_unresolved' });
+  expect(outcome).toEqual({ bytes: 0, verdict: 'transport_failed' });
   expect(composer).toBe('');
   expect(calls.some((args) => args[0] === 'delete-buffer')).toBe(true);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
+});
+
+test('a pane lost after staging reports the unverified composer effect instead of unresolved-seat fiction', async () => {
+  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nall or nothing';
+  let composer = '';
+  let loaded = '';
+  let capture = 0;
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'load-buffer') {
+      loaded = new TextDecoder().decode(stdin);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'paste-buffer') {
+      composer += loaded;
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'capture-pane') {
+      capture += 1;
+      if (capture === 1) return { code: 0, stdout: '> \n', stderr: '' };
+      if (capture === 2) return { code: 0, stdout: `> ${composer}\n`, stderr: '' };
+      return { code: 1, stdout: '', stderr: 'target pane vanished' };
+    }
+    if (args[0] === 'send-keys' && args.at(-1) === 'Enter') {
+      return { code: 1, stdout: '', stderr: 'target pane vanished' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
+  });
+
+  expect(await tmux.sendVerifiedToSeat(
+    'palace:S',
+    '11111111-1111-4111-8111-111111111111',
+    frame,
+  )).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'composer_rollback_failed' });
 });
 
 test('behavioral pin: a failed verified send attests byte-identical restoration to its empty baseline', async () => {

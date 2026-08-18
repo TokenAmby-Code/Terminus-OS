@@ -202,6 +202,18 @@ test('a failed composer stage refuses loud and still records the attempt fact', 
   expect(injected[0]!.payload).toMatchObject({ submit_verdict: 'composer_corrupted', input_class: 'harness_shell' });
 });
 
+test('a replaced pane generation refuses an agent run before staging', async () => {
+  const { store, tmux, d } = estate();
+  await register(d, tmux, 'council:custodes', crypto.randomUUID(), 'custodes', 'claude');
+  tmux.forceSeatGeneration('council:custodes', 'replacement-generation');
+
+  await expect(d.run({ schema_version: SCHEMA_VERSION, target: 'custodes', command: 'echo x' }))
+    .rejects.toThrow('run_not_staged: seat_unresolved');
+  expect(tmux.agentComposerRuns()).toEqual([]);
+  expect((await store.readAll()).find((event) => event.event_type === 'act.agent_input_injected')?.payload)
+    .toMatchObject({ bytes: 0, submit_verdict: 'seat_unresolved' });
+});
+
 test('a pane replaced mid-run fails that run loud instead of hanging on a dead signal', async () => {
   const { tmux, d } = estate();
   await tmux.createSeat('palace:E');
