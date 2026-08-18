@@ -303,3 +303,29 @@ test('behavioral pin: a draft-present send enqueues whole and drains on the exis
     target_agent_id: 'worker', submit_verdict: 'staged', drain: true,
   });
 });
+
+test('behavioral pin: a queued Claude drain whose Enter has no effect remains submit_unverified, not corrupted', async () => {
+  const { tmux, d, events } = await fixture();
+  let occupied = true;
+  const control = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string):
+      Promise<{ bytes: number; verdict: 'composer_draft_present' | 'submit_unverified' }>;
+  };
+  control.sendVerifiedToSeat = async (_seat, _id, text) => occupied
+    ? { bytes: 0, verdict: 'composer_draft_present' }
+    : { bytes: Buffer.byteLength(text), verdict: 'submit_unverified' };
+
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    message: 'Claude retained Enter step', ask: false, reply: false,
+  });
+  occupied = false;
+  const drained = await d.commRedrive({
+    schema_version: SCHEMA_VERSION, message_id: accepted.message_id, target_agent_id: 'worker',
+  });
+
+  expect(drained.outcome).toBe('submit_unverified');
+  expect((await events('act.comm_bytes_sent')).at(-1)?.payload).toMatchObject({
+    submit_verdict: 'submit_unverified', drain: true,
+  });
+});

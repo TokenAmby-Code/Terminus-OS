@@ -1854,7 +1854,7 @@ export class Daemon {
           ? 'enter_redriven'
           : sent.verdict === 'composer_draft_present'
             ? 'queued'
-            : sent.verdict === 'seat_unresolved' || sent.verdict === 'frame_absent'
+            : sent.verdict === 'seat_unresolved' || sent.verdict === 'frame_absent' || sent.verdict === 'submit_unverified'
               ? sent.verdict
               : 'composer_corrupted';
       } else {
