@@ -348,7 +348,13 @@ test('behavioral pin: a replaced pane generation refuses before comm bytes cross
     .toMatchObject({ bytes: 0, submit_verdict: 'seat_unresolved' });
 });
 
-for (const [journalEvent, claimedBytes] of [[49482, 93], [49776, 564], [50898, 1219]] as const) {
+for (const [journalEvent, claimedBytes] of [
+  [49482, 93],
+  [49776, 564],
+  [50898, 1219],
+  [53046, 1465],
+  [53084, 903],
+] as const) {
   test(`behavioral pin: event ${journalEvent} unresolved adapter bytes can never become journal truth`, async () => {
     const { store, tmux, d } = await fixture(async () => undefined);
     tmux.sendVerifiedToSeat = async () => ({ bytes: claimedBytes, verdict: 'seat_unresolved' as const });
