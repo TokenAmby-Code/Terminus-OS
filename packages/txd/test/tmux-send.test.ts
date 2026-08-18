@@ -253,14 +253,16 @@ for (const profile of [
   test(`behavioral pin: ${profile.engine} idle suggestion paint is a known-empty verified-send baseline`, async () => {
     const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nnew frame';
     let capture = 0;
+    let submitted = false;
     const calls: string[][] = [];
     const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
       calls.push(args);
       if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
       if (args[0] === 'capture-pane') {
         capture += 1;
-        return { code: 0, stdout: capture === 1 ? profile.baseline : `› ${frame}\n`, stderr: '' };
+        return { code: 0, stdout: capture === 1 ? profile.baseline : submitted ? '• Working\n' : `› ${frame}\n`, stderr: '' };
       }
+      if (args[0] === 'send-keys' && args.at(-1) === 'Enter') submitted = true;
       return { code: 0, stdout: '', stderr: '' };
     };
     const tmux = new RealTmux('scratch', {
@@ -362,14 +364,16 @@ test('behavioral pin: a fresh Claude pasted-text attachment stages only in its o
   ].join('\n');
   const attachment = baseline.replace('❯ ', '❯ [Pasted text #1 +81 lines]');
   let capture = 0;
+  let submitted = false;
   const calls: string[][] = [];
   const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
     calls.push(args);
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
     if (args[0] === 'capture-pane') {
       capture += 1;
-      return { code: 0, stdout: capture === 1 ? baseline : attachment, stderr: '' };
+      return { code: 0, stdout: capture === 1 ? baseline : submitted ? '✻ Working\n' : attachment, stderr: '' };
     }
+    if (args[0] === 'send-keys' && args.at(-1) === 'Enter') submitted = true;
     return { code: 0, stdout: '', stderr: '' };
   };
   const tmux = new RealTmux('scratch', {
@@ -816,6 +820,55 @@ test('behavioral pin: a failed verified send attests byte-identical restoration 
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(1);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
   expect(calls.filter((args) => args[0] === 'capture-pane')).toHaveLength(3);
+});
+
+test('behavioral pin: Claude Enter success without composer clearance is retained, not hollow-green staged', async () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\nClaude submit-effect specimen`;
+  const baseline = 'transcript\n\n❯ \n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
+  let composer = '';
+  let loaded = '';
+  let repaints = 0;
+  const calls: string[][] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args, stdin) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'load-buffer') { loaded = new TextDecoder().decode(stdin); return { code: 0, stdout: '', stderr: '' }; }
+      if (args[0] === 'paste-buffer') { composer = loaded; return { code: 0, stdout: '', stderr: '' }; }
+      if (args[0] === 'capture-pane') return { code: 0, stdout: baseline.replace('❯ ', `❯ ${composer}`), stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => ({
+      next: async () => { repaints += 1; },
+      close: () => undefined,
+    }),
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat('palace:S', messageId, frame, undefined, 'claude');
+
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'submit_unverified' });
+  expect(repaints).toBeGreaterThanOrEqual(2);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(0);
+  expect(composer).toBe(frame);
+});
+
+test('behavioral pin: redrive Enter success without composer clearance is also unverified', async () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\nredrive submit-effect specimen`;
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'capture-pane') return { code: 0, stdout: `› ${frame}\n`, stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
+  });
+
+  expect(await tmux.redriveSeatComm('palace:S', messageId, frame)).toBe('submit_unverified');
 });
 
 for (const profile of [

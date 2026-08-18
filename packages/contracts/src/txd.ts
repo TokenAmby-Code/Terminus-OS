@@ -213,6 +213,7 @@ export const ACT_EVENT_NAMES = [
   'comm_delivery_asserted',
   'comm_delivery_confirmation_dead_lettered',
   'comm_redrive_attempted',
+  'comm_draft_discarded',
   'comm_delivery_failed',
   'comm_watch_unarmed',
   'composer_interactive_announced',
@@ -262,6 +263,7 @@ export const EVENT_TYPES = [
   'act.comm_delivery_asserted',
   'act.comm_delivery_confirmation_dead_lettered',
   'act.comm_redrive_attempted',
+  'act.comm_draft_discarded',
   'act.comm_delivery_failed',
   'act.comm_watch_unarmed',
   'act.composer_interactive_announced',
@@ -782,18 +784,29 @@ export const CommTransportRefusedReceiptSchema = z.object({
   source_agent_id: CanonicalIdSchema,
   targets: z.array(CommTargetSchema),
   bytes_sent: z.number().int().nonnegative(),
-  submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved', 'multiple']),
+  submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'submit_unverified', 'seat_unresolved', 'multiple']),
   refusals: z.array(z.object({
     target: CommTargetSchema,
     bytes: z.number().int().nonnegative(),
-    submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved']),
+    submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'submit_unverified', 'seat_unresolved']),
     event_id: z.number().int(),
   })).min(1),
+  event_ids: z.array(z.number().int()),
+});
+export const CommQueuedReceiptSchema = z.object({
+  ok: z.literal(true),
+  schema_version: z.number().int(),
+  phase: z.literal('queued'),
+  message_id: CanonicalIdSchema,
+  source_agent_id: CanonicalIdSchema,
+  targets: z.array(CommTargetSchema),
+  bytes_sent: z.literal(0),
   event_ids: z.array(z.number().int()),
 });
 export const CommReceiptSchema = z.discriminatedUnion('phase', [
   CommDeliveryConfirmedReceiptSchema,
   CommBytesSentReceiptSchema,
+  CommQueuedReceiptSchema,
   CommTransportRefusedReceiptSchema,
 ]);
 export type CommReceipt = z.infer<typeof CommReceiptSchema>;
@@ -809,12 +822,28 @@ export const CommRedriveRequestSchema = z.object({
   target_agent_id: z.string().min(1),
 });
 export type CommRedriveRequest = z.infer<typeof CommRedriveRequestSchema>;
-export const COMM_REDRIVE_OUTCOMES = ['enter_redriven', 'already_delivered', 'composer_corrupted', 'frame_absent', 'seat_unresolved'] as const;
+export const COMM_REDRIVE_OUTCOMES = ['enter_redriven', 'already_delivered', 'queued', 'submit_unverified', 'composer_corrupted', 'frame_absent', 'seat_unresolved'] as const;
 export const CommRedriveResponseSchema = z.object({
   ok: z.literal(true), message_id: z.string(), target_agent_id: z.string(),
   outcome: z.enum(COMM_REDRIVE_OUTCOMES),
 });
 export type CommRedriveResponse = z.infer<typeof CommRedriveResponseSchema>;
+
+// Recovery names a logical target; txd selects the retained message from its
+// journal. The CLI obtains source_agent_id only from AGENT_ID.
+export const CommRecoverRequestSchema = z.object({
+  schema_version: z.number().int(),
+  source_agent_id: CanonicalIdSchema,
+  target: CanonicalIdSchema,
+  discard_corrupted: z.boolean().default(false),
+}).strict();
+export type CommRecoverRequest = z.infer<typeof CommRecoverRequestSchema>;
+export const COMM_RECOVER_OUTCOMES = [...COMM_REDRIVE_OUTCOMES, 'discarded', 'discard_failed'] as const;
+export const CommRecoverResponseSchema = z.object({
+  ok: z.boolean(), message_id: z.string(), target_agent_id: z.string(),
+  outcome: z.enum(COMM_RECOVER_OUTCOMES), event_ids: z.array(z.number().int()),
+});
+export type CommRecoverResponse = z.infer<typeof CommRecoverResponseSchema>;
 
 export const CommWaitRequestSchema = z.object({
   schema_version: z.number().int(), ask_id: CanonicalIdSchema, subscriber_agent_id: CanonicalIdSchema,

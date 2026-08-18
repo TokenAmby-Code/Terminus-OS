@@ -110,6 +110,26 @@ function decodedPush(response: ClipboardPushResponse): string {
 export const COMMANDS: readonly Command[] = [
   { path: ['comm'], summary: '<identity> command=<name>|skill=<name> [-- args]; caller supplies no /, $, or engine flag', run: comm },
   {
+    path: ['comm', 'recover'],
+    summary: '<logical-target> [--discard-corrupted] — recover the journal-backed retained draft',
+    run: async ({ args, request, write }) => {
+      const discardCorrupted = args.includes('--discard-corrupted');
+      const positional = args.filter((arg) => arg !== '--discard-corrupted');
+      if (positional.length !== 1 || positional[0]!.startsWith('-')
+          || args.some((arg) => arg.startsWith('-') && arg !== '--discard-corrupted')) {
+        throw new Error('usage: tx comm recover <logical-target> [--discard-corrupted]');
+      }
+      const result = await request('POST', '/agents/comm/recover', {
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: agentSource('comm recover'),
+        target: positional[0],
+        discard_corrupted: discardCorrupted,
+      }) as { ok: boolean };
+      write(result);
+      return result.ok ? 0 : 1;
+    },
+  },
+  {
     // The second phase of a comm, asked for rather than waited on. `tx comm`
     // still quick-releases; this redeems the message_id it returned for the
     // delivery fact whenever the caller wants to know.

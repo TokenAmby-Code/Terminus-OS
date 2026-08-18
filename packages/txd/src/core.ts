@@ -33,6 +33,8 @@ import {
   type CommReceipt,
   type CommRedriveRequest,
   type CommRedriveResponse,
+  type CommRecoverRequest,
+  type CommRecoverResponse,
   type CommTarget,
   type CommWaitRequest,
   type CommWaitResponse,
@@ -1419,7 +1421,7 @@ export class Daemon {
       outcomes.push({ plan, sent });
     }
 
-    return this.locked(async () => {
+    const accepted: CommAccepted = await this.locked(async () => {
       const event_ids = [...prepared.eventIds];
       let allStaged = true;
       for (const { plan, sent } of outcomes) {
@@ -1437,6 +1439,26 @@ export class Daemon {
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
         targets: prepared.targets, staged: allStaged, event_ids };
     });
+    // A non-zero refusal means pane mutation happened even though Enter could
+    // not be attested. Re-drive immediately from the durable accepted frame;
+    // this is downstream recovery and never retypes or guesses at the draft.
+    for (const { plan, sent } of outcomes) {
+      if (sent.verdict === 'staged' || sent.bytes === 0) continue;
+      const outcome = await this.tmux.redriveSeatComm(plan.target.seat_id, prepared.messageId, plan.frame);
+      const event = await this.locked(() => this.store.append({
+        entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_redrive_attempted',
+        payload: {
+          message_id: prepared.messageId,
+          target_agent_id: plan.target.agent_id,
+          seat_id: plan.target.seat_id,
+          trigger: 'retained_after_send',
+          outcome,
+        },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+      }));
+      accepted.event_ids.push(event.seq);
+    }
+    return accepted;
   }
 
   async inject(req: { schema_version: number; target_agent_id: string; text: string }, transportReceipt: string | null = null) {
@@ -1798,7 +1820,7 @@ export class Daemon {
   commRedrive(req: CommRedriveRequest, transportReceipt: string | null = null): Promise<CommRedriveResponse> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const { accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
+      const { events, accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
       const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
       // The assertion arriving first is the good ending, not an error — and
       // the pane is not touched, because there is nothing left to submit.
@@ -1810,12 +1832,137 @@ export class Daemon {
       const frame = accepted.payload.kind === 'command' || accepted.payload.kind === 'skill'
         ? String(accepted.payload.rendered_frame)
         : commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
-      const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
+      const latestSend = [...events].reverse().find((event) => event.entity_id === req.message_id
+        && event.event_type === 'act.comm_bytes_sent'
+        && event.payload.target_agent_id === req.target_agent_id);
+      let outcome: CommRedriveResponse['outcome'];
+      if (latestSend?.payload.submit_verdict === 'composer_draft_present') {
+        const intent = accepted.payload.intent as CommIntent | undefined;
+        const tabAfter = intent ? renderCommIntent(intent, binding.engine!).tabAfter : undefined;
+        const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, req.message_id, frame, tabAfter, binding.engine!);
+        await this.store.append({
+          entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_bytes_sent',
+          payload: {
+            target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
+            submit_verdict: sent.verdict, kind: accepted.payload.kind ?? 'message',
+            name: accepted.payload.name ?? null, rendered_frame: frame, drain: true,
+            receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
+          },
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+        });
+        outcome = sent.verdict === 'staged'
+          ? 'enter_redriven'
+          : sent.verdict === 'composer_draft_present'
+            ? 'queued'
+            : sent.verdict === 'seat_unresolved' || sent.verdict === 'frame_absent'
+              ? sent.verdict
+              : 'composer_corrupted';
+      } else {
+        outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
+      }
       await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
         payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
       return { ...base, outcome };
     });
+  }
+
+  async commRecover(
+    req: CommRecoverRequest,
+    transportReceipt: string | null = null,
+  ): Promise<CommRecoverResponse> {
+    const prepared = await this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      const events = await this.store.readAll();
+      const proj = buildProjections(events);
+      if (!proj.currentBindings.some((binding) => binding.registered && binding.agent_id === req.source_agent_id)) {
+        throw new Error('source_not_registered');
+      }
+      const matches = proj.currentBindings.filter((binding) => binding.registered && (
+        binding.agent_id === req.target || binding.persona === req.target || binding.seat_id === req.target
+      ));
+      if (matches.length === 0) throw new Error(`identity_absent: ${req.target}`);
+      if (matches.length > 1) throw new Error(AMBIGUOUS_IDENTITY(req.target));
+      const binding = matches[0]!;
+      if (!binding.agent_id || !binding.engine) throw new Error(`engine_unattested: ${req.target}`);
+      const targetAgentId = binding.agent_id;
+      const engine = binding.engine;
+      const discarded = new Set(events
+        .filter((event) => event.event_type === 'act.comm_draft_discarded'
+          && event.payload.target_agent_id === targetAgentId
+          && event.payload.outcome === 'discarded')
+        .map((event) => event.entity_id));
+      const candidate = [...events].reverse().find((event) =>
+        event.event_type === 'act.comm_bytes_sent'
+        && event.payload.target_agent_id === targetAgentId
+        && Number(event.payload.bytes) > 0
+        && event.payload.submit_verdict !== 'staged'
+        && typeof event.payload.rendered_frame === 'string'
+        && !discarded.has(event.entity_id)
+        && !events.some((other) => other.event_type === 'act.comm_delivery_asserted'
+          && other.payload.message_id === event.entity_id
+          && other.payload.target_agent_id === targetAgentId));
+      if (!candidate) throw new Error(`retained_comm_absent: ${req.target}`);
+      return {
+        binding,
+        targetAgentId,
+        engine,
+        messageId: candidate.entity_id,
+        frame: String(candidate.payload.rendered_frame),
+        bytes: Number(candidate.payload.bytes),
+      };
+    });
+
+    const outcome = await this.tmux.redriveSeatComm(
+      prepared.binding.seat_id,
+      prepared.messageId,
+      prepared.frame,
+    );
+    const attempt = await this.locked(() => this.store.append({
+      entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_redrive_attempted',
+      payload: {
+        message_id: prepared.messageId,
+        target_agent_id: prepared.targetAgentId,
+        seat_id: prepared.binding.seat_id,
+        source_agent_id: req.source_agent_id,
+        trigger: 'operator_recovery',
+        outcome,
+      },
+      provenance: this.prov('wrapper', transportReceipt), occurred_at: this.now(),
+    }));
+    if (outcome !== 'composer_corrupted' || !req.discard_corrupted) {
+      return {
+        ok: outcome === 'enter_redriven',
+        message_id: prepared.messageId,
+        target_agent_id: prepared.targetAgentId,
+        outcome,
+        event_ids: [attempt.seq],
+      };
+    }
+
+    const discardOutcome = await this.tmux.discardSeatComposer(
+      prepared.binding.seat_id,
+      prepared.engine,
+    );
+    const discarded = await this.locked(() => this.store.append({
+      entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_draft_discarded',
+      payload: {
+        message_id: prepared.messageId,
+        target_agent_id: prepared.targetAgentId,
+        seat_id: prepared.binding.seat_id,
+        source_agent_id: req.source_agent_id,
+        bytes: prepared.bytes,
+        outcome: discardOutcome,
+      },
+      provenance: this.prov('wrapper', transportReceipt), occurred_at: this.now(),
+    }));
+    return {
+      ok: discardOutcome === 'discarded',
+      message_id: prepared.messageId,
+      target_agent_id: prepared.targetAgentId,
+      outcome: discardOutcome === 'seat_unresolved' ? 'discard_failed' : discardOutcome,
+      event_ids: [attempt.seq, discarded.seq],
+    };
   }
 
   // Phase two, read back. The delivery fact for one message and every target it
@@ -1853,7 +2000,8 @@ export class Daemon {
       if (!accepted) throw new Error('message_absent');
       if (accepted.payload.source_agent_id !== req.source_agent_id) throw new Error('comm_source_mismatch');
       const delivery = await this.commDelivery(req.message_id);
-      const sent = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
+      const sentRows = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
+      const sent = [...new Map(sentRows.map((event) => [String(event.payload.target_agent_id), event])).values()];
       const deadline = Math.max(...sent.map((event) => Date.parse(String(event.payload.receipt_deadline_at ?? ''))));
       if (!Number.isFinite(deadline)) throw new Error('comm_receipt_deadline_absent');
       const deadlineByTarget = new Map(sent.map((event) => [
@@ -1865,7 +2013,11 @@ export class Daemon {
         const assertedAt = Date.parse(row.asserted_at ?? '');
         return targetDeadline !== undefined && Number.isFinite(assertedAt) && assertedAt < targetDeadline;
       });
-      return { accepted, delivery, sent, deadline, timely };
+      const redrivenTargets = new Set(events.filter((event) => event.entity_id === req.message_id
+        && event.event_type === 'act.comm_redrive_attempted'
+        && event.payload.outcome === 'enter_redriven')
+        .map((event) => String(event.payload.target_agent_id)));
+      return { accepted, delivery, sent, deadline, timely, redrivenTargets };
     };
 
     let wake!: () => void;
@@ -1877,8 +2029,16 @@ export class Daemon {
     try {
       let current = await state();
       const targets = (current.accepted.payload.targets ?? []) as CommTarget[];
-      const unstaged = current.sent.filter((row) => row.payload.submit_verdict !== 'staged');
+      const unstaged = current.sent.filter((row) => row.payload.submit_verdict !== 'staged'
+        && !current.redrivenTargets.has(String(row.payload.target_agent_id)));
       if (current.sent.length === targets.length && unstaged.length > 0) {
+        if (unstaged.every((row) => row.payload.submit_verdict === 'composer_draft_present')) {
+          return {
+            ok: true, schema_version: SCHEMA_VERSION, phase: 'queued',
+            message_id: req.message_id, source_agent_id: req.source_agent_id,
+            targets, bytes_sent: 0, event_ids: current.sent.map((row) => row.seq),
+          };
+        }
         const verdicts = new Set(unstaged.map((row) => String(row.payload.submit_verdict)));
         return {
           ok: false, schema_version: SCHEMA_VERSION, phase: 'transport_refused',
@@ -1886,12 +2046,12 @@ export class Daemon {
           targets,
           bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
           submit_verdict: verdicts.size === 1
-            ? [...verdicts][0] as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'
+            ? [...verdicts][0] as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'submit_unverified' | 'seat_unresolved'
             : 'multiple',
           refusals: unstaged.map((row) => ({
             target: targets.find((target) => target.agent_id === row.payload.target_agent_id)!,
             bytes: Number(row.payload.bytes ?? 0),
-            submit_verdict: String(row.payload.submit_verdict) as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved',
+            submit_verdict: String(row.payload.submit_verdict) as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'submit_unverified' | 'seat_unresolved',
             event_id: row.seq,
           })),
           event_ids: current.sent.map((row) => row.seq),
@@ -1918,7 +2078,9 @@ export class Daemon {
         message_id: req.message_id, source_agent_id: req.source_agent_id,
         targets,
         bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
-        staged: current.sent.length === targets.length && current.sent.every((row) => row.payload.submit_verdict === 'staged'),
+        staged: current.sent.length === targets.length && current.sent.every((row) =>
+          row.payload.submit_verdict === 'staged'
+          || current.redrivenTargets.has(String(row.payload.target_agent_id))),
         event_ids: current.sent.map((row) => row.seq),
       };
     } finally {

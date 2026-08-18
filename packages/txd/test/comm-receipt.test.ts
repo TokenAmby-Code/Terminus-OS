@@ -65,7 +65,7 @@ test('tier 2 returns bytes sent at the bound, then a late attestation emits a re
   ]);
 });
 
-test('behavioral pin: a draft-present zero-byte send is an immediate honest transport refusal', async () => {
+test('behavioral pin: a draft-present zero-byte send is durably queued, never terminally refused', async () => {
   const { daemon, tmux, scheduledMs } = await rig();
   const control: TmuxControlPlane = tmux;
   control.sendVerifiedToSeat = async () => ({ bytes: 0, verdict: 'composer_draft_present' as const });
@@ -85,10 +85,9 @@ test('behavioral pin: a draft-present zero-byte send is an immediate honest tran
   });
 
   expect(receipt).toMatchObject({
-    ok: false,
-    phase: 'transport_refused',
+    ok: true,
+    phase: 'queued',
     bytes_sent: 0,
-    submit_verdict: 'composer_draft_present',
   });
   expect(scheduledMs()).toBeUndefined();
 });

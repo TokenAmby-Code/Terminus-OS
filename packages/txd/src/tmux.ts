@@ -101,8 +101,10 @@ export type ComposerRefusal =
   | 'composer_unreadable'
   | 'composer_corrupted'
   | 'frame_absent'
+  | 'submit_unverified'
   | 'seat_unresolved';
-export type CommRedriveDriveOutcome = 'enter_redriven' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved';
+export type CommRedriveDriveOutcome = 'enter_redriven' | 'submit_unverified' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved';
+export type ComposerDiscardOutcome = 'discarded' | 'discard_failed' | 'seat_unresolved';
 
 const ANSI_CSI = /\x1b\[([0-?]*)([ -/]*)([@-~])/g;
 const stripAnsi = (text: string): string => text.replace(ANSI_CSI, '');
@@ -202,6 +204,8 @@ export interface TmuxControlPlane {
    * composer is refused (submitting mangled text is worse than failing loud).
    */
   redriveSeatComm(seatId: string, messageId: string, expectedFrame: string): Promise<CommRedriveDriveOutcome>;
+  /** Clear an explicitly-authorized corrupted draft and attest empty paint. */
+  discardSeatComposer(seatId: string, engine: 'claude' | 'codex'): Promise<ComposerDiscardOutcome>;
   /**
    * Observe whether an engine process for `agentId` is running under this
    * seat's pane, RIGHT NOW. The turn fold cannot answer this — nothing in it
@@ -1925,8 +1929,49 @@ export class RealTmux implements TmuxControlPlane {
       : RealTmux.inputVerdict(captured.stdout, expectedFrame);
     if (verdict === 'absent') return 'frame_absent';
     if (verdict === 'corrupted') return 'composer_corrupted';
-    const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-    return enter.code === 0 ? 'enter_redriven' : 'seat_unresolved';
+    const signal = AbortSignal.timeout(this.composerObserveTimeoutMs);
+    let output: PaneOutputSubscription;
+    try { output = await this.outputObserver(this.socket, paneId, signal); }
+    catch { return 'seat_unresolved'; }
+    try {
+      const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
+      if (enter.code !== 0) return 'seat_unresolved';
+      try { await output.next(signal); } catch { /* final capture below is authoritative */ }
+      const submitted = await this.command('attest_redrive_submit_effect', seatId, [
+        'capture-pane', '-p', '-J', '-t', paneId,
+      ]);
+      if (submitted.code !== 0) return 'submit_unverified';
+      const after = expectedFrame.includes(`tx comm ${messageId}`)
+        ? RealTmux.composerVerdict(submitted.stdout, messageId, expectedFrame)
+        : RealTmux.inputVerdict(submitted.stdout, expectedFrame);
+      return after === 'absent'
+        ? 'enter_redriven'
+        : after === 'intact' ? 'submit_unverified' : 'composer_corrupted';
+    } finally {
+      output.close();
+    }
+  }
+
+  discardSeatComposer(seatId: string, engine: 'claude' | 'codex'): Promise<ComposerDiscardOutcome> {
+    return this.serializePaneInput(seatId, async () => {
+      const paneId = await this.resolvePane(seatId);
+      if (!paneId) return 'seat_unresolved';
+      const before = await this.command('observe_discard_composer', seatId, [
+        'capture-pane', '-p', '-e', '-J', '-t', paneId,
+      ]);
+      if (before.code !== 0) return 'seat_unresolved';
+      if (RealTmux.composerReadiness(before.stdout, engine) !== 'draft_present') return 'discard_failed';
+      const cleared = await this.command('discard_input_composer', seatId, [
+        'send-keys', '-t', paneId, 'C-u',
+      ]);
+      if (cleared.code !== 0) return 'seat_unresolved';
+      const after = await this.command('attest_discarded_composer', seatId, [
+        'capture-pane', '-p', '-e', '-J', '-t', paneId,
+      ]);
+      return after.code === 0 && RealTmux.composerReadiness(after.stdout, engine) === 'empty_ready'
+        ? 'discarded'
+        : 'discard_failed';
+    });
   }
 
   sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex') {
@@ -2027,7 +2072,24 @@ export class RealTmux implements TmuxControlPlane {
         }
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-        if (enter.code === 0) return { bytes, verdict: 'staged' as const };
+        if (enter.code === 0) {
+          if (engine !== 'claude') return { bytes, verdict: 'staged' as const };
+          // A successful tmux syscall is not proof Claude consumed Enter.
+          // Consume the application repaint if it arrives, then observe the
+          // active composer. An intact retained frame is a durable recovery
+          // obligation, never hollow-green staging.
+          try { await output.next(signal); } catch { /* final capture below is authoritative */ }
+          const submitted = await this.command('attest_submit_effect', seatId, [
+            'capture-pane', '-p', '-J', '-t', paneId,
+          ]);
+          if (submitted.code !== 0) return { bytes, verdict: 'submit_unverified' as const };
+          const postEnter = RealTmux.composerVerdict(submitted.stdout, correlationId, text);
+          if (postEnter === 'absent') return { bytes, verdict: 'staged' as const };
+          return {
+            bytes,
+            verdict: postEnter === 'intact' ? 'submit_unverified' as const : 'composer_corrupted' as const,
+          };
+        }
         await restoreComposer(restorationCount());
         return { bytes, verdict: 'seat_unresolved' as const };
       }
@@ -2769,6 +2831,14 @@ export class FakeTmux implements TmuxControlPlane {
     if (verdict === 'corrupted') return 'composer_corrupted';
     this.redriveEnterCounts.set(seatId, (this.redriveEnterCounts.get(seatId) ?? 0) + 1);
     return 'enter_redriven';
+  }
+  async discardSeatComposer(seatId: string, engine: 'claude' | 'codex'): Promise<ComposerDiscardOutcome> {
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead') return 'seat_unresolved';
+    const pane = this.paneTexts.get(seatId) ?? '';
+    if (RealTmux.composerReadiness(pane, engine) !== 'draft_present') return 'discard_failed';
+    this.paneTexts.set(seatId, '› ');
+    return 'discarded';
   }
 
   /**

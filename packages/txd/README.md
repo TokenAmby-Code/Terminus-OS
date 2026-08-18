@@ -124,6 +124,16 @@ each route is the ruled daemon behavior, unchanged.
   `composer_unreadable`. `composer_corrupted` is reserved for an observed
   mismatch after staging or exact redrive verification; a parse failure alone
   never mints corruption.
+- A painted draft enqueues the accepted comm transaction; it is not a terminal
+  transport refusal. The existing composer-quiet recovery edge drains the
+  exact journaled frame once the prompt becomes writable. `tx comm recover
+  <logical-target>` exposes the same txd-owned mechanism to an operator; an
+  explicitly discarded corrupted frame is recorded as
+  `act.comm_draft_discarded` with its original byte count.
+- Claude submission is effect-attested. A successful tmux Enter syscall is
+  staged only after a repaint proves the exact frame left the active composer;
+  otherwise the retained bytes are `submit_unverified` and immediately enter
+  exact redrive. Redrive Enter is held to the same composer-clear proof.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an
