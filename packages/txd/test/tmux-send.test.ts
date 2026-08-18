@@ -349,6 +349,163 @@ test('behavioral pin: Codex collapsed-paste receipt verifies an exact multi-KB f
   )).toBe('corrupted');
 });
 
+test('behavioral pin: a fresh Claude pasted-text attachment stages only in its originating transaction', async () => {
+  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n'
+    + `${'structured: true\n'.repeat(80)}Unicode: Ω 漢字 🛡️`;
+  const baseline = [
+    '✻ Waiting',
+    '',
+    '❯ ',
+    '──────────────────────────────────────────',
+    '  /workspace • Context 9% used • Fable 5',
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n');
+  const attachment = baseline.replace('❯ ', '❯ [Pasted text #1 +81 lines]');
+  let capture = 0;
+  const calls: string[][] = [];
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'capture-pane') {
+      capture += 1;
+      return { code: 0, stdout: capture === 1 ? baseline : attachment, stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observer exhausted');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat(
+    'palace:S',
+    '11111111-1111-4111-8111-111111111111',
+    frame,
+    undefined,
+    'claude',
+  );
+
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(0);
+});
+
+test('behavioral pin: a failed submit removes a fresh Claude pasted-text attachment as one object', async () => {
+  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n' + 'x'.repeat(1200);
+  const baseline = 'transcript\n\n❯ \n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
+  let attachment = false;
+  const calls: string[][] = [];
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
+    calls.push(args);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+    if (args[0] === 'paste-buffer') attachment = true;
+    if (args[0] === 'capture-pane') {
+      return { code: 0, stdout: attachment
+        ? baseline.replace('❯ ', '❯ [Pasted text #3 +1 lines]')
+        : baseline, stderr: '' };
+    }
+    if (args[0] === 'send-keys' && args.at(-1) === 'Enter') {
+      return { code: 1, stdout: '', stderr: 'submit refused' };
+    }
+    if (args[0] === 'send-keys' && args.includes('BSpace')) {
+      if (Number(args[args.indexOf('-N') + 1]) === 1) attachment = false;
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', {
+    run,
+    composerObserveTimeoutMs: 10_000,
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observer exhausted');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat(
+    'palace:S',
+    '11111111-1111-4111-8111-111111111111',
+    frame,
+    undefined,
+    'claude',
+  );
+
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'seat_unresolved' });
+  expect(attachment).toBe(false);
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))
+    .map((args) => Number(args[args.indexOf('-N') + 1]))).toEqual([1]);
+});
+
+test('behavioral pin: a pre-existing Claude pasted-text attachment refuses before any pane input', async () => {
+  const baseline = 'transcript\n\n❯ [Pasted text #4 +17 lines]\n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
+  const calls: string[][] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'capture-pane') return { code: 0, stdout: baseline, stderr: '' };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    observePaneOutput: async () => { throw new Error('dirty composer must refuse before arming'); },
+  });
+
+  const outcome = await tmux.sendVerifiedToSeat(
+    'palace:S',
+    '11111111-1111-4111-8111-111111111111',
+    'new frame',
+    undefined,
+    'claude',
+  );
+
+  expect(outcome).toEqual({ bytes: 0, verdict: 'composer_draft_present' });
+  expect(calls.filter((args) => ['load-buffer', 'paste-buffer', 'send-keys'].includes(args[0]!))).toHaveLength(0);
+});
+
+test('behavioral pin: Claude pasted-text attachment tokens never authorize exact redrive', async () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n` + 'x'.repeat(1200);
+  const calls: string[][] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'capture-pane') return {
+        code: 0,
+        stdout: 'transcript\n\n❯ [Pasted text #8 +1 lines]\n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5',
+        stderr: '',
+      };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  });
+
+  expect(await tmux.redriveSeatComm('palace:S', messageId, frame)).toBe('composer_corrupted');
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
+});
+
+test('behavioral pin: malformed Claude pasted-text paint is corruption, never fresh attachment proof', () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\nbody`;
+
+  expect(RealTmux.composerVerdict('❯ [Pasted text #x +2 lines]', messageId, frame)).toBe('corrupted');
+  expect(RealTmux.composerVerdict('❯ prefix [Pasted text #1 +2 lines]', messageId, frame)).toBe('corrupted');
+});
+
 for (const receipt of [
   (count: number) => `› [Pasted Content ${count} chars]\n`,
   (count: number) => `› [Pasted Content ${count}\n  chars]\n`,
