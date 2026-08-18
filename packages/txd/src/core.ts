@@ -98,6 +98,7 @@ import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from 
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 import type { TxdPublishedEventType } from './events.ts';
+import { commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
 
 // Reg-audit attestation set DEFINED SO FAR (door step 1). The refusal machinery
 // is day-one; later doors grow this list as they add witnesses (rank, commander,
@@ -126,13 +127,6 @@ const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
     return () => clearTimeout(timer);
   },
 };
-
-// The ONE comm frame template. comm() stages it and commRedrive() verifies
-// the composer against it; a second copy of this string would let the two
-// silently diverge and turn every redrive into a false `composer_corrupted`.
-function commFrame(messageId: string, sourceAgentId: string, askId: string | null, message: string): string {
-  return `[tx comm ${messageId} from ${sourceAgentId}${askId ? ` ask ${askId}` : ''}]\n${message}`;
-}
 
 function renderCommIntent(intent: CommIntent, engine: 'claude' | 'codex'): { frame: string; tabAfter: string } {
   const prefix = intent.kind === 'command' || engine === 'claude' ? '/' : '$';
@@ -1330,8 +1324,13 @@ export class Daemon {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
-      if (!proj.currentBindings.some((b) =>
-        b.registered && b.agent_id === req.source_agent_id)) throw new Error('source_not_registered');
+      const sourceBindings = proj.currentBindings.filter((b) =>
+        b.registered && b.agent_id === req.source_agent_id);
+      if (sourceBindings.length === 0) throw new Error('source_not_registered');
+      if (sourceBindings.length !== 1) throw new Error('source_identity_ambiguous');
+      const sourceBinding = sourceBindings[0]!;
+      if (!sourceBinding.persona) throw new Error('source_persona_unresolved');
+      const source: CommFrameSource = { persona: sourceBinding.persona, seat_id: sourceBinding.seat_id };
       const events = await this.store.readAll();
       let targetIdentity = req.target === '--self' ? req.source_agent_id : req.target;
       let replyingToAsk: string | null = null;
@@ -1366,7 +1365,7 @@ export class Daemon {
       const askId = req.ask ? crypto.randomUUID() : null;
       const occurred_at = this.now();
       const accepted = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted', payload: {
-        source_agent_id: req.source_agent_id, target_agent_ids: targets.map((t) => t.agent_id), targets,
+        source_agent_id: req.source_agent_id, source, target_agent_ids: targets.map((t) => t.agent_id), targets,
         ask_id: askId, reply_to_ask_id: replyingToAsk,
         kind: req.intent?.kind ?? 'message',
         name: req.intent?.name ?? null,
@@ -1376,7 +1375,7 @@ export class Daemon {
       }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
       const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
-      return { messageId, askId, replyingToAsk, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
+      return { messageId, askId, replyingToAsk, source, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
     });
 
     await Promise.all(prepared.targets.map((target) => {
@@ -1397,7 +1396,7 @@ export class Daemon {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
         const frame = prepared.renderedIntent?.frame
-          ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
+          ?? commFrame(prepared.messageId, prepared.source, req.message!);
         return { target, binding, frame };
       });
     });
@@ -1691,7 +1690,17 @@ export class Daemon {
         && !events.some((candidate) => candidate.event_type === 'act.comm_delivery_asserted'
           && candidate.payload.message_id === event.entity_id
           && candidate.payload.target_agent_id === hook.agent_id));
-      const messageIds = [...new Set([...hook.message_ids, ...(intentMessage ? [intentMessage.entity_id] : [])])];
+      const acceptedByToken = new Map<string, string>();
+      for (const event of events) {
+        if (event.event_type !== 'reg.comm_accepted') continue;
+        try { acceptedByToken.set(commTokenForMessageId(event.entity_id), event.entity_id); }
+        catch { /* Non-UUID fixtures and unrelated historical entities are not comm frames. */ }
+      }
+      const framedMessageIds = hook.comm_tokens.flatMap((token) => {
+        const messageId = acceptedByToken.get(token);
+        return messageId ? [messageId] : [];
+      });
+      const messageIds = [...new Set([...framedMessageIds, ...(intentMessage ? [intentMessage.entity_id] : [])])];
       for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
@@ -1806,10 +1815,14 @@ export class Daemon {
       const proj = await this.projections();
       const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
       if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
-      const askId = typeof accepted.payload.ask_id === 'string' ? accepted.payload.ask_id : null;
-      const frame = accepted.payload.kind === 'command' || accepted.payload.kind === 'skill'
-        ? String(accepted.payload.rendered_frame)
-        : commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
+      let frame: string;
+      if (accepted.payload.kind === 'command' || accepted.payload.kind === 'skill') {
+        frame = String(accepted.payload.rendered_frame);
+      } else {
+        const source = accepted.payload.source as CommFrameSource | undefined;
+        if (!source?.persona || !source.seat_id) throw new Error('comm_frame_source_absent');
+        frame = commFrame(req.message_id, source, String(accepted.payload.message));
+      }
       const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
       await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
         payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },

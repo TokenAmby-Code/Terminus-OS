@@ -15,6 +15,7 @@ import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { MemoryEventStore, type EventStore } from '../src/store.ts';
 import { FakeTmux, RealTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 
 async function registered(d: Daemon, store: EventStore, seat: string, identity: string): Promise<void> {
   const launched = await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity, persona: 'p', rank: 'astartes', tint: '#111111' });
@@ -40,20 +41,20 @@ async function fixture() {
   return { store, tmux, d, send, events };
 }
 
-const frame = (id: string, body: string) => `[tx comm ${id} from sender]\n${body}`;
+const frame = (id: string, body: string) => commFrame(id, { persona: 'p', seat_id: 'council:custodes' }, body);
 
 // ── the composer verdict (pure, pinned without tmux) ─────────────────────────
 
 test('an intact parked frame is redrivable', () => {
   const id = 'd251aa8e-c375-49d2-9c29-71707a245674';
-  const pane = `some transcript above\n› [tx comm ${id} from sender]\n  read the orders file and begin.\n`;
+  const pane = `some transcript above\n› ${frame(id, 'read the orders file and begin.')}\n`;
   expect(RealTmux.composerVerdict(pane, id, frame(id, 'read the orders file and begin.'))).toBe('intact');
 });
 
 test('a character-corrupted frame is NOT redrivable — Enter would submit mangled text', () => {
   const id = 'd251aa8e-c375-49d2-9c29-71707a245674';
   // The imperial-fists exhibit: characters substituted mid-typing.
-  const pane = `› [tx comm ${id} from sender]\n  read the ordnrs file and begin.\n`;
+  const pane = `› ${frame(id, 'read the ordnrs file and begin.')}\n`;
   expect(RealTmux.composerVerdict(pane, id, frame(id, 'read the orders file and begin.'))).toBe('corrupted');
 });
 
@@ -65,19 +66,18 @@ test('a pane without the frame yields absent — nothing safe to submit', () => 
 test('composer chrome and wrapping do not read as corruption', () => {
   const id = 'd251aa8e-c375-49d2-9c29-71707a245674';
   const pane = [
-    `│ › [tx comm ${id} from sender]`,
+    `│ › [tx comm from p at council:custodes #${commTokenForMessageId(id)}]`,
     '│   read the orders file',
     '│   and begin.',
   ].join('\n');
   expect(RealTmux.composerVerdict(pane, id, frame(id, 'read the orders file and begin.'))).toBe('intact');
 });
 
-test('behavioral pin: a narrow pane may wrap inside the frame id and payload words', () => {
+test('behavioral pin: a narrow pane may wrap inside the frame token and payload words', () => {
   const id = 'd251aa8e-c375-49d2-9c29-71707a245674';
   const pane = [
-    '│ › [tx comm d251aa8e-c375-',
-    '│   49d2-9c29-71707a245674 from',
-    '│   sender]',
+    `│ › [tx comm from p at council:custodes #${commTokenForMessageId(id).slice(0, 10)}`,
+    `│   ${commTokenForMessageId(id).slice(10)}]`,
     '│   read the ord',
     '│   ers file and begin.',
   ].join('\n');
@@ -125,7 +125,7 @@ test('behavioral pin: a composer-quiet fact may redrive one intact rendered inte
 test('redrive after the assertion already exists is a no-op that never touches the pane', async () => {
   const { tmux, d, send, events } = await fixture();
   const id = await send('already home');
-  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [id] });
+  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [commTokenForMessageId(id)] });
   tmux.setPaneText('palace:W', `› ${frame(id, 'already home')}`);
 
   const result = await d.commRedrive({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'worker' });
@@ -138,7 +138,7 @@ test('redrive after the assertion already exists is a no-op that never touches t
 test('redrive on a corrupted composer refuses to drive Enter and says why', async () => {
   const { tmux, d, send } = await fixture();
   const id = await send('read the orders file and begin.');
-  tmux.setPaneText('palace:W', `› [tx comm ${id} from sender]\n  read the ordnrs file and begin.`);
+  tmux.setPaneText('palace:W', `› ${frame(id, 'read the ordnrs file and begin.')}`);
 
   const result = await d.commRedrive({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'worker' });
 
@@ -163,8 +163,8 @@ test('a late organic submit after a redrive asserts exactly once', async () => {
   tmux.setPaneText('palace:W', `› ${frame(id, 'raced')}`);
   await d.commRedrive({ schema_version: SCHEMA_VERSION, message_id: id, target_agent_id: 'worker' });
 
-  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [id] });
-  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [id] }).catch(() => undefined);
+  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [commTokenForMessageId(id)] });
+  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [commTokenForMessageId(id)] }).catch(() => undefined);
 
   const assertions = (await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted');
   expect(assertions.length).toBe(1);

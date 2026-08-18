@@ -1,5 +1,8 @@
 import { expect, test } from 'bun:test';
 import { RealTmux, type TmuxCommandResult } from '../src/tmux.ts';
+import { commFrame } from '../src/comm-frame.ts';
+
+const frame = (id: string, body: string) => commFrame(id, { persona: 'p', seat_id: 'council:custodes' }, body);
 
 test('behavioral pin: concurrent verified deliveries to one pane are serialized as whole submissions', async () => {
   const buffers = new Map<string, string>();
@@ -30,8 +33,8 @@ test('behavioral pin: concurrent verified deliveries to one pane are serialized 
       };
     },
   });
-  const first = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nfirst';
-  const second = '[tx comm 22222222-2222-4222-8222-222222222222 from sender]\nsecond';
+  const first = frame('11111111-1111-4111-8111-111111111111', 'first');
+  const second = frame('22222222-2222-4222-8222-222222222222', 'second');
 
   const outcomes = await Promise.all([
     tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', first),
@@ -107,15 +110,15 @@ test('behavioral pin: Claude dim prompt-suggestion chrome is empty-ready', () =>
 
 test('behavioral pin: opaque Claude payload may contain a horizontal-rule line', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\nfirst\n${'─'.repeat(80)}\nlast`;
+  const rendered = frame(messageId, `first\n${'─'.repeat(80)}\nlast`);
   const pane = [
-    `❯ ${frame}`,
+    `❯ ${rendered}`,
     '─'.repeat(80),
     '  /workspace • Context 9% used • Fable 5',
     '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
   ].join('\n');
 
-  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('intact');
+  expect(RealTmux.composerVerdict(pane, messageId, rendered)).toBe('intact');
 });
 
 test('verified send waits for a pane-output event before observing the composer', async () => {
@@ -126,7 +129,7 @@ test('verified send waits for a pane-output event before observing the composer'
   let pasted = false;
   const output = new Promise<void>((resolve) => { releaseOutput = resolve; });
   const literal = new Promise<void>((resolve) => { literalStarted = resolve; });
-  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nhello';
+  const rendered = frame('11111111-1111-4111-8111-111111111111', 'hello');
   const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
     calls.push(args[0]!);
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
@@ -136,7 +139,7 @@ test('verified send waits for a pane-output event before observing the composer'
     }
     if (args[0] === 'capture-pane') {
       captures.push(args);
-      return { code: 0, stdout: `> ${pasted ? frame : ''}\n`, stderr: '' };
+      return { code: 0, stdout: `> ${pasted ? rendered : ''}\n`, stderr: '' };
     }
     return { code: 0, stdout: '', stderr: '' };
   };
@@ -149,7 +152,7 @@ test('verified send waits for a pane-output event before observing the composer'
     },
   });
 
-  const pending = tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', frame);
+  const pending = tmux.sendVerifiedToSeat('palace:S', '11111111-1111-4111-8111-111111111111', rendered);
   await literal;
   expect(calls).toEqual(['list-panes', 'capture-pane', 'arm:%7', 'load-buffer', 'paste-buffer']);
   expect(captures[0]).toContain('-e');
@@ -164,7 +167,7 @@ test('verified send waits for a pane-output event before observing the composer'
 
 for (const existing of [
   'operator draft: do not submit',
-  '[tx comm 22222222-2222-4222-8222-222222222222 from sender]\nold frame',
+  frame('22222222-2222-4222-8222-222222222222', 'old frame'),
   '[Pasted Content 4096 chars]',
   '[Pasted Content 4096\n  chars]',
 ]) {
@@ -185,7 +188,7 @@ for (const existing of [
     const outcome = await tmux.sendVerifiedToSeat(
       'palace:S',
       '11111111-1111-4111-8111-111111111111',
-      '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nnew frame',
+      frame('11111111-1111-4111-8111-111111111111', 'new frame'),
       undefined,
       'codex',
     );
@@ -219,7 +222,7 @@ test('behavioral pin: an unreadable composer has its own zero-effect refusal', a
   const outcome = await tmux.sendVerifiedToSeat(
     'palace:S',
     '11111111-1111-4111-8111-111111111111',
-    '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nnew frame',
+    frame('11111111-1111-4111-8111-111111111111', 'new frame'),
     undefined,
     'codex',
   );
@@ -251,7 +254,7 @@ for (const profile of [
   },
 ]) {
   test(`behavioral pin: ${profile.engine} idle suggestion paint is a known-empty verified-send baseline`, async () => {
-    const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nnew frame';
+    const rendered = frame('11111111-1111-4111-8111-111111111111', 'new frame');
     let capture = 0;
     const calls: string[][] = [];
     const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
@@ -259,7 +262,7 @@ for (const profile of [
       if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
       if (args[0] === 'capture-pane') {
         capture += 1;
-        return { code: 0, stdout: capture === 1 ? profile.baseline : `› ${frame}\n`, stderr: '' };
+        return { code: 0, stdout: capture === 1 ? profile.baseline : `› ${rendered}\n`, stderr: '' };
       }
       return { code: 0, stdout: '', stderr: '' };
     };
@@ -272,21 +275,20 @@ for (const profile of [
     const outcome = await tmux.sendVerifiedToSeat(
       'palace:S',
       '11111111-1111-4111-8111-111111111111',
-      frame,
+      rendered,
       undefined,
       profile.engine,
     );
 
-    expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+    expect(outcome).toEqual({ bytes: Buffer.byteLength(rendered), verdict: 'staged' });
     expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
   });
 }
 
 test('behavioral pin: verified comm accepts an intact frame clipped inside the Codex composer viewport', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\n`
-    + 'A long operational brief whose header scrolls above the visible textarea.\n'
-    + 'The final lines remain visible and are the exact suffix the editor owns.';
+  const rendered = frame(messageId, 'A long operational brief whose header scrolls above the visible textarea.\n'
+    + 'The final lines remain visible and are the exact suffix the editor owns.');
   const pane = [
     '• earlier transcript remains above the composer',
     '',
@@ -298,14 +300,13 @@ test('behavioral pin: verified comm accepts an intact frame clipped inside the C
     '  gpt-5.6-sol medium · ~/.local/share…',
   ].join('\n');
 
-  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('intact');
+  expect(RealTmux.composerVerdict(pane, messageId, rendered)).toBe('intact');
 });
 
 test('behavioral pin: clipped Codex composer suffix must still match exactly', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\n`
-    + 'A long operational brief whose header scrolls above the visible textarea.\n'
-    + 'The final lines remain visible and are the exact suffix the editor owns.';
+  const rendered = frame(messageId, 'A long operational brief whose header scrolls above the visible textarea.\n'
+    + 'The final lines remain visible and are the exact suffix the editor owns.');
   const pane = [
     '  1 background terminal running · /ps',
     '',
@@ -315,23 +316,22 @@ test('behavioral pin: clipped Codex composer suffix must still match exactly', (
     '  gpt-5.6-sol medium · ~/.local/share…',
   ].join('\n');
 
-  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('corrupted');
+  expect(RealTmux.composerVerdict(pane, messageId, rendered)).toBe('corrupted');
 });
 
 test('behavioral pin: an exact new frame appended to stale composer text is corrupted', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\nnew frame`;
-  const pane = `› stale draft\n  ${frame}`;
+  const rendered = frame(messageId, 'new frame');
+  const pane = `› stale draft\n  ${rendered}`;
 
-  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('corrupted');
+  expect(RealTmux.composerVerdict(pane, messageId, rendered)).toBe('corrupted');
   expect(RealTmux.inputVerdict('› stale draft\n  machine input', 'machine input')).toBe('corrupted');
 });
 
 test('behavioral pin: Codex collapsed-paste receipt verifies an exact multi-KB frame count', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\n`
-    + `${'0123456789'.repeat(450)}\nquotes: 'single' "double" $dollar \\ slash\nUnicode: Ω 漢字 🛡️`;
-  const scalarCount = [...frame].length;
+  const rendered = frame(messageId, `${'0123456789'.repeat(450)}\nquotes: 'single' "double" $dollar \\ slash\nUnicode: Ω 漢字 🛡️`);
+  const scalarCount = [...rendered].length;
   const pane = [
     '• earlier transcript remains above the composer',
     '',
@@ -341,17 +341,16 @@ test('behavioral pin: Codex collapsed-paste receipt verifies an exact multi-KB f
     '  gpt-5.6-sol medium · ~/.local/share…',
   ].join('\n');
 
-  expect(RealTmux.composerVerdict(pane, messageId, frame)).toBe('intact');
+  expect(RealTmux.composerVerdict(pane, messageId, rendered)).toBe('intact');
   expect(RealTmux.composerVerdict(
     pane.replace(String(scalarCount), String(scalarCount - 1)),
     messageId,
-    frame,
+    rendered,
   )).toBe('corrupted');
 });
 
 test('behavioral pin: a fresh Claude pasted-text attachment stages only in its originating transaction', async () => {
-  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n'
-    + `${'structured: true\n'.repeat(80)}Unicode: Ω 漢字 🛡️`;
+  const rendered = frame('11111111-1111-4111-8111-111111111111', `${'structured: true\n'.repeat(80)}Unicode: Ω 漢字 🛡️`);
   const baseline = [
     '✻ Waiting',
     '',
@@ -390,18 +389,18 @@ test('behavioral pin: a fresh Claude pasted-text attachment stages only in its o
   const outcome = await tmux.sendVerifiedToSeat(
     'palace:S',
     '11111111-1111-4111-8111-111111111111',
-    frame,
+    rendered,
     undefined,
     'claude',
   );
 
-  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(rendered), verdict: 'staged' });
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))).toHaveLength(0);
 });
 
 test('behavioral pin: a failed submit removes a fresh Claude pasted-text attachment as one object', async () => {
-  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n' + 'x'.repeat(1200);
+  const rendered = frame('11111111-1111-4111-8111-111111111111', 'x'.repeat(1200));
   const baseline = 'transcript\n\n❯ \n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
   let attachment = false;
   const calls: string[][] = [];
@@ -441,12 +440,12 @@ test('behavioral pin: a failed submit removes a fresh Claude pasted-text attachm
   const outcome = await tmux.sendVerifiedToSeat(
     'palace:S',
     '11111111-1111-4111-8111-111111111111',
-    frame,
+    rendered,
     undefined,
     'claude',
   );
 
-  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'seat_unresolved' });
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(rendered), verdict: 'seat_unresolved' });
   expect(attachment).toBe(false);
   expect(calls.filter((args) => args[0] === 'send-keys' && args.includes('BSpace'))
     .map((args) => Number(args[args.indexOf('-N') + 1]))).toEqual([1]);
@@ -479,7 +478,7 @@ test('behavioral pin: a pre-existing Claude pasted-text attachment refuses befor
 
 test('behavioral pin: Claude pasted-text attachment tokens never authorize exact redrive', async () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\n` + 'x'.repeat(1200);
+  const rendered = frame(messageId, 'x'.repeat(1200));
   const calls: string[][] = [];
   const tmux = new RealTmux('scratch', {
     run: async (_socket, args) => {
@@ -494,21 +493,21 @@ test('behavioral pin: Claude pasted-text attachment tokens never authorize exact
     },
   });
 
-  expect(await tmux.redriveSeatComm('palace:S', messageId, frame)).toBe('composer_corrupted');
+  expect(await tmux.redriveSeatComm('palace:S', messageId, rendered)).toBe('composer_corrupted');
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
 
 test('behavioral pin: malformed Claude pasted-text paint is corruption, never fresh attachment proof', () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\nbody`;
+  const rendered = frame(messageId, 'body');
 
-  expect(RealTmux.composerVerdict('❯ [Pasted text #x +2 lines]', messageId, frame)).toBe('corrupted');
-  expect(RealTmux.composerVerdict('❯ prefix [Pasted text #1 +2 lines]', messageId, frame)).toBe('corrupted');
+  expect(RealTmux.composerVerdict('❯ [Pasted text #x +2 lines]', messageId, rendered)).toBe('corrupted');
+  expect(RealTmux.composerVerdict('❯ prefix [Pasted text #1 +2 lines]', messageId, rendered)).toBe('corrupted');
 });
 
 test('behavioral pin: malformed Claude attachment spacing never submits in the fresh send flow', async () => {
   const messageId = '11111111-1111-4111-8111-111111111111';
-  const frame = `[tx comm ${messageId} from sender]\n` + 'x'.repeat(1200);
+  const rendered = frame(messageId, 'x'.repeat(1200));
   const baseline = 'transcript\n\n❯ \n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
   let painted = false;
   const calls: string[][] = [];
@@ -537,8 +536,8 @@ test('behavioral pin: malformed Claude attachment spacing never submits in the f
     },
   });
 
-  expect(await tmux.sendVerifiedToSeat('palace:S', messageId, frame, undefined, 'claude'))
-    .toEqual({ bytes: Buffer.byteLength(frame), verdict: 'composer_corrupted' });
+  expect(await tmux.sendVerifiedToSeat('palace:S', messageId, rendered, undefined, 'claude'))
+    .toEqual({ bytes: Buffer.byteLength(rendered), verdict: 'composer_corrupted' });
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
 });
 
@@ -547,7 +546,7 @@ for (const receipt of [
   (count: number) => `› [Pasted Content ${count}\n  chars]\n`,
 ]) {
   test('verified send accepts an exact Codex paste receipt only from an empty baseline', async () => {
-    const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n' + 'x'.repeat(4096);
+    const rendered = frame('11111111-1111-4111-8111-111111111111', 'x'.repeat(4096));
     const baseline = 'transcript\n\n› \n\n  gpt-5.6-sol medium';
     let capture = 0;
     const calls: string[][] = [];
@@ -556,7 +555,7 @@ for (const receipt of [
       if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
       if (args[0] === 'capture-pane') {
         capture += 1;
-        return { code: 0, stdout: capture === 1 ? baseline : receipt([...frame].length), stderr: '' };
+        return { code: 0, stdout: capture === 1 ? baseline : receipt([...rendered].length), stderr: '' };
       }
       return { code: 0, stdout: '', stderr: '' };
     };
@@ -569,10 +568,10 @@ for (const receipt of [
     const outcome = await tmux.sendVerifiedToSeat(
       'palace:S',
       '11111111-1111-4111-8111-111111111111',
-      frame,
+      rendered,
     );
 
-    expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+    expect(outcome).toEqual({ bytes: Buffer.byteLength(rendered), verdict: 'staged' });
     expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(1);
   });
 }
@@ -624,8 +623,7 @@ test('verified send never submits when output settles without the expected frame
 
 test('behavioral pin: verified send transports an adversarial multi-KB frame as one bracketed paste', async () => {
   const calls: Array<{ args: string[]; stdin?: Uint8Array }> = [];
-  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\n'
-    + `${'0123456789'.repeat(700)}\nquotes: 'single' "double" $dollar \\ slash\nUnicode: Ω 漢字 🛡️`;
+  const rendered = frame('11111111-1111-4111-8111-111111111111', `${'0123456789'.repeat(700)}\nquotes: 'single' "double" $dollar \\ slash\nUnicode: Ω 漢字 🛡️`);
   let composer = '';
   let loaded = '';
   const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
@@ -667,14 +665,14 @@ test('behavioral pin: verified send transports an adversarial multi-KB frame as 
   const outcome = await tmux.sendVerifiedToSeat(
     'palace:S',
     '11111111-1111-4111-8111-111111111111',
-    frame,
+    rendered,
   );
 
-  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
-  expect(composer).toBe(frame);
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(rendered), verdict: 'staged' });
+  expect(composer).toBe(rendered);
   expect(calls.filter(({ args }) => args[0] === 'send-keys' && args.includes('-l'))).toHaveLength(0);
   const load = calls.find(({ args }) => args[0] === 'load-buffer');
-  expect(new TextDecoder().decode(load?.stdin)).toBe(frame);
+  expect(new TextDecoder().decode(load?.stdin)).toBe(rendered);
   expect(load?.args).toEqual(['load-buffer', '-b', expect.stringMatching(/^txd-input-/), '-']);
   expect(calls.find(({ args }) => args[0] === 'paste-buffer')?.args).toEqual([
     'paste-buffer', '-p', '-r', '-d', '-b', expect.stringMatching(/^txd-input-/), '-t', '%7',

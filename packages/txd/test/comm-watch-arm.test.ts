@@ -12,6 +12,7 @@ import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { MemoryEventStore, type EventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon, type CommWatchArmInput } from '../src/core.ts';
+import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 
 async function registered(d: Daemon, store: EventStore, seat: string, identity: string): Promise<void> {
   const launched = await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity, persona: 'p', rank: 'astartes', tint: '#111111' });
@@ -243,7 +244,7 @@ test('behavioral pin: every new ordinary message receipt is typed while historic
   const events = await store.readAll();
   expect(events.find((event) => event.event_type === 'act.comm_bytes_sent')?.payload).toMatchObject({
     kind: 'message', name: null,
-    rendered_frame: `[tx comm ${accepted.message_id} from sender]\ntyped receipt`,
+    rendered_frame: commFrame(accepted.message_id, { persona: 'p', seat_id: 'council:custodes' }, 'typed receipt'),
   });
   // Journal payloads are open dumb facts: old immutable rows with no new
   // typing fields remain readable instead of being rewritten or rejected.
@@ -269,7 +270,7 @@ test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on it
     reply: false,
   });
 
-  const expectedFrame = `[tx comm ${accepted.message_id} from sender]\n${message}`;
+  const expectedFrame = commFrame(accepted.message_id, { persona: 'p', seat_id: 'council:custodes' }, message);
   expect(tmux.sends('palace:W')).toEqual([expectedFrame]);
   expect((await store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
     .toMatchObject({
@@ -282,7 +283,7 @@ test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on it
   await d.promptSubmitted({
     schema_version: SCHEMA_VERSION,
     agent_id: 'worker',
-    message_ids: [accepted.message_id],
+    comm_tokens: [commTokenForMessageId(accepted.message_id)],
     content: expectedFrame,
   });
 
@@ -301,7 +302,7 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
     const result = await d.promptSubmitted({
       schema_version: SCHEMA_VERSION,
       agent_id: 'worker',
-      message_ids: [messageId],
+      comm_tokens: [commTokenForMessageId(messageId)],
       content: frame,
     });
     hookReturned = true;
@@ -400,7 +401,7 @@ for (const profile of [
     // prompt_submitted hook must still correlate the rendered frame and create
     // one terminal assertion without a comm envelope message id.
     await d.promptSubmitted({
-      schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: profile.rendered,
+      schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [], content: profile.rendered,
     });
     const delivery = await d.commDelivery(accepted.message_id);
     expect(delivery.complete).toBe(true);

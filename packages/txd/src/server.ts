@@ -50,6 +50,7 @@ import {
 import type { Daemon } from './core.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
+import { commFrameTokens } from './comm-frame.ts';
 
 export type BuildInfo = { version: string; git_sha: string; bun: string };
 
@@ -61,23 +62,6 @@ export type Route = {
   handler: (req: Request, params: Record<string, string>) => Promise<Response>;
 };
 
-// Every comm frame the flush carried, not just the one that happened to land
-// first. A frame always begins its own line, so the line anchor still refuses
-// an id quoted mid-sentence; `m` lets it find the second and third frame of a
-// coalesced submission instead of stopping at character zero.
-//
-// Matching only the first frame cost real deliveries: on 2026-08-03, fourteen
-// comms across eight stamped workers arrived in a coalesced flush, were read by
-// their target, and were recorded by txd as never delivered.
-const TX_COMM_FRAME = /^\[tx comm ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}) from [^\]\r\n]+\]\r?$/gm;
-
-export function commFrameMessageIds(prompt: string | undefined): string[] {
-  if (!prompt) return [];
-  const seen = new Set<string>();
-  for (const match of prompt.matchAll(TX_COMM_FRAME)) seen.add(match[1]!);
-  return [...seen];
-}
-
 function stringField(payload: Record<string, unknown>, field: string): string | undefined {
   const value = payload[field];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
@@ -88,7 +72,7 @@ function promptHookInput(payload: Record<string, unknown>): unknown {
   return {
     agent_id: payload.agent_id,
     schema_version: payload.schema_version ?? SCHEMA_VERSION,
-    message_ids: commFrameMessageIds(prompt),
+    comm_tokens: commFrameTokens(prompt),
     content: prompt,
     stop_event_id: stringField(payload, 'stop_event_id'),
     session_id: stringField(payload, 'session_id'),

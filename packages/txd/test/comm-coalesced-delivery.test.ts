@@ -18,9 +18,10 @@ import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { MemoryEventStore, type EventStore } from '../src/store.ts';
 import { FakeTmux, type TmuxControlPlane } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
-import { commFrameMessageIds } from '../src/server.ts';
+import { commFrameTokens, commTokenForMessageId } from '../src/comm-frame.ts';
 
-const frame = (id: string, from = '889c6bdc-cb4a-45dd-8acc-bcb01fbb98eb') => `[tx comm ${id} from ${from}]`;
+const frame = (id: string) => `[tx comm from custodes at council:custodes #${commTokenForMessageId(id)}]`;
+const tokens = (ids: string[]) => ids.map(commTokenForMessageId);
 const A = 'd251aa8e-c375-49d2-9c29-71707a245674';
 const B = '6327e892-abb4-44da-b840-d9d1ce368d19';
 const C = '4b470ef8-eee6-4a1e-9f0a-000000000001';
@@ -32,36 +33,36 @@ test('a coalesced flush yields EVERY frame it carried, in order', () => {
     frame(A), 'DISPATCH — busd pre/post-tool event spam. P0.', '',
     frame(B), 'STATUS REQUEST from council:custodes.',
   ].join('\n');
-  expect(commFrameMessageIds(prompt)).toEqual([A, B]);
+  expect(commFrameTokens(prompt)).toEqual(tokens([A, B]));
 });
 
 test('three frames in one flush yield three ids — emperors-children lost two of these', () => {
   const prompt = [frame(A), 'one', frame(B), 'two', frame(C), 'three'].join('\n');
-  expect(commFrameMessageIds(prompt)).toEqual([A, B, C]);
+  expect(commFrameTokens(prompt)).toEqual(tokens([A, B, C]));
 });
 
 test('a lone frame still parses, and a natural prompt yields nothing', () => {
-  expect(commFrameMessageIds(`${frame(A)}\nbody`)).toEqual([A]);
-  expect(commFrameMessageIds('what is the estate doing right now')).toEqual([]);
-  expect(commFrameMessageIds(undefined)).toEqual([]);
+  expect(commFrameTokens(`${frame(A)}\nbody`)).toEqual(tokens([A]));
+  expect(commFrameTokens('what is the estate doing right now')).toEqual([]);
+  expect(commFrameTokens(undefined)).toEqual([]);
 });
 
 test('CRLF line endings parse identically — the transport is not required to be LF', () => {
-  expect(commFrameMessageIds(`${frame(A)}\r\nbody\r\n${frame(B)}\r\nbody`)).toEqual([A, B]);
+  expect(commFrameTokens(`${frame(A)}\r\nbody\r\n${frame(B)}\r\nbody`)).toEqual(tokens([A, B]));
 });
 
 test('a frame quoted mid-line is prose, not a delivery — the line anchor holds', () => {
-  expect(commFrameMessageIds(`I was told ${frame(A)} and ignored it`)).toEqual([]);
+  expect(commFrameTokens(`I was told ${frame(A)} and ignored it`)).toEqual([]);
 });
 
 test('the same id twice in one flush asserts once — a quoted repeat is not a second delivery', () => {
-  expect(commFrameMessageIds(`${frame(A)}\nbody\n${frame(A)}\nquoted back`)).toEqual([A]);
+  expect(commFrameTokens(`${frame(A)}\nbody\n${frame(A)}\nquoted back`)).toEqual(tokens([A]));
 });
 
 test('a frame that is not the first line is still a delivery', () => {
   // The old parser was anchored to character zero, so a flush whose first line
   // was anything else correlated NOTHING — not even the frame plainly present.
-  expect(commFrameMessageIds(`ok, working on it\n${frame(A)}\nbody`)).toEqual([A]);
+  expect(commFrameTokens(`ok, working on it\n${frame(A)}\nbody`)).toEqual(tokens([A]));
 });
 
 // ── the assertion path ───────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ test('every message in a coalesced flush gets its own delivery fact', async () =
   const second = await send('status request');
   expect(await asserted()).toEqual([]);
 
-  const result = await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [first, second] });
+  const result = await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([first, second]) });
 
   expect(result.asserted).toEqual([first, second]);
   expect(await asserted()).toEqual([first, second]);
@@ -107,9 +108,9 @@ test('re-delivery of the same flush adds nothing — the assertion is idempotent
   const { d, send, asserted } = await fixture();
   const first = await send('one');
   const second = await send('two');
-  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [first, second] });
+  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([first, second]) });
 
-  const again = await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [first, second] });
+  const again = await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([first, second]) });
 
   expect(again.asserted).toEqual([]);
   expect(await asserted()).toEqual([first, second]);
@@ -150,7 +151,7 @@ test('a busy sender leaves no parked confirmation and hook replay retries the ve
   // sender-facing confirmation is the tier-2 follow-up under test here.
   now += 30_000;
 
-  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [messageId] }))
+  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([messageId]) }))
     .rejects.toThrow('delivery_confirmation_not_staged:frame_absent');
 
   let events = await store.readAll();
@@ -162,7 +163,7 @@ test('a busy sender leaves no parked confirmation and hook replay retries the ve
   expect(fakeTmux.sends('council:custodes')).toEqual([]);
 
   senderInteractive = true;
-  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [messageId] }))
+  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([messageId]) }))
     .resolves.toMatchObject({ asserted: [] });
 
   events = await store.readAll();
@@ -182,7 +183,7 @@ test("a frame addressed to someone else is skipped in silence, and does not cost
 
   const result = await d.promptSubmitted({
     schema_version: SCHEMA_VERSION, agent_id: 'worker',
-    message_ids: ['00000000-0000-4000-8000-000000000000', mine],
+    comm_tokens: tokens(['00000000-0000-4000-8000-000000000000', mine]),
   });
 
   expect(result.asserted).toEqual([mine]);
@@ -191,10 +192,10 @@ test("a frame addressed to someone else is skipped in silence, and does not cost
 
 test('a flush that matched NOTHING is still a deterministic refusal — a daily prompt cannot wedge the lane', async () => {
   const { d } = await fixture();
-  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [] }))
+  await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [] }))
     .rejects.toThrow('message_target_mismatch');
   await expect(d.promptSubmitted({
-    schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: ['00000000-0000-4000-8000-000000000000'],
+    schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens(['00000000-0000-4000-8000-000000000000']),
   })).rejects.toThrow('message_target_mismatch');
 });
 
@@ -209,7 +210,7 @@ test('delivery is readable per target, and says so only once the fact exists', a
   expect(before.deliveries).toMatchObject([{ delivered: false, asserted_at: null, assertion_event_id: null }]);
   expect(before.deliveries[0]!.target.seat_id).toBe('palace:W');
 
-  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [messageId] });
+  await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([messageId]) });
 
   const after = await d.commDelivery(messageId);
   expect(after.complete).toBe(true);

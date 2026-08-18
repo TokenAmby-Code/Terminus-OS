@@ -727,7 +727,7 @@ export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
 // messages. Each of them was delivered; each of them needs its own fact.
 export const CommHookSchema = z.object({
   schema_version: z.number().int(), agent_id: z.string().min(1),
-  message_ids: z.array(z.string().min(1)).default([]),
+  comm_tokens: z.array(z.string().regex(/^[A-Za-z0-9_-]{22}$/)).default([]),
   content: z.string().optional(), stop_event_id: z.string().min(1).optional(),
   session_id: z.string().min(1).optional(),
 });
