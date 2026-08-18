@@ -172,6 +172,34 @@ test('boot reconciles a dead dynamic worker instead of failing ensureEstate', as
   expect(await tmux.estateGeneration()).toBe('canonical');
 });
 
+test('a failed dynamic pane removal cannot fabricate seat abandonment', async () => {
+  class FailedDynamicKillTmux extends FakeTmux {
+    override async killSeat(_seatId: string): Promise<void> {}
+  }
+  const store = new MemoryEventStore();
+  const tmux = new FailedDynamicKillTmux();
+  const daemon = new Daemon(store, tmux);
+  await daemon.constructEstate();
+  const seat = 'palace_fleet:33333333-3333-4333-8333-333333333333';
+  await tmux.createStackSeat('palace_fleet', seat);
+  await store.append({
+    entity_type: 'seat', entity_id: seat, event_type: 'reg.pane_created',
+    payload: { pane_state: 'live' },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: new Date().toISOString(),
+  });
+  tmux.killOutOfBand(seat);
+
+  await expect(daemon.handleTmuxLifecycleEvent({
+    schema_version: SCHEMA_VERSION,
+    event: 'pane-died',
+    page: 'palace_fleet',
+  })).rejects.toThrow(`txd could not verify dynamic stack seat cleanup for ${seat}`);
+
+  expect((await store.readByEntity(seat)).some((event) => event.event_type === 'reg.seat_abandoned')).toBe(false);
+  expect((await tmux.listSeats()).some((row) => row.seat_id === seat)).toBe(true);
+});
+
 test('two dead panes earn two loud pane-scoped resets, never a page rebuild', async () => {
   const { store, tmux, daemon } = await setup();
   await daemon.launch({ seat_id: 'palace:N', schema_version: SCHEMA_VERSION, identity: 'north', persona: 'astartes', tint: '#1' });

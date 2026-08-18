@@ -1963,7 +1963,7 @@ export class RealTmux implements TmuxControlPlane {
     return enter.code === 0 ? 'enter_redriven' : 'seat_unresolved';
   }
 
-  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex', expectedPaneGeneration?: string) {
+  sendVerifiedToSeat(seatId: string, correlationId: string, text: string, tabAfterPrefix?: string, engine?: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     return this.serializePaneInput(seatId, () =>
       this.sendVerifiedToSeatUnlocked(seatId, correlationId, text, tabAfterPrefix, engine, expectedPaneGeneration));
   }
@@ -2120,7 +2120,7 @@ export class RealTmux implements TmuxControlPlane {
     return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
   }
 
-  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string) {
+  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     if (engine === 'codex') {
       // Codex parses a literal `!`-prefixed composer line at submit, so the
       // whole form rides the ordinary verified send path.
@@ -2752,7 +2752,7 @@ export class FakeTmux implements TmuxControlPlane {
   private paneTexts = new Map<string, string>();
   private redriveEnterCounts = new Map<string, number>();
 
-  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string, _engine?: 'claude' | 'codex', expectedPaneGeneration?: string) {
+  async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string, _engine?: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead' || (expectedPaneGeneration !== undefined && s.generation !== expectedPaneGeneration)) {
       return { bytes: 0, verdict: 'seat_unresolved' as const };
@@ -2782,7 +2782,7 @@ export class FakeTmux implements TmuxControlPlane {
   setShellRunResult(seatId: string, outcome: ShellRunOutcome): void { this.shellRunResults.set(seatId, outcome); }
   /** Test control: the seat's shell run never completes on its own (abort paths). */
   holdShellRun(seatId: string): void { this.heldShellRuns.add(seatId); }
-  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string) {
+  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead' || (expectedPaneGeneration !== undefined && s.generation !== expectedPaneGeneration)) {
       return { bytes: 0, verdict: 'seat_unresolved' as const };

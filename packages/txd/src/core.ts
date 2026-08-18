@@ -3200,6 +3200,9 @@ export class Daemon {
         if (!(await this.executeClose(binding, transportReceipt))) continue;
       } else {
         await this.tmux.killSeat(seat);
+        if ((await this.tmux.listSeats()).some((row) => row.seat_id === seat)) {
+          throw new Error(`txd could not verify dynamic stack seat cleanup for ${seat}`);
+        }
         await this.store.append({
           entity_type: 'seat', entity_id: seat, event_type: 'reg.seat_abandoned', payload: {},
           provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
