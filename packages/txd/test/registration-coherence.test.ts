@@ -26,6 +26,7 @@ function setup() {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },

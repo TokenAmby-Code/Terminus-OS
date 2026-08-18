@@ -92,6 +92,7 @@ const physicalRegistration = cfg.physicalRegistration
       },
       agentWrapper: cfg.agentWrapper,
       perpetual: cfg.physicalRegistration.perpetual,
+      sshSeatTargets: cfg.sshSeatTargets,
       publish: makeJournalPublisher(journalConnection.sql, cfg.machine),
     }
   : null;

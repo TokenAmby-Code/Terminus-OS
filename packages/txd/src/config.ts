@@ -7,6 +7,19 @@
 // the box identity is unknown; a daemon that guesses its own machine is a bug).
 
 import { DbEndpoint, type DbEndpointT } from '@terminus-os/db';
+import { isStackPage, isTxdPage, TXD_ESTATE } from './estate.ts';
+
+export type SshSeatTargetConfig = {
+  pages: Record<string, string>;
+  seats: Record<string, string>;
+};
+
+export type SshSeatTargets = SshSeatTargetConfig & {
+  /** Every distinct remote machine alias declared by this generation. */
+  targets: readonly string[];
+  /** Resolve one canonical seat, including dynamically minted stack seats. */
+  targetFor(seatId: string): string | undefined;
+};
 
 export type DaemonConfig = {
   bind: string;
@@ -22,6 +35,8 @@ export type DaemonConfig = {
   rotationSignalFifo: string;
   /** Sanctioned Fleet wrapper executable. Identity remains compiled into txd. */
   agentWrapper: string;
+  /** Canonical remote-placement declaration. Exact seats and whole pages never overlap. */
+  sshSeatTargets: SshSeatTargets;
   /**
    * lifecycled's local ingress socket, for arming the pre-send comm watch.
    * Empty string disables the watch plane (degrades loudly per comm).
@@ -43,7 +58,9 @@ export type DaemonConfig = {
 // Partial with explicit undefined: the root tsconfig pins
 // `exactOptionalPropertyTypes`, and these maps deliberately carry `undefined`
 // for "not provided at this layer" (resolved by the ?? chains below).
-type PartialConfig = { [K in keyof DaemonConfig]?: DaemonConfig[K] | undefined };
+type PartialConfig = {
+  [K in Exclude<keyof DaemonConfig, 'sshSeatTargets'>]?: DaemonConfig[K] | undefined
+} & { sshSeatTargets?: SshSeatTargetConfig | SshSeatTargets | undefined };
 
 const HARD_DEFAULTS = {
   bind: '127.0.0.1',
@@ -62,7 +79,58 @@ const HARD_DEFAULTS = {
   commWatchTimeoutMs: 5 * 60 * 1000,
   rotationLockFile: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.lock`,
   rotationSignalFifo: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.signal`,
+  sshSeatTargets: {
+    pages: { somnium: 'k12-work', somnium_fleet: 'k12-work' },
+    seats: { 'council:pax': 'k12-work', 'council:orchestrator': 'k12-work' },
+  },
 } as const;
+
+function parseSshSeatTargets(value: unknown, source: string): SshSeatTargetConfig {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(`txd config error: ${source} must be an object`);
+  }
+  const raw = value as Record<string, unknown>;
+  if (Object.keys(raw).some((key) => key !== 'pages' && key !== 'seats')) {
+    throw new Error(`txd config error: ${source} contains unknown fields`);
+  }
+  const parseMap = (field: 'pages' | 'seats'): Record<string, string> => {
+    const candidate = raw[field];
+    if (typeof candidate !== 'object' || candidate === null || Array.isArray(candidate)
+        || Object.entries(candidate).some(([selector, target]) =>
+          selector.length === 0 || typeof target !== 'string' || target.length === 0)) {
+      throw new Error(`txd config error: ${source}.${field} must map selectors to machine aliases`);
+    }
+    return { ...(candidate as Record<string, string>) };
+  };
+  return { pages: parseMap('pages'), seats: parseMap('seats') };
+}
+
+export function resolveSshSeatTargets(value: unknown): SshSeatTargets {
+  const parsed = parseSshSeatTargets(value, 'sshSeatTargets');
+  for (const page of Object.keys(parsed.pages)) {
+    if (!isTxdPage(page)) {
+      throw new Error(`txd config error: sshSeatTargets.pages contains unknown page ${page}`);
+    }
+  }
+  for (const seat of Object.keys(parsed.seats)) {
+    if (!TXD_ESTATE.includes(seat)) {
+      throw new Error(`txd config error: sshSeatTargets.seats contains unknown canonical seat ${seat}`);
+    }
+    const page = seat.split(':', 1)[0]!;
+    if (isStackPage(page)) {
+      throw new Error(`txd config error: sshSeatTargets.seats must select stack page ${page} by page`);
+    }
+    if (parsed.pages[page] !== undefined) {
+      throw new Error(`txd config error: sshSeatTargets selects ${seat} by both page and seat`);
+    }
+  }
+  const targets = [...new Set([...Object.values(parsed.pages), ...Object.values(parsed.seats)])].sort();
+  return {
+    ...parsed,
+    targets,
+    targetFor: (seatId: string) => parsed.seats[seatId] ?? parsed.pages[seatId.split(':', 1)[0]!],
+  };
+}
 
 function envDefaults(): PartialConfig {
   const socket_dir = process.env.TXD_DB_SOCKET_DIR;
@@ -77,6 +145,17 @@ function envDefaults(): PartialConfig {
       perpetual = JSON.parse(process.env.TXD_PERPETUAL_AGENTS) as Record<string, 'claude' | 'codex'>;
     } catch {
       throw new Error('txd config error: TXD_PERPETUAL_AGENTS must be valid JSON');
+    }
+  }
+  let sshSeatTargets: SshSeatTargetConfig | undefined;
+  if (process.env.TXD_SSH_SEAT_TARGETS !== undefined) {
+    try {
+      sshSeatTargets = parseSshSeatTargets(JSON.parse(process.env.TXD_SSH_SEAT_TARGETS), 'TXD_SSH_SEAT_TARGETS');
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error('txd config error: TXD_SSH_SEAT_TARGETS must be valid JSON');
+      }
+      throw error;
     }
   }
   const registrationSeen = Object.values(registrationRequired).some((value) => value !== undefined);
@@ -102,6 +181,7 @@ function envDefaults(): PartialConfig {
     rotationLockFile: process.env.TXD_ROTATION_LOCK_FILE,
     rotationSignalFifo: process.env.TXD_ROTATION_SIGNAL_FIFO,
     agentWrapper: process.env.TXD_AGENT_WRAPPER,
+    sshSeatTargets,
     physicalRegistration: registrationSeen
       ? registration as DaemonConfig['physicalRegistration']
       : undefined,
@@ -121,6 +201,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     rotationLockFile: raw.rotationLockFile ?? env.rotationLockFile ?? HARD_DEFAULTS.rotationLockFile,
     rotationSignalFifo: raw.rotationSignalFifo ?? env.rotationSignalFifo ?? HARD_DEFAULTS.rotationSignalFifo,
     agentWrapper: raw.agentWrapper ?? env.agentWrapper,
+    sshSeatTargets: raw.sshSeatTargets ?? env.sshSeatTargets ?? HARD_DEFAULTS.sshSeatTargets,
     physicalRegistration: raw.physicalRegistration ?? env.physicalRegistration,
   };
 
@@ -141,6 +222,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
   if (!cfg.rotationLockFile) throw new Error('txd config error: rotationLockFile is required');
   if (!cfg.rotationSignalFifo) throw new Error('txd config error: rotationSignalFifo is required');
   if (!cfg.agentWrapper) throw new Error('txd config error: agentWrapper is required');
+  cfg.sshSeatTargets = resolveSshSeatTargets(cfg.sshSeatTargets);
   if (cfg.physicalRegistration !== undefined) {
     const physical = cfg.physicalRegistration as DaemonConfig['physicalRegistration'];
     if (!physical?.generation) {

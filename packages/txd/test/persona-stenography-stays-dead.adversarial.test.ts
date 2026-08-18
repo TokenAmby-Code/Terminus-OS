@@ -21,6 +21,7 @@ function setup() {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (_type: TxdPublishedEventType, _payload: Record<string, unknown>) => {},
   };
   return { store, tmux, d: new Daemon(store, tmux, undefined, undefined, runtime) };

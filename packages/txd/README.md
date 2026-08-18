@@ -176,6 +176,7 @@ Env/config-driven — no hardcoded machine values. A JSON file pointed at by
 | `db`                  | `TXD_DB_SOCKET_DIR` / `TXD_DB_DATABASE` | socket `/var/run/postgresql`, db `terminus`|
 | `tmuxSocket`          | `TXD_TMUX_SOCKET`                  | `k12`                                      |
 | `agentWrapper`        | `TXD_AGENT_WRAPPER`                | **none — fail loud**                       |
+| `sshSeatTargets`      | `TXD_SSH_SEAT_TARGETS`             | current k12-work page/overseer placement   |
 | `personaWorkspaceRoot`| `TXD_PERSONA_WORKSPACE_ROOT`       | **none — fail loud**                       |
 
 `machine` has **no default**: a daemon that guesses its own box identity is a
@@ -184,6 +185,13 @@ bug, so config load fails loud when it is unset.
 `db` is a `@terminus-os/db` endpoint object (strict-validated — unknown fields
 refuse loud). On fleet boxes it is the sanctioned shape: the native PostgreSQL
 18 cluster's peer-auth unix socket — no password field exists.
+
+`sshSeatTargets` has disjoint `pages` and `seats` maps. A page selector covers
+every canonical seat on that page, including later dynamic stack seats; a seat
+selector names one existing static estate seat. Unknown selectors, exact stack
+selectors, and page/seat overlap refuse at config load. The selected value is
+the SSH machine alias stamped into the shared agent wrapper as
+`TXD_SSH_TARGET`; no target gets a second wrapper implementation.
 
 ## Persistence — PostgreSQL 18
 
@@ -234,7 +242,18 @@ cat > ~/secrets/txd/txd.json <<'EOF'
     "database": "terminus",
     "application_name": "txd"
   },
-  "tmuxSocket": "k12"
+  "tmuxSocket": "k12",
+  "sshSeatTargets": {
+    "pages": {
+      "somnium": "k12-work",
+      "somnium_fleet": "k12-work"
+    },
+    "seats": {
+      "council:pax": "k12-work",
+      "council:orchestrator": "k12-work",
+      "palace:S": "wsl"
+    }
+  }
 }
 EOF
 systemctl --user restart txd
