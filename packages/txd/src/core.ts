@@ -200,6 +200,13 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
+// A refusal is proof that the transport committed no effect. Adapters still
+// return their local byte count for diagnostics, but that count can never
+// cross into typed journal truth unless Enter was verified staged.
+function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
+  return outcome.verdict === 'staged' ? outcome.bytes : 0;
+}
+
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
@@ -1409,13 +1416,21 @@ export class Daemon {
     // reached txd with the hook, and timed out before txd could admit it.
     const outcomes: Array<{ plan: typeof plans[number]; sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>> }> = [];
     for (const plan of plans) {
-      const sent = await this.tmux.sendVerifiedToSeat(
-        plan.target.seat_id,
-        prepared.messageId,
-        plan.frame,
-        prepared.renderedIntent?.tabAfter,
-        plan.binding.engine ?? undefined,
-      );
+      // The binding's opaque pane generation is the physical transaction
+      // witness. Re-attest immediately before mutation: a replaced/unreadable
+      // pane refuses with zero effect instead of letting a stale logical seat
+      // address type into whatever now occupies that name.
+      const generation = await this.tmux.seatGeneration(plan.target.seat_id);
+      const sent = generation !== plan.binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(
+          plan.target.seat_id,
+          prepared.messageId,
+          plan.frame,
+          prepared.renderedIntent?.tabAfter,
+          plan.binding.engine ?? undefined,
+          plan.binding.pane_generation,
+        );
       outcomes.push({ plan, sent });
     }
 
@@ -1425,7 +1440,7 @@ export class Daemon {
       for (const { plan, sent } of outcomes) {
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
-            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: sent.bytes,
+            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: plan.frame,
             receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
@@ -1456,9 +1471,12 @@ export class Daemon {
       const binding = proj.currentBindings.find((row) => row.registered
         && row.agent_id === req.target_agent_id && row.seat_id === prepared.binding.seat_id);
       if (!binding) throw new Error(`target_binding_changed: ${req.target_agent_id}`);
-      const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined);
+      const generation = await this.tmux.seatGeneration(binding.seat_id);
+      const sent = generation !== binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined, binding.pane_generation);
       await this.store.append({ entity_type: 'message', entity_id: prepared.correlationId, event_type: 'act.agent_input_injected',
-        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict, input_class: 'machine_feed' },
+        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent), submit_verdict: sent.verdict, input_class: 'machine_feed' },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
       // The HTTP success is lifecycled's acknowledgement boundary. Anything
       // short of a verified Enter must fail the request so its durable bus
@@ -1522,14 +1540,17 @@ export class Daemon {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === prepared.binding.agent_id && row.seat_id === prepared.binding.seat_id);
         if (!binding) throw new Error(`target_binding_changed: ${req.target}`);
-        const sent = await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!);
+        const generation = await this.tmux.seatGeneration(binding.seat_id);
+        const sent = generation !== binding.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!, binding.pane_generation);
         // Payload holds dumb correlation facts only. The command LINE never
         // enters the append-only stream: like inject's text, it can carry
         // credentials, and an event cannot be redacted later — the digest
         // correlates without persisting the bytes.
         const event = await this.store.append({ entity_type: 'message', entity_id: runId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
+            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'harness_shell', command_digest: sha256(req.command),
           },
           provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
@@ -1659,7 +1680,10 @@ export class Daemon {
     if (events.some((e) => e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === askId && e.payload.target_agent_id === targetAgent)) return;
     const accepted = events.find((e) => e.entity_id === snapshot?.payload.message_id && e.event_type === 'reg.comm_accepted');
     const subscriber = String(accepted?.payload.source_agent_id ?? '');
-    const assertionId = source === 'stop' ? `${stopEventId ?? 'stop'}:${subscriber}:${targetAgent}` : `${askId}:${targetAgent}`;
+    // Callback identity belongs to the ask. One lifecycle stop may satisfy
+    // several asks that were already open, but it cannot become a reusable
+    // subscriber/target fact that future asks inherit.
+    const assertionId = `${askId}:${targetAgent}`;
     if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_callback_asserted')) return;
     await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_callback_asserted',
       payload: { ask_id: askId, subscriber_agent_id: subscriber, target_agent_id: targetAgent, content, source, stop_event_id: stopEventId }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
@@ -1770,10 +1794,13 @@ export class Daemon {
         if (!sender) continue;
         const correlationId = crypto.randomUUID();
         const renderedFrame = `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`;
-        const sent = await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined);
+        const generation = await this.tmux.seatGeneration(sender.seat_id);
+        const sent = generation !== sender.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined, sender.pane_generation);
         await this.store.append({ entity_type: 'message', entity_id: correlationId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: sent.bytes,
+            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'delivery_confirmation',
             message_ids: messageIds, rendered_frame: renderedFrame,
           }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
@@ -1951,10 +1978,9 @@ export class Daemon {
       const targets = snapshot.payload.targets as CommTarget[];
       const accepted = events.find((e) => e.entity_id === snapshot.payload.message_id && e.event_type === 'reg.comm_accepted');
       if (accepted?.payload.source_agent_id !== req.subscriber_agent_id) throw new Error('ask_subscriber_mismatch');
-      const targetIds = new Set(targets.map((t) => t.agent_id));
-      const callbacks: CommCallback[] = events.filter((e) => e.event_type === 'act.comm_callback_asserted' && (
-        e.payload.ask_id === req.ask_id || (e.payload.source === 'stop' && e.payload.subscriber_agent_id === req.subscriber_agent_id && targetIds.has(String(e.payload.target_agent_id)))
-      )).map((e) => ({
+      const callbacks: CommCallback[] = events.filter((e) =>
+        e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === req.ask_id,
+      ).map((e) => ({
         target: targets.find((t) => t.agent_id === e.payload.target_agent_id)!, content: String(e.payload.content), assertion_event_id: e.seq, source: e.payload.source as 'reply' | 'stop',
       }));
       const done = new Set(callbacks.map((c) => c.target.agent_id));
