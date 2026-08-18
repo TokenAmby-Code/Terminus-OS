@@ -38,6 +38,7 @@ function runtime(published: Array<{ type: string; payload: Record<string, unknow
     configuration: { generation: 'estate-1', digest: 'a'.repeat(64) },
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },

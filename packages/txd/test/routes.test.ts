@@ -6,6 +6,7 @@ import {
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { resolveSshSeatTargets } from '../src/config.ts';
 import { EnvelopeInventoryError } from '../src/envelopes.ts';
 import { buildRoutes, deferredJson, makeServer } from '../src/server.ts';
 
@@ -51,7 +52,14 @@ test('GET /tmux/read/zombies translates envelope inventory failures', async () =
     new FakeTmux(),
     undefined,
     undefined,
-    null,
+    {
+      machine: 'k12-personal',
+      configuration: { generation: 'test', digest: 'c'.repeat(64) },
+      agentWrapper: '/fleet/agent-wrapper',
+      perpetual: {},
+      sshSeatTargets: resolveSshSeatTargets({ pages: { somnium: 'k12-work' }, seats: {} }),
+      publish: async () => {},
+    },
     async () => { throw new EnvelopeInventoryError('k12-work', 'ssh failed'); },
   );
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
