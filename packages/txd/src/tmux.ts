@@ -1811,6 +1811,13 @@ export class RealTmux implements TmuxControlPlane {
     return RealTmux.activeComposerPaint(pane)?.text ?? null;
   }
 
+  private static claudePastedTextAttachment(pane: string): boolean {
+    const composer = RealTmux.activeComposer(pane);
+    if (composer === null) return false;
+    const paint = composer.replace(/[│┃\r\n]/g, '');
+    return /^\[Pasted text #\d+ \+\d+ lines\]$/.test(paint);
+  }
+
   static composerReadiness(pane: string, engine?: 'claude' | 'codex'): ComposerReadiness {
     if (!RealTmux.composerInteractive(pane)) return 'unreadable';
     const composer = RealTmux.activeComposerPaint(pane);
@@ -1949,6 +1956,7 @@ export class RealTmux implements TmuxControlPlane {
       return { bytes: 0, verdict: 'seat_unresolved' as const };
     }
     let lastVerdict: ComposerVerdict = 'absent';
+    let freshClaudeAttachmentObserved = false;
     try {
       const attestBaseline = async () => {
         const restored = await this.command('attest_input_baseline', seatId, [
@@ -1965,6 +1973,7 @@ export class RealTmux implements TmuxControlPlane {
         }
         return attestBaseline();
       };
+      const restorationCount = () => freshClaudeAttachmentObserved ? 1 : [...text].length;
       const prefix = tabAfterPrefix ?? text;
       const suffix = tabAfterPrefix === undefined ? '' : text.slice(tabAfterPrefix.length);
       const literal = await this.pasteLiteral(seatId, paneId, prefix, 'paste_literal');
@@ -1999,17 +2008,30 @@ export class RealTmux implements TmuxControlPlane {
         }
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
-          await restoreComposer([...text].length);
+          await restoreComposer(restorationCount());
           return { bytes, verdict: 'seat_unresolved' as const };
         }
         lastVerdict = RealTmux.composerVerdict(captured.stdout, correlationId, text);
+        // Claude collapses a large bracketed paste into one opaque attachment.
+        // It carries no payload digest or scalar count, so it is proof only in
+        // this transaction: after the empty baseline and successful atomic
+        // paste above. It must never become general composer/redrive evidence.
+        if (
+          lastVerdict !== 'intact'
+          && engine === 'claude'
+          && tabAfterPrefix === undefined
+          && RealTmux.claudePastedTextAttachment(captured.stdout)
+        ) {
+          freshClaudeAttachmentObserved = true;
+          lastVerdict = 'intact';
+        }
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
-        await restoreComposer([...text].length);
+        await restoreComposer(restorationCount());
         return { bytes, verdict: 'seat_unresolved' as const };
       }
-      const restored = await restoreComposer([...text].length);
+      const restored = await restoreComposer(restorationCount());
       if (!restored) return { bytes, verdict: 'seat_unresolved' as const };
       return lastVerdict === 'absent'
         ? { bytes, verdict: 'frame_absent' as const }
