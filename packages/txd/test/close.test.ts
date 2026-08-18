@@ -122,7 +122,8 @@ test('closing a mitosis worker removes its pane instead of returning a fixed sea
   const closed = await d.close(req({ targets: ['worker-1'], force: true }));
 
   expect(closed).toMatchObject({ ok: true, closed_count: 1 });
-  expect((await tmux.listSeats()).find((row) => row.seat_id === seat)?.pane).toBe('dead');
+  expect((await tmux.listSeats()).some((row) => row.seat_id === seat)).toBe(false);
+  expect(tmux.estateShape().windows.palace_fleet).not.toContain(seat);
   expect(buildProjections(await store.readAll()).freelist.some((row) => row.seat_id === seat)).toBe(false);
 });
 

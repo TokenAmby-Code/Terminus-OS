@@ -37,6 +37,39 @@ test('adapter failures expose only a stderr category', async () => {
   await expect(tmux.ensureEstate()).rejects.not.toThrow(/%91|\$2|permission denied/);
 });
 
+test('presentation reconciliation fails loudly when zoom observation cannot be read', async () => {
+  const tmux = new RealTmux('scratch', {
+    run: async () => ({ code: 1, stdout: '', stderr: 'window unavailable' }),
+    audit: () => {},
+  });
+
+  await expect(tmux.reconcilePresentation()).rejects.toThrow(/presentation|zoom/i);
+});
+
+test('lifecycle hook commands shell-quote the tmux-supplied page name', async () => {
+  const installed: string[] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      if (args[0] === 'set-hook') {
+        installed.push(args.at(-1)!);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'show-hooks') {
+        return { code: 0, stdout: `tx estate event ${args.at(-1)}\n`, stderr: '' };
+      }
+      throw new Error(`unexpected command ${args[0]}`);
+    },
+    audit: () => {},
+  });
+
+  await tmux.ensureLifecycleHooks();
+  expect(installed).toHaveLength(2);
+  for (const command of installed) {
+    expect(command).toContain('#{q:window_name}');
+    expect(command).not.toContain('\\"#{window_name}\\"');
+  }
+});
+
 test('scoped reset clears history, replaces the process, and verifies the canonical pane tag', async () => {
   const operations: string[] = [];
   const calls: string[][] = [];

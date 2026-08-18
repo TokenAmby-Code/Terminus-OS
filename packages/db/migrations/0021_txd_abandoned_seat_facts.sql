@@ -9,10 +9,12 @@
 ALTER TABLE txd.events DISABLE TRIGGER events_no_delete;
 
 DELETE FROM txd.events
-WHERE entity_id IN (
+WHERE entity_type = 'seat'
+  AND entity_id IN (
   SELECT DISTINCT entity_id
   FROM txd.events
-  WHERE event_type LIKE 'reg.seat_%'
+  WHERE entity_type = 'seat'
+    AND event_type LIKE 'reg.seat\_%' ESCAPE '\'
     AND event_type NOT IN ('reg.seat_cleared', 'reg.seat_abandoned')
 );
 

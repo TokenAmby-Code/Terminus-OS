@@ -168,6 +168,8 @@ test('boot reconciles a dead dynamic worker instead of failing ensureEstate', as
   const restarted = new Daemon(store, tmux);
   await expect(restarted.constructEstate()).resolves.toBeDefined();
   expect((await restarted.estateRows()).some((row) => row.seat_id === seat)).toBe(false);
+  expect(tmux.estateShape().windows.palace_fleet).not.toContain(seat);
+  expect(await tmux.estateGeneration()).toBe('canonical');
 });
 
 test('two dead panes earn two loud pane-scoped resets, never a page rebuild', async () => {

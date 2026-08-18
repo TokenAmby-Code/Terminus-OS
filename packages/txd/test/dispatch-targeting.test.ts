@@ -209,7 +209,8 @@ test('a minted stack pane is abandoned when its engine cannot start', async () =
   const dynamic = (await store.readAll()).filter((event) => event.entity_id.startsWith('mechanicus:')
     && event.entity_id !== 'mechanicus:new');
   expect(dynamic.map((event) => event.event_type)).toEqual(['reg.pane_created', 'reg.seat_abandoned']);
-  expect((await tmux.listSeats()).find((seat) => seat.seat_id === dynamic[0]!.entity_id)?.pane).toBe('dead');
+  expect((await tmux.listSeats()).some((seat) => seat.seat_id === dynamic[0]!.entity_id)).toBe(false);
+  expect(tmux.estateShape().windows.mechanicus).not.toContain(dynamic[0]!.entity_id);
 });
 
 test('autofill skips a pane held by a foreign process and takes the next idle seat', async () => {

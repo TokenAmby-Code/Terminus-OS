@@ -1127,14 +1127,16 @@ export class RealTmux implements TmuxControlPlane {
   async reconcilePresentation(): Promise<void> {
     for (const page of Object.keys(TXD_WINDOWS)) {
       if (isStackPage(page)) continue;
-      await this.clearPageZoom(page, `${TXD_SESSION}:=${page}`);
+      if (!(await this.clearPageZoom(page, `${TXD_SESSION}:=${page}`))) {
+        throw new Error(`txd could not reconcile ${page} presentation zoom`);
+      }
     }
   }
 
   async ensureLifecycleHooks(): Promise<void> {
     const commands = {
-      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page \\"#{window_name}\\""',
-      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page \\"#{window_name}\\""',
+      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name}"',
+      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page #{q:window_name}"',
     } as const;
     for (const [hook, command] of Object.entries(commands)) {
       await this.checked(['set-hook', '-g', hook, command], `install ${hook} lifecycle witness`);
@@ -2545,7 +2547,19 @@ export class FakeTmux implements TmuxControlPlane {
   }
   async killSeat(seatId: string): Promise<void> {
     const s = this.seats.get(seatId);
-    if (s) s.pane = 'dead';
+    if (!s) return;
+    const [page] = seatId.split(':', 1);
+    if (page && isStackPage(page) && !TXD_ESTATE.includes(seatId)) {
+      this.seats.delete(seatId);
+      this.commands.delete(seatId);
+      this.seatEngines.delete(seatId);
+      this.tints.delete(seatId);
+      if (this.shape.windows[page]) {
+        this.shape.windows[page] = this.shape.windows[page]!.filter((seat) => seat !== seatId);
+      }
+      return;
+    }
+    s.pane = 'dead';
   }
   async reapSeat(seatId: string, previousTint?: string | null): Promise<boolean> {
     // Respawn keeps the pane LIVE (bare shell) — a live seat is reapable; a dead
