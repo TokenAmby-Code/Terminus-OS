@@ -506,6 +506,42 @@ test('behavioral pin: malformed Claude pasted-text paint is corruption, never fr
   expect(RealTmux.composerVerdict('❯ prefix [Pasted text #1 +2 lines]', messageId, frame)).toBe('corrupted');
 });
 
+test('behavioral pin: malformed Claude attachment spacing never submits in the fresh send flow', async () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n` + 'x'.repeat(1200);
+  const baseline = 'transcript\n\n❯ \n──────────────────────────────────────────\n  /workspace • Context 9% used • Fable 5';
+  let painted = false;
+  const calls: string[][] = [];
+  const tmux = new RealTmux('scratch', {
+    run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:S\n', stderr: '' };
+      if (args[0] === 'paste-buffer') painted = true;
+      if (args[0] === 'send-keys' && args.includes('BSpace')) painted = false;
+      if (args[0] === 'capture-pane') return {
+        code: 0,
+        stdout: painted ? baseline.replace('❯ ', '❯ [Pastedtext#1+2lines]') : baseline,
+        stderr: '',
+      };
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    observePaneOutput: async () => {
+      let emitted = false;
+      return {
+        next: async () => {
+          if (emitted) throw new Error('observer exhausted');
+          emitted = true;
+        },
+        close: () => undefined,
+      };
+    },
+  });
+
+  expect(await tmux.sendVerifiedToSeat('palace:S', messageId, frame, undefined, 'claude'))
+    .toEqual({ bytes: Buffer.byteLength(frame), verdict: 'composer_corrupted' });
+  expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toHaveLength(0);
+});
+
 for (const receipt of [
   (count: number) => `› [Pasted Content ${count} chars]\n`,
   (count: number) => `› [Pasted Content ${count}\n  chars]\n`,

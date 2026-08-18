@@ -1814,8 +1814,8 @@ export class RealTmux implements TmuxControlPlane {
   private static claudePastedTextAttachment(pane: string): boolean {
     const composer = RealTmux.activeComposer(pane);
     if (composer === null) return false;
-    const paint = composer.replace(/[│┃]/g, '').replace(/\s+/g, '');
-    return /^\[Pastedtext#\d+\+\d+lines\]$/.test(paint);
+    const paint = composer.replace(/[│┃\r\n]/g, '');
+    return /^\[Pasted text #\d+ \+\d+ lines\]$/.test(paint);
   }
 
   static composerReadiness(pane: string, engine?: 'claude' | 'codex'): ComposerReadiness {
