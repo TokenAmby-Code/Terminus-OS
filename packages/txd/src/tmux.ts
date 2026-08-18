@@ -100,7 +100,10 @@ export type ComposerRefusal =
   | 'composer_draft_present'
   | 'composer_unreadable'
   | 'composer_corrupted'
+  | 'composer_rollback_failed'
   | 'frame_absent'
+  | 'submit_failed'
+  | 'transport_failed'
   | 'seat_unresolved';
 export type CommRedriveDriveOutcome = 'enter_redriven' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved';
 
@@ -1842,6 +1845,13 @@ export class RealTmux implements TmuxControlPlane {
     return RealTmux.activeComposerPaint(pane)?.text ?? null;
   }
 
+  private static claudePastedTextAttachment(pane: string): boolean {
+    const composer = RealTmux.activeComposer(pane);
+    if (composer === null) return false;
+    const paint = composer.replace(/[│┃\r\n]/g, '');
+    return /^\[Pasted text #\d+ \+\d+ lines\]$/.test(paint);
+  }
+
   static composerReadiness(pane: string, engine?: 'claude' | 'codex'): ComposerReadiness {
     if (!RealTmux.composerInteractive(pane)) return 'unreadable';
     const composer = RealTmux.activeComposerPaint(pane);
@@ -1968,7 +1978,7 @@ export class RealTmux implements TmuxControlPlane {
     const baseline = await this.command('observe_input_baseline', seatId, [
       'capture-pane', '-p', '-e', '-J', '-t', paneId,
     ]);
-    if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (baseline.code !== 0) return { bytes: 0, verdict: 'transport_failed' as const };
     const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
     if (readiness === 'draft_present') return { bytes: 0, verdict: 'composer_draft_present' as const };
     if (readiness === 'unreadable') return { bytes: 0, verdict: 'composer_unreadable' as const };
@@ -1981,9 +1991,10 @@ export class RealTmux implements TmuxControlPlane {
       // capture is driven by those facts, never by a sleep or polling loop.
       output = await this.outputObserver(this.socket, paneId, signal);
     } catch {
-      return { bytes: 0, verdict: 'seat_unresolved' as const };
+      return { bytes: 0, verdict: 'transport_failed' as const };
     }
     let lastVerdict: ComposerVerdict = 'absent';
+    let freshClaudeAttachmentObserved = false;
     try {
       const attestBaseline = async () => {
         const restored = await this.command('attest_input_baseline', seatId, [
@@ -2000,24 +2011,29 @@ export class RealTmux implements TmuxControlPlane {
         }
         return attestBaseline();
       };
+      const restorationCount = () => freshClaudeAttachmentObserved ? 1 : [...text].length;
+      const refuseAfterMutation = async (
+        cleanVerdict: 'composer_corrupted' | 'frame_absent' | 'submit_failed' | 'transport_failed',
+        count: number,
+        possibleBytes = bytes,
+      ) => await restoreComposer(count)
+        ? { bytes: 0, verdict: cleanVerdict }
+        : { bytes: possibleBytes, verdict: 'composer_rollback_failed' as const };
       const prefix = tabAfterPrefix ?? text;
       const suffix = tabAfterPrefix === undefined ? '' : text.slice(tabAfterPrefix.length);
       const literal = await this.pasteLiteral(seatId, paneId, prefix, 'paste_literal');
       if (!literal) {
-        await attestBaseline();
-        return { bytes: 0, verdict: 'seat_unresolved' as const };
+        return { bytes: 0, verdict: 'transport_failed' as const };
       }
       if (tabAfterPrefix !== undefined) {
         const tab = await this.command('commit_surface_name', seatId, ['send-keys', '-t', paneId, 'Tab']);
         if (tab.code !== 0) {
-          await restoreComposer([...prefix].length);
-          return { bytes: 0, verdict: 'seat_unresolved' as const };
+          return refuseAfterMutation('transport_failed', [...prefix].length, Buffer.byteLength(prefix, 'utf8'));
         }
         if (suffix.length > 0) {
           const argsLiteral = await this.pasteLiteral(seatId, paneId, suffix, 'paste_literal_args');
           if (!argsLiteral) {
-            await restoreComposer([...prefix].length);
-            return { bytes: 0, verdict: 'seat_unresolved' as const };
+            return refuseAfterMutation('transport_failed', [...prefix].length, Buffer.byteLength(prefix, 'utf8'));
           }
         }
       }
@@ -2034,21 +2050,28 @@ export class RealTmux implements TmuxControlPlane {
         }
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
-          await restoreComposer([...text].length);
-          return { bytes: 0, verdict: 'seat_unresolved' as const };
+          return refuseAfterMutation('transport_failed', restorationCount());
         }
         lastVerdict = RealTmux.composerVerdict(captured.stdout, correlationId, text);
+        // Claude collapses a large bracketed paste into one opaque attachment.
+        // It carries no payload digest or scalar count, so it is proof only in
+        // this transaction: after the empty baseline and successful atomic
+        // paste above. It must never become general composer/redrive evidence.
+        if (
+          lastVerdict !== 'intact'
+          && engine === 'claude'
+          && tabAfterPrefix === undefined
+          && RealTmux.claudePastedTextAttachment(captured.stdout)
+        ) {
+          freshClaudeAttachmentObserved = true;
+          lastVerdict = 'intact';
+        }
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
-        await restoreComposer([...text].length);
-        return { bytes: 0, verdict: 'seat_unresolved' as const };
+        return refuseAfterMutation('submit_failed', restorationCount());
       }
-      const restored = await restoreComposer([...text].length);
-      if (!restored) return { bytes: 0, verdict: 'seat_unresolved' as const };
-      return lastVerdict === 'absent'
-        ? { bytes: 0, verdict: 'frame_absent' as const }
-        : { bytes: 0, verdict: 'composer_corrupted' as const };
+      return refuseAfterMutation(lastVerdict === 'absent' ? 'frame_absent' : 'composer_corrupted', restorationCount());
     } finally {
       output.close();
     }
@@ -2115,7 +2138,7 @@ export class RealTmux implements TmuxControlPlane {
     const baseline = await this.command('observe_input_baseline', seatId, [
       'capture-pane', '-p', '-e', '-J', '-t', paneId,
     ]);
-    if (baseline.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+    if (baseline.code !== 0) return { bytes: 0, verdict: 'transport_failed' as const };
     const readiness = RealTmux.composerReadiness(baseline.stdout, engine);
     if (readiness === 'draft_present') return { bytes: 0, verdict: 'composer_draft_present' as const };
     if (readiness === 'unreadable') return { bytes: 0, verdict: 'composer_unreadable' as const };
@@ -2125,7 +2148,7 @@ export class RealTmux implements TmuxControlPlane {
     try {
       output = await this.outputObserver(this.socket, paneId, signal);
     } catch {
-      return { bytes: 0, verdict: 'seat_unresolved' as const };
+      return { bytes: 0, verdict: 'transport_failed' as const };
     }
     let lastVerdict: ComposerVerdict = 'absent';
     try {
@@ -2141,12 +2164,17 @@ export class RealTmux implements TmuxControlPlane {
         ]);
         return attested.code === 0 && attested.stdout === baseline.stdout;
       };
+      const refuseAfterMutation = async (
+        cleanVerdict: 'composer_corrupted' | 'frame_absent' | 'submit_failed' | 'transport_failed',
+        possibleBytes = bytes,
+      ) => await restoreComposer()
+        ? { bytes: 0, verdict: cleanVerdict }
+        : { bytes: possibleBytes, verdict: 'composer_rollback_failed' as const };
       const bang = await this.command('enter_shell_mode', seatId, ['send-keys', '-t', paneId, '-l', '!']);
-      if (bang.code !== 0) return { bytes: 0, verdict: 'seat_unresolved' as const };
+      if (bang.code !== 0) return { bytes: 0, verdict: 'transport_failed' as const };
       const literal = await this.pasteLiteral(seatId, paneId, command, 'paste_literal_run');
       if (!literal) {
-        await restoreComposer();
-        return { bytes: 0, verdict: 'seat_unresolved' as const };
+        return refuseAfterMutation('transport_failed', 1);
       }
       while (!signal.aborted) {
         try {
@@ -2156,21 +2184,15 @@ export class RealTmux implements TmuxControlPlane {
         }
         const captured = await this.command('observe_input_composer', seatId, ['capture-pane', '-p', '-J', '-t', paneId]);
         if (captured.code !== 0) {
-          await restoreComposer();
-          return { bytes: 0, verdict: 'seat_unresolved' as const };
+          return refuseAfterMutation('transport_failed');
         }
         lastVerdict = RealTmux.shellComposerVerdict(captured.stdout, command);
         if (lastVerdict !== 'intact') continue;
         const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
         if (enter.code === 0) return { bytes, verdict: 'staged' as const };
-        await restoreComposer();
-        return { bytes: 0, verdict: 'seat_unresolved' as const };
+        return refuseAfterMutation('submit_failed');
       }
-      const restored = await restoreComposer();
-      if (!restored) return { bytes: 0, verdict: 'seat_unresolved' as const };
-      return lastVerdict === 'absent'
-        ? { bytes: 0, verdict: 'frame_absent' as const }
-        : { bytes: 0, verdict: 'composer_corrupted' as const };
+      return refuseAfterMutation(lastVerdict === 'absent' ? 'frame_absent' : 'composer_corrupted');
     } finally {
       output.close();
     }

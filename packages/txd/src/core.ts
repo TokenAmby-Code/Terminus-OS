@@ -200,11 +200,13 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-// A refusal is proof that the transport committed no effect. Adapters still
-// return their local byte count for diagnostics, but that count can never
-// cross into typed journal truth unless Enter was verified staged.
+// A normal refusal is proof that rollback restored the pre-call composer.
+// Failed rollback is deliberately different: its byte count is possible live
+// composer effect and must remain visible in journal truth for recovery.
 function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
-  return outcome.verdict === 'staged' ? outcome.bytes : 0;
+  return outcome.verdict === 'staged' || outcome.verdict === 'composer_rollback_failed'
+    ? outcome.bytes
+    : 0;
 }
 
 export class Daemon {

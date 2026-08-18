@@ -368,6 +368,27 @@ for (const [journalEvent, claimedBytes] of [[49482, 93], [49776, 564], [50898, 1
   });
 }
 
+test('behavioral pin: event 50983 journals retained composer effect without unresolved-seat fiction', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  const refusingTmux = tmux as unknown as {
+    sendVerifiedToSeat(): Promise<{ bytes: number; verdict: 'composer_rollback_failed' }>;
+  };
+  refusingTmux.sendVerifiedToSeat = async () => ({ bytes: 605, verdict: 'composer_rollback_failed' });
+
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'event 50983 recurrence',
+    ask: false,
+    reply: false,
+  });
+
+  expect(accepted.staged).toBe(false);
+  expect((await store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
+    .toMatchObject({ bytes: 605, submit_verdict: 'composer_rollback_failed' });
+});
+
 test('behavioral pin: event 49779 draft-present refusal remains a clean zero-effect control', async () => {
   const { store, tmux, d } = await fixture(async () => undefined);
   const refusingTmux = tmux as unknown as {
