@@ -97,10 +97,10 @@ each route is the ruled daemon behavior, unchanged.
 - `tx run <target> <command>` branches on txd's event-sourced agent-presence
   truth, never a process sniff. A target resolving to a REGISTERED binding is
   an agent pane: txd stages the engine's shell escape (Claude enters bash mode
-  with a literal `!` keystroke on a verified-empty composer, then pastes and
-  verifies the command; Codex takes the whole `!<command>` line through the
-  verified send path), so the command's output lands in that agent's
-  conversation, and the injection is recorded as `act.agent_input_injected`
+  with a literal `!` keystroke, then pastes the command and drives Enter;
+  Codex takes the whole `!<command>` line through the verified send path), so
+  the command's output lands in that agent's conversation, and the injection
+  is recorded as `act.agent_input_injected`
   (`input_class: harness_shell`). A bare declared seat executes the command in
   its idle pane shell: the command bytes live in a script file, the one staged
   line carries only fixed paths, and completion is the pane's own
@@ -115,10 +115,13 @@ each route is the ruled daemon behavior, unchanged.
   `pane_lost_mid_run` instead of hanging on a dead signal.
 - Ordinary comm payloads are opaque and have no caller-visible length mode or
   size ceiling. Txd loads every verified text segment into a private,
-  one-use tmux buffer over stdin and injects it as one bracketed paste followed
-  by Enter. Existing visible paint never gates a comm. Callers never split,
-  spill, encode, or select a transport. A failed transport or submit records
-  its possible-effect byte count but remains permanently undelivered.
+  one-use tmux buffer over stdin. An ordinary message injects as one bracketed
+  paste followed by Enter; a command or skill send is a sequence — paste the
+  prefix, send Tab, paste the suffix, then Enter — so a submission is not
+  always a single paste. Existing visible paint never gates a comm. Callers
+  never split, spill, encode, or select a transport. A failed transport or
+  submit records its possible-effect byte count but remains permanently
+  undelivered.
 - Delivery requires the exact target's `staged` transport fact joined with the
   receiving engine's exact `UserPromptSubmit` message id. Bytes, process
   success, and an `ok: true` envelope are never delivery assertions.

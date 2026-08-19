@@ -1442,10 +1442,21 @@ export class Daemon {
         allStaged &&= sent.verdict === 'staged';
         if (sent.verdict === 'staged') {
           const events = await this.store.readAll();
+          // A command or skill surface submits with no comm envelope in the
+          // prompt, so its hook carries an empty `message_ids` list and the
+          // rendered frame is the only thing that names it. Enter is driven
+          // outside the journal mutex, so that hook can land before this
+          // receipt exists — the hook then sees no staged transport and
+          // declines, and matching here by message id alone would lose the
+          // delivery with both facts present. The frame arm stays exact: the
+          // same target, and content identical to the frame this transaction
+          // rendered and staged.
+          const intentFrame = prepared.renderedIntent?.frame;
           const submitted = events.some((candidate) => candidate.event_type === 'act.prompt_submitted'
             && candidate.payload.agent_id === plan.target.agent_id
-            && Array.isArray(candidate.payload.message_ids)
-            && candidate.payload.message_ids.includes(prepared.messageId));
+            && ((Array.isArray(candidate.payload.message_ids)
+                && candidate.payload.message_ids.includes(prepared.messageId))
+              || (intentFrame !== undefined && candidate.payload.content === intentFrame)));
           const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
           if (submitted && !events.some((candidate) => candidate.entity_id === assertionId
             && candidate.event_type === 'act.comm_delivery_asserted')) {

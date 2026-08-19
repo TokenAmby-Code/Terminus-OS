@@ -452,3 +452,34 @@ for (const profile of [
     expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
   });
 }
+
+// Enter is driven outside the journal mutex, so the engine's UserPromptSubmit
+// can reach txd before `act.comm_bytes_sent` exists. A command surface submits
+// with no comm envelope in the prompt, so that hook carries an empty
+// `message_ids` list and only the rendered frame identifies it. Correlating the
+// send path by message id alone loses the delivery permanently: the hook finds
+// no staged transport yet and declines to assert, and the staged receipt then
+// finds no id to match. Both facts exist and the delivery still reads undelivered.
+test('behavioral pin: a hook that beats the staged receipt still asserts the intent delivery', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
+  const rendered = '/compact hard';
+  const instrumented = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
+  };
+  instrumented.sendVerifiedToSeat = async (_seat, _id, text) => {
+    await d.promptSubmitted({
+      schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+    });
+    return { bytes: Buffer.byteLength(text), verdict: 'staged' };
+  };
+
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
+  } as never);
+
+  const delivery = await d.commDelivery(accepted.message_id);
+  expect(delivery.complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+});
