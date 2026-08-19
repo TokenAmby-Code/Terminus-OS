@@ -76,7 +76,11 @@ test('behavioral pin: a mid-turn staged frame absent from the composer at the ta
   });
 });
 
-test('behavioral pin: the bytes-sent receipt records the target turn at send and nothing about departure', async () => {
+// The receipt records transport facts and the target turn only; that no
+// send-time departure field exists is pinned by the adversarial sweep in
+// comm-midturn-attestation.adversarial.test.ts, the one place the corpse may
+// be remembered.
+test('behavioral pin: the bytes-sent receipt records the target turn at send', async () => {
   const { store, daemon } = await rig();
   await targetWorking(store);
 
@@ -95,7 +99,6 @@ test('behavioral pin: the bytes-sent receipt records the target turn at send and
     submit_verdict: 'staged',
     target_turn: 'working',
   });
-  expect('frame_departed' in (receipt?.payload ?? {})).toBe(false);
 });
 
 test('behavioral pin: a frame the first stop could not clear asserts on a later fresh stop that can', async () => {

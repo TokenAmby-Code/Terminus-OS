@@ -130,7 +130,7 @@ test('behavioral pin: a failed capture proves nothing — unobservable', async (
 });
 
 test('behavioral pin: an unresolvable seat is unobservable at rest', async () => {
-  const run = async (args0: string, args: string[]): Promise<TmuxCommandResult> => {
+  const run = async (_socket: string, args: string[]): Promise<TmuxCommandResult> => {
     if (args[0] === 'list-panes') return { code: 0, stdout: '', stderr: '' };
     return { code: 0, stdout: '', stderr: '' };
   };
