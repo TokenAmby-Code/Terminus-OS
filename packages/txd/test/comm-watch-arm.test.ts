@@ -24,10 +24,12 @@ async function registered(d: Daemon, store: EventStore, seat: string, identity: 
   });
 }
 
-async function bindEngine(store: EventStore, seat: string, identity: string, engine: 'claude' | 'codex'): Promise<void> {
+async function bindEngine(store: EventStore, tmux: FakeTmux, seat: string, identity: string, engine: 'claude' | 'codex'): Promise<void> {
+  const paneGeneration = await tmux.seatGeneration(seat);
+  if (!paneGeneration) throw new Error(`fixture pane absent: ${seat}`);
   await store.append({
     entity_type: 'seat', entity_id: seat, event_type: 'reg.bound',
-    payload: { agent_id: identity, persona: 'p', rank: 'astartes', commander: null, tint: '#111111', pane_generation: 'fake-generation', engine },
+    payload: { agent_id: identity, persona: 'p', rank: 'astartes', commander: null, tint: '#111111', pane_generation: paneGeneration, engine },
     provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
     occurred_at: '2026-08-01T00:00:00.000Z',
   });
@@ -305,7 +307,7 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
       content: frame,
     });
     hookReturned = true;
-    expect(result.asserted).toEqual([messageId]);
+    expect(result.asserted).toEqual([]);
     return { bytes: Buffer.byteLength(frame), verdict: 'staged' as const };
   };
 
@@ -324,10 +326,53 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
     .toHaveLength(1);
 }, 500);
 
-test('behavioral pin: the five-minute lifecycle gate cannot become a composer wait', async () => {
-  const source = await Bun.file(new URL('../src/daemon.ts', import.meta.url)).text();
-  expect(source).not.toContain('composerObserveTimeoutMs: cfg.commWatchTimeoutMs');
+test('behavioral pin: a replaced pane generation refuses before comm bytes cross the transport boundary', async () => {
+  let tmux!: FakeTmux;
+  const f = await fixture(async () => {
+    tmux.forceSeatGeneration('palace:W', 'replacement-generation');
+  });
+  tmux = f.tmux;
+
+  const accepted = await f.d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'must stay on the bound pane generation',
+    ask: false,
+    reply: false,
+  });
+
+  expect(accepted.staged).toBe(false);
+  expect(tmux.sends('palace:W')).toEqual([]);
+  expect((await f.store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
+    .toMatchObject({ bytes: 0, submit_verdict: 'seat_unresolved' });
 });
+
+for (const [journalEvent, claimedBytes] of [
+  [49482, 93],
+  [49776, 564],
+  [50898, 1219],
+  [53046, 1465],
+  [53084, 903],
+] as const) {
+  test(`behavioral pin: event ${journalEvent} unresolved adapter bytes can never become journal truth`, async () => {
+    const { store, tmux, d } = await fixture(async () => undefined);
+    tmux.sendVerifiedToSeat = async () => ({ bytes: claimedBytes, verdict: 'seat_unresolved' as const });
+
+    const accepted = await d.comm({
+      schema_version: SCHEMA_VERSION,
+      source_agent_id: 'sender',
+      target: 'worker',
+      message: `event ${journalEvent} recurrence`,
+      ask: false,
+      reply: false,
+    });
+
+    expect(accepted.staged).toBe(false);
+    expect((await store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
+      .toMatchObject({ bytes: 0, submit_verdict: 'seat_unresolved' });
+  });
+}
 
 test('machine-feed injection shares the composer gate and carries no comm envelope', async () => {
   const { store, tmux } = await fixture(null);
@@ -349,24 +394,24 @@ test('machine-feed injection shares the composer gate and carries no comm envelo
   expect(order).toEqual(['gate:worker', 'inject:palace:W']);
 });
 
-test('machine-feed injection refuses a non-staged composer verdict so the bus event is redelivered', async () => {
+test('machine-feed injection refuses a non-staged transport so the bus event is redelivered', async () => {
   const { store, tmux } = await fixture(null);
   const d = new Daemon(store, tmux, undefined, undefined, null, null, null, async () => undefined);
   const refusingTmux = tmux as unknown as {
-    sendVerifiedToSeat(seat: string, id: string, text: string): Promise<{ bytes: number; verdict: 'composer_corrupted' }>;
+    sendVerifiedToSeat(seat: string, id: string, text: string): Promise<{ bytes: number; verdict: 'transport_failed' }>;
   };
   refusingTmux.sendVerifiedToSeat = async (_seat, _id, text) => ({
     bytes: Buffer.byteLength(text, 'utf8'),
-    verdict: 'composer_corrupted',
+    verdict: 'transport_failed',
   });
 
   await expect(d.inject({ schema_version: SCHEMA_VERSION, target_agent_id: 'worker', text: 'durable machine fact' }))
-    .rejects.toThrow('machine_feed_not_staged: composer_corrupted');
+    .rejects.toThrow('machine_feed_not_staged: transport_failed');
 
   const events = await store.readAll();
   expect(events.filter((event) => event.event_type === 'act.agent_input_injected')).toHaveLength(1);
   expect(events.find((event) => event.event_type === 'act.agent_input_injected')?.payload.submit_verdict)
-    .toBe('composer_corrupted');
+    .toBe('transport_failed');
   expect(events.some((event) => event.event_type.startsWith('reg.comm_'))).toBe(false);
 });
 
@@ -376,7 +421,7 @@ for (const profile of [
 ] as const) {
   test(`behavioral pin: ${profile.engine} intent renders in txd, types Tab, and writes a typed receipt`, async () => {
     const { store, tmux, d } = await fixture(async () => undefined);
-    await bindEngine(store, 'palace:W', 'worker', profile.engine);
+    await bindEngine(store, tmux, 'palace:W', 'worker', profile.engine);
     const observed: unknown[] = [];
     const instrumented = tmux as unknown as {
       sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;

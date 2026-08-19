@@ -76,7 +76,7 @@ each route is the ruled daemon behavior, unchanged.
 - `tx estate abandon <seat>...` is the repair leg for a reconcile-proven
   phantom. The batch is atomic and overseer-gated; every target must be
   noncanonical, projected unbound, absent from tmux, and carry an open
-  `pane_absent` contradiction naming `seat_decommissioned`. Canonical seats
+  `pane_absent` contradiction naming `seat_abandoned`. Canonical seats
   remain reconstruction work and a live or merely unobserved target refuses.
 - After `/agents/comm` stages the bytes, `tx comm` waits on
   `act.comm_delivery_asserted` for at most 30 seconds. An on-time receiving
@@ -110,30 +110,18 @@ each route is the ruled daemon behavior, unchanged.
   truncation reported). Refusals are loud and typed: `identity_absent`,
   `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
   `seat_binding_pending`, `scoped_reset_pending`, `pane_dead`,
-  `seat_decommissioned`, `engine_unattested`, `stage_failed`,
+  `seat_abandoned`, `engine_unattested`, `stage_failed`,
   `run_not_staged`, and a mid-run pane replacement fails the run with
   `pane_lost_mid_run` instead of hanging on a dead signal.
 - Ordinary comm payloads are opaque and have no caller-visible length mode or
   size ceiling. Txd loads every verified text segment into a private,
-  one-use tmux buffer over stdin and injects it as one bracketed paste before
-  exact composer verification and Enter. Callers never split, spill, encode,
-  or select a transport; a buffer/paste failure refuses loudly without
-  submitting a prefix. Pre-input readiness has three observed states: an
-  `empty_ready` composer may be staged, `draft_present` refuses with
-  `composer_draft_present`, and an indeterminate paint refuses with
-  `composer_unreadable`. `composer_corrupted` is reserved for an observed
-  mismatch after staging or exact redrive verification; a parse failure alone
-  never mints corruption.
-- A painted draft enqueues the accepted comm transaction; it is not a terminal
-  transport refusal. The existing composer-quiet recovery edge drains the
-  exact journaled frame once the prompt becomes writable. `tx comm recover
-  <logical-target>` exposes the same txd-owned mechanism to an operator; an
-  explicitly discarded corrupted frame is recorded as
-  `act.comm_draft_discarded` with its original byte count.
-- Claude submission is effect-attested. A successful tmux Enter syscall is
-  staged only after a repaint proves the exact frame left the active composer;
-  otherwise the retained bytes are `submit_unverified` and immediately enter
-  exact redrive. Redrive Enter is held to the same composer-clear proof.
+  one-use tmux buffer over stdin and injects it as one bracketed paste followed
+  by Enter. Existing visible paint never gates a comm. Callers never split,
+  spill, encode, or select a transport. A failed transport or submit records
+  its possible-effect byte count but remains permanently undelivered.
+- Delivery requires the exact target's `staged` transport fact joined with the
+  receiving engine's exact `UserPromptSubmit` message id. Bytes, process
+  success, and an `ok: true` envelope are never delivery assertions.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an

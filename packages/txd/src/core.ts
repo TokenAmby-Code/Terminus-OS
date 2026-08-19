@@ -31,10 +31,6 @@ import {
   type CommRequest,
   type CommReceiptWaitRequest,
   type CommReceipt,
-  type CommRedriveRequest,
-  type CommRedriveResponse,
-  type CommRecoverRequest,
-  type CommRecoverResponse,
   type CommTarget,
   type CommWaitRequest,
   type CommWaitResponse,
@@ -108,7 +104,7 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 
 type Now = () => string;
 // What txd hands lifecycled to arm one comm watch: enough to name the
-// subscription's agent stream and the message a composer-quiet fact may redrive.
+// subscription's agent stream and the message whose hook will assert delivery.
 export type CommWatchArmInput = {
   message_id: string;
   target_agent_id: string;
@@ -129,9 +125,7 @@ const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
   },
 };
 
-// The ONE comm frame template. comm() stages it and commRedrive() verifies
-// the composer against it; a second copy of this string would let the two
-// silently diverge and turn every redrive into a false `composer_corrupted`.
+// The one comm frame template.
 function commFrame(messageId: string, sourceAgentId: string, askId: string | null, message: string): string {
   return `[tx comm ${messageId} from ${sourceAgentId}${askId ? ` ask ${askId}` : ''}]\n${message}`;
 }
@@ -200,6 +194,10 @@ function liveClaim(
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
+  return outcome.verdict === 'seat_unresolved' ? 0 : outcome.bytes;
 }
 
 export class Daemon {
@@ -373,7 +371,7 @@ export class Daemon {
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
       // One candidate's seat-level truth, first disqualifier in a fixed order.
       const disqualify = (candidate: string): Exclude<SeatDisqualifier, 'foreign_process'> | null => {
-        if (projections.decommissionedSeats.has(candidate)) return 'decommissioned';
+        if (projections.abandonedSeats.has(candidate)) return 'abandoned';
         if (pendingResetSeats.has(candidate)) return 'reset_pending';
         if (bound.has(candidate)) return 'bound';
         if (launching.has(candidate)) return 'launching';
@@ -384,7 +382,7 @@ export class Daemon {
       const idle = (candidate: string) => workloads.get(candidate)?.idle ?? false;
       let seatId: string;
       let mintedStackSeat: string | null = null;
-      const decommissionMintedStackSeat = async (): Promise<void> => {
+      const abandonMintedStackSeat = async (): Promise<void> => {
         if (!mintedStackSeat) return;
         const seat = mintedStackSeat;
         await this.tmux.killSeat(seat);
@@ -394,7 +392,7 @@ export class Daemon {
         await this.store.append({
           entity_type: 'seat',
           entity_id: seat,
-          event_type: 'reg.seat_decommissioned',
+          event_type: 'reg.seat_abandoned',
           payload: {},
           provenance: this.prov('observer', null),
           occurred_at: this.now(),
@@ -419,7 +417,7 @@ export class Daemon {
             occurred_at: this.now(),
           });
         } catch (error) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           throw error;
         }
         return candidate;
@@ -488,7 +486,7 @@ export class Daemon {
             const reason = ({
               bound: 'seat_bound',
               launching: 'seat_launching',
-              decommissioned: 'seat_decommissioned',
+              abandoned: 'seat_abandoned',
               reset_pending: 'seat_reset_pending',
               dead: 'pane_dead',
             } as const)[state];
@@ -501,7 +499,7 @@ export class Daemon {
       try {
         const paneGeneration = await this.tmux.seatGeneration(seatId);
         if (!paneGeneration) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_generation_unattested');
           return;
         }
@@ -523,7 +521,7 @@ export class Daemon {
           ...(sshTarget ? { sshTarget } : {}),
           ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
         }))) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_start_failed');
           return;
         }
@@ -573,7 +571,7 @@ export class Daemon {
             });
           }
         }
-        await decommissionMintedStackSeat();
+        await abandonMintedStackSeat();
         throw error;
       }
     });
@@ -1411,13 +1409,21 @@ export class Daemon {
     // reached txd with the hook, and timed out before txd could admit it.
     const outcomes: Array<{ plan: typeof plans[number]; sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>> }> = [];
     for (const plan of plans) {
-      const sent = await this.tmux.sendVerifiedToSeat(
-        plan.target.seat_id,
-        prepared.messageId,
-        plan.frame,
-        prepared.renderedIntent?.tabAfter,
-        plan.binding.engine ?? undefined,
-      );
+      // The binding's opaque pane generation is the physical transaction
+      // witness. Re-attest immediately before mutation: a replaced/unreadable
+      // pane refuses with zero effect instead of letting a stale logical seat
+      // address type into whatever now occupies that name.
+      const generation = await this.tmux.seatGeneration(plan.target.seat_id);
+      const sent = generation !== plan.binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(
+          plan.target.seat_id,
+          prepared.messageId,
+          plan.frame,
+          prepared.renderedIntent?.tabAfter,
+          plan.binding.engine ?? undefined,
+          plan.binding.pane_generation,
+        );
       outcomes.push({ plan, sent });
     }
 
@@ -1427,37 +1433,40 @@ export class Daemon {
       for (const { plan, sent } of outcomes) {
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
-            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: sent.bytes,
+            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: plan.frame,
             receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
         allStaged &&= sent.verdict === 'staged';
+        if (sent.verdict === 'staged') {
+          const events = await this.store.readAll();
+          const submitted = events.some((candidate) => candidate.event_type === 'act.prompt_submitted'
+            && candidate.payload.agent_id === plan.target.agent_id
+            && Array.isArray(candidate.payload.message_ids)
+            && candidate.payload.message_ids.includes(prepared.messageId));
+          const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
+          if (submitted && !events.some((candidate) => candidate.entity_id === assertionId
+            && candidate.event_type === 'act.comm_delivery_asserted')) {
+            const assertion = await this.store.append({
+              entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+              payload: {
+                message_id: prepared.messageId,
+                target_agent_id: plan.target.agent_id,
+                source_agent_id: req.source_agent_id,
+              },
+              provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+            });
+            event_ids.push(assertion.seq);
+            this.wakeDelivery(prepared.messageId);
+          }
+        }
       }
       if (prepared.replyingToAsk) await this.assertCallback(prepared.replyingToAsk, req.source_agent_id, req.message!, 'reply', null, transportReceipt);
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
         targets: prepared.targets, staged: allStaged, event_ids };
     });
-    // A non-zero refusal means pane mutation happened even though Enter could
-    // not be attested. Re-drive immediately from the durable accepted frame;
-    // this is downstream recovery and never retypes or guesses at the draft.
-    for (const { plan, sent } of outcomes) {
-      if (sent.verdict === 'staged' || sent.bytes === 0) continue;
-      const outcome = await this.tmux.redriveSeatComm(plan.target.seat_id, prepared.messageId, plan.frame);
-      const event = await this.locked(() => this.store.append({
-        entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_redrive_attempted',
-        payload: {
-          message_id: prepared.messageId,
-          target_agent_id: plan.target.agent_id,
-          seat_id: plan.target.seat_id,
-          trigger: 'retained_after_send',
-          outcome,
-        },
-        provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
-      }));
-      accepted.event_ids.push(event.seq);
-    }
     return accepted;
   }
 
@@ -1478,9 +1487,12 @@ export class Daemon {
       const binding = proj.currentBindings.find((row) => row.registered
         && row.agent_id === req.target_agent_id && row.seat_id === prepared.binding.seat_id);
       if (!binding) throw new Error(`target_binding_changed: ${req.target_agent_id}`);
-      const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined);
+      const generation = await this.tmux.seatGeneration(binding.seat_id);
+      const sent = generation !== binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined, binding.pane_generation);
       await this.store.append({ entity_type: 'message', entity_id: prepared.correlationId, event_type: 'act.agent_input_injected',
-        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict, input_class: 'machine_feed' },
+        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent), submit_verdict: sent.verdict, input_class: 'machine_feed' },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
       // The HTTP success is lifecycled's acknowledgement boundary. Anything
       // short of a verified Enter must fail the request so its durable bus
@@ -1525,7 +1537,7 @@ export class Daemon {
       // No registered binding answers to this identity, so the only reading
       // left is a bare declared seat. Anything else is absent — loud.
       if (!TXD_ESTATE.includes(req.target)) throw new Error(`identity_absent: ${req.target}`);
-      if (proj.decommissionedSeats.has(req.target)) throw new Error(`seat_decommissioned: ${req.target}`);
+      if (proj.abandonedSeats.has(req.target)) throw new Error(`seat_abandoned: ${req.target}`);
       // A binding mid-birth is an agent arriving; racing its registration
       // with a shell line would type into its wrapper.
       if (proj.currentBindings.some((binding) => binding.seat_id === req.target)) {
@@ -1544,14 +1556,17 @@ export class Daemon {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === prepared.binding.agent_id && row.seat_id === prepared.binding.seat_id);
         if (!binding) throw new Error(`target_binding_changed: ${req.target}`);
-        const sent = await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!);
+        const generation = await this.tmux.seatGeneration(binding.seat_id);
+        const sent = generation !== binding.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!, binding.pane_generation);
         // Payload holds dumb correlation facts only. The command LINE never
         // enters the append-only stream: like inject's text, it can carry
         // credentials, and an event cannot be redacted later — the digest
         // correlates without persisting the bytes.
         const event = await this.store.append({ entity_type: 'message', entity_id: runId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
+            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'harness_shell', command_digest: sha256(req.command),
           },
           provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
@@ -1681,7 +1696,10 @@ export class Daemon {
     if (events.some((e) => e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === askId && e.payload.target_agent_id === targetAgent)) return;
     const accepted = events.find((e) => e.entity_id === snapshot?.payload.message_id && e.event_type === 'reg.comm_accepted');
     const subscriber = String(accepted?.payload.source_agent_id ?? '');
-    const assertionId = source === 'stop' ? `${stopEventId ?? 'stop'}:${subscriber}:${targetAgent}` : `${askId}:${targetAgent}`;
+    // Callback identity belongs to the ask. One lifecycle stop may satisfy
+    // several asks that were already open, but it cannot become a reusable
+    // subscriber/target fact that future asks inherit.
+    const assertionId = `${askId}:${targetAgent}`;
     if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_callback_asserted')) return;
     await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_callback_asserted',
       payload: { ask_id: askId, subscriber_agent_id: subscriber, target_agent_id: targetAgent, content, source, stop_event_id: stopEventId }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
@@ -1699,6 +1717,16 @@ export class Daemon {
   // fails deterministically instead of wedging the lane.
   promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[]; dead_lettered: string[] }> {
     return this.locked(async () => {
+      await this.store.append({
+        entity_type: 'agent', entity_id: hook.agent_id, event_type: 'act.prompt_submitted',
+        payload: {
+          agent_id: hook.agent_id,
+          message_ids: hook.message_ids,
+          content: hook.content ?? null,
+          session_id: hook.session_id ?? null,
+        },
+        provenance: this.prov('hook', receipt), occurred_at: this.now(),
+      });
       const events = await this.store.readAll();
       const asserted: string[] = [];
       const matchedMessageIds: string[] = [];
@@ -1718,6 +1746,11 @@ export class Daemon {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
         matched = true;
+        const staged = events.some((event) => event.entity_id === messageId
+          && event.event_type === 'act.comm_bytes_sent'
+          && event.payload.target_agent_id === hook.agent_id
+          && event.payload.submit_verdict === 'staged');
+        if (!staged) continue;
         matchedMessageIds.push(messageId);
         const assertionId = `${messageId}:${hook.agent_id}`;
         if (!events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) {
@@ -1792,10 +1825,13 @@ export class Daemon {
         if (!sender) continue;
         const correlationId = crypto.randomUUID();
         const renderedFrame = `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`;
-        const sent = await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined);
+        const generation = await this.tmux.seatGeneration(sender.seat_id);
+        const sent = generation !== sender.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined, sender.pane_generation);
         await this.store.append({ entity_type: 'message', entity_id: correlationId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: sent.bytes,
+            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'delivery_confirmation',
             message_ids: messageIds, rendered_frame: renderedFrame,
           }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
@@ -1803,167 +1839,6 @@ export class Daemon {
       }
       return { ok: true, asserted, dead_lettered: [] };
     });
-  }
-
-  // The remedial half of the two-phase comm contract is a deliberate pane
-  // action. Lifecycled's named fact edge decides WHEN; this is mechanism only
-  // and remains idempotent against a late organic submit.
-  private async commRemedialContext(messageId: string, targetAgentId: string) {
-    const events = await this.store.readAll();
-    const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
-    if (!accepted) throw new Error('message_absent');
-    if (!(accepted.payload.target_agent_ids as unknown[]).includes(targetAgentId)) throw new Error('target_mismatch');
-    const delivered = events.some((e) => e.entity_id === `${messageId}:${targetAgentId}` && e.event_type === 'act.comm_delivery_asserted');
-    return { events, accepted, delivered };
-  }
-
-  commRedrive(req: CommRedriveRequest, transportReceipt: string | null = null): Promise<CommRedriveResponse> {
-    return this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const { events, accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
-      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
-      // The assertion arriving first is the good ending, not an error — and
-      // the pane is not touched, because there is nothing left to submit.
-      if (delivered) return { ...base, outcome: 'already_delivered' };
-      const proj = await this.projections();
-      const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
-      if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
-      const askId = typeof accepted.payload.ask_id === 'string' ? accepted.payload.ask_id : null;
-      const frame = accepted.payload.kind === 'command' || accepted.payload.kind === 'skill'
-        ? String(accepted.payload.rendered_frame)
-        : commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
-      const latestSend = [...events].reverse().find((event) => event.entity_id === req.message_id
-        && event.event_type === 'act.comm_bytes_sent'
-        && event.payload.target_agent_id === req.target_agent_id);
-      let outcome: CommRedriveResponse['outcome'];
-      if (latestSend?.payload.submit_verdict === 'composer_draft_present') {
-        const intent = accepted.payload.intent as CommIntent | undefined;
-        const tabAfter = intent ? renderCommIntent(intent, binding.engine!).tabAfter : undefined;
-        const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, req.message_id, frame, tabAfter, binding.engine!);
-        await this.store.append({
-          entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_bytes_sent',
-          payload: {
-            target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
-            submit_verdict: sent.verdict, kind: accepted.payload.kind ?? 'message',
-            name: accepted.payload.name ?? null, rendered_frame: frame, drain: true,
-            receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
-          },
-          provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
-        });
-        outcome = sent.verdict === 'staged'
-          ? 'enter_redriven'
-          : sent.verdict === 'composer_draft_present'
-            ? 'queued'
-            : sent.verdict === 'seat_unresolved' || sent.verdict === 'frame_absent' || sent.verdict === 'submit_unverified'
-              ? sent.verdict
-              : 'composer_corrupted';
-      } else {
-        outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
-      }
-      await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
-        payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
-        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
-      return { ...base, outcome };
-    });
-  }
-
-  async commRecover(
-    req: CommRecoverRequest,
-    transportReceipt: string | null = null,
-  ): Promise<CommRecoverResponse> {
-    const prepared = await this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const events = await this.store.readAll();
-      const proj = buildProjections(events);
-      if (!proj.currentBindings.some((binding) => binding.registered && binding.agent_id === req.source_agent_id)) {
-        throw new Error('source_not_registered');
-      }
-      const matches = proj.currentBindings.filter((binding) => binding.registered && (
-        binding.agent_id === req.target || binding.persona === req.target || binding.seat_id === req.target
-      ));
-      if (matches.length === 0) throw new Error(`identity_absent: ${req.target}`);
-      if (matches.length > 1) throw new Error(AMBIGUOUS_IDENTITY(req.target));
-      const binding = matches[0]!;
-      if (!binding.agent_id || !binding.engine) throw new Error(`engine_unattested: ${req.target}`);
-      const targetAgentId = binding.agent_id;
-      const engine = binding.engine;
-      const discarded = new Set(events
-        .filter((event) => event.event_type === 'act.comm_draft_discarded'
-          && event.payload.target_agent_id === targetAgentId
-          && event.payload.outcome === 'discarded')
-        .map((event) => event.entity_id));
-      const candidate = [...events].reverse().find((event) =>
-        event.event_type === 'act.comm_bytes_sent'
-        && event.payload.target_agent_id === targetAgentId
-        && Number(event.payload.bytes) > 0
-        && event.payload.submit_verdict !== 'staged'
-        && typeof event.payload.rendered_frame === 'string'
-        && !discarded.has(event.entity_id)
-        && !events.some((other) => other.event_type === 'act.comm_delivery_asserted'
-          && other.payload.message_id === event.entity_id
-          && other.payload.target_agent_id === targetAgentId));
-      if (!candidate) throw new Error(`retained_comm_absent: ${req.target}`);
-      return {
-        binding,
-        targetAgentId,
-        engine,
-        messageId: candidate.entity_id,
-        frame: String(candidate.payload.rendered_frame),
-        bytes: Number(candidate.payload.bytes),
-      };
-    });
-
-    const outcome = await this.tmux.redriveSeatComm(
-      prepared.binding.seat_id,
-      prepared.messageId,
-      prepared.frame,
-    );
-    const attempt = await this.locked(() => this.store.append({
-      entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_redrive_attempted',
-      payload: {
-        message_id: prepared.messageId,
-        target_agent_id: prepared.targetAgentId,
-        seat_id: prepared.binding.seat_id,
-        source_agent_id: req.source_agent_id,
-        trigger: 'operator_recovery',
-        outcome,
-      },
-      provenance: this.prov('wrapper', transportReceipt), occurred_at: this.now(),
-    }));
-    if (outcome !== 'composer_corrupted' || !req.discard_corrupted) {
-      return {
-        ok: outcome === 'enter_redriven',
-        message_id: prepared.messageId,
-        target_agent_id: prepared.targetAgentId,
-        outcome,
-        event_ids: [attempt.seq],
-      };
-    }
-
-    const discardOutcome = await this.tmux.discardSeatComposer(
-      prepared.binding.seat_id,
-      prepared.engine,
-    );
-    const discarded = await this.locked(() => this.store.append({
-      entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_draft_discarded',
-      payload: {
-        message_id: prepared.messageId,
-        target_agent_id: prepared.targetAgentId,
-        seat_id: prepared.binding.seat_id,
-        source_agent_id: req.source_agent_id,
-        bytes: prepared.bytes,
-        rendered_frame: prepared.frame,
-        outcome: discardOutcome,
-      },
-      provenance: this.prov('wrapper', transportReceipt), occurred_at: this.now(),
-    }));
-    return {
-      ok: discardOutcome === 'discarded',
-      message_id: prepared.messageId,
-      target_agent_id: prepared.targetAgentId,
-      outcome: discardOutcome === 'seat_unresolved' ? 'discard_failed' : discardOutcome,
-      event_ids: [attempt.seq, discarded.seq],
-    };
   }
 
   // Phase two, read back. The delivery fact for one message and every target it
@@ -2014,11 +1889,7 @@ export class Daemon {
         const assertedAt = Date.parse(row.asserted_at ?? '');
         return targetDeadline !== undefined && Number.isFinite(assertedAt) && assertedAt < targetDeadline;
       });
-      const redrivenTargets = new Set(events.filter((event) => event.entity_id === req.message_id
-        && event.event_type === 'act.comm_redrive_attempted'
-        && event.payload.outcome === 'enter_redriven')
-        .map((event) => String(event.payload.target_agent_id)));
-      return { accepted, delivery, sent, deadline, timely, redrivenTargets };
+      return { accepted, delivery, sent, deadline, timely };
     };
 
     let wake!: () => void;
@@ -2030,16 +1901,8 @@ export class Daemon {
     try {
       let current = await state();
       const targets = (current.accepted.payload.targets ?? []) as CommTarget[];
-      const unstaged = current.sent.filter((row) => row.payload.submit_verdict !== 'staged'
-        && !current.redrivenTargets.has(String(row.payload.target_agent_id)));
+      const unstaged = current.sent.filter((row) => row.payload.submit_verdict !== 'staged');
       if (current.sent.length === targets.length && unstaged.length > 0) {
-        if (unstaged.every((row) => row.payload.submit_verdict === 'composer_draft_present')) {
-          return {
-            ok: true, schema_version: SCHEMA_VERSION, phase: 'queued',
-            message_id: req.message_id, source_agent_id: req.source_agent_id,
-            targets, bytes_sent: 0, event_ids: current.sent.map((row) => row.seq),
-          };
-        }
         const verdicts = new Set(unstaged.map((row) => String(row.payload.submit_verdict)));
         return {
           ok: false, schema_version: SCHEMA_VERSION, phase: 'transport_refused',
@@ -2047,12 +1910,12 @@ export class Daemon {
           targets,
           bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
           submit_verdict: verdicts.size === 1
-            ? [...verdicts][0] as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'submit_unverified' | 'seat_unresolved'
+            ? [...verdicts][0] as 'submit_failed' | 'transport_failed' | 'seat_unresolved'
             : 'multiple',
           refusals: unstaged.map((row) => ({
             target: targets.find((target) => target.agent_id === row.payload.target_agent_id)!,
             bytes: Number(row.payload.bytes ?? 0),
-            submit_verdict: String(row.payload.submit_verdict) as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'submit_unverified' | 'seat_unresolved',
+            submit_verdict: String(row.payload.submit_verdict) as 'submit_failed' | 'transport_failed' | 'seat_unresolved',
             event_id: row.seq,
           })),
           event_ids: current.sent.map((row) => row.seq),
@@ -2080,8 +1943,7 @@ export class Daemon {
         targets,
         bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
         staged: current.sent.length === targets.length && current.sent.every((row) =>
-          row.payload.submit_verdict === 'staged'
-          || current.redrivenTargets.has(String(row.payload.target_agent_id))),
+          row.payload.submit_verdict === 'staged'),
         event_ids: current.sent.map((row) => row.seq),
       };
     } finally {
@@ -2114,10 +1976,9 @@ export class Daemon {
       const targets = snapshot.payload.targets as CommTarget[];
       const accepted = events.find((e) => e.entity_id === snapshot.payload.message_id && e.event_type === 'reg.comm_accepted');
       if (accepted?.payload.source_agent_id !== req.subscriber_agent_id) throw new Error('ask_subscriber_mismatch');
-      const targetIds = new Set(targets.map((t) => t.agent_id));
-      const callbacks: CommCallback[] = events.filter((e) => e.event_type === 'act.comm_callback_asserted' && (
-        e.payload.ask_id === req.ask_id || (e.payload.source === 'stop' && e.payload.subscriber_agent_id === req.subscriber_agent_id && targetIds.has(String(e.payload.target_agent_id)))
-      )).map((e) => ({
+      const callbacks: CommCallback[] = events.filter((e) =>
+        e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === req.ask_id,
+      ).map((e) => ({
         target: targets.find((t) => t.agent_id === e.payload.target_agent_id)!, content: String(e.payload.content), assertion_event_id: e.seq, source: e.payload.source as 'reply' | 'stop',
       }));
       const done = new Set(callbacks.map((c) => c.target.agent_id));
@@ -2181,13 +2042,13 @@ export class Daemon {
           reason: `scoped_reset_pending: ${req.seat_id}`,
         };
       }
-      if (proj.decommissionedSeats.has(req.seat_id)) {
+      if (proj.abandonedSeats.has(req.seat_id)) {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `seat_decommissioned: ${req.seat_id}`,
+          reason: `seat_abandoned: ${req.seat_id}`,
         };
       }
       const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
@@ -2334,6 +2195,8 @@ export class Daemon {
       if (generation === 'foreign') {
         throw new Error('txd refused non-canonical existing tmux estate');
       }
+
+      await this.reconcileDeadStackSeatsUnlocked(null);
 
       await this.recoverScopedResets();
 
@@ -2736,7 +2599,7 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     if (isStackSeat(binding.seat_id)) {
-      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_decommissioned', payload: {}, provenance: prov, occurred_at });
+      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_abandoned', payload: {}, provenance: prov, occurred_at });
     }
     await this.store.appendAll(inputs);
     await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
@@ -2819,6 +2682,7 @@ export class Daemon {
   async reconcile(transportReceipt: string | null = null): Promise<ReconcileResponse> {
     let councilRebuilt = false;
     const response = await this.locked(async () => {
+      await this.tmux.reconcilePresentation();
       councilRebuilt = await this.recoverScopedResets();
       const events = await this.store.readAll();
       const t0 = performance.now();
@@ -2905,7 +2769,7 @@ export class Daemon {
         }
       }
       // Phantom seat: the ledger still projects a pane tmux does not report at
-      // all. `paneBySeat` is only ever removed from by reg.seat_decommissioned —
+      // all. `paneBySeat` is only ever removed from by reg.seat_abandoned —
       // reg.seat_cleared clears the binding and leaves the pane axis untouched
       // by design, and reg.process_reaped has no pane effect — so a seat that
       // was reaped and cleared, or quietly dropped from the estate declaration,
@@ -2922,7 +2786,7 @@ export class Daemon {
         await flag(
           row.seat_id,
           'pane_absent',
-          'seat_decommissioned',
+          'seat_abandoned',
           `seat is projected (pane=${row.pane}, unbound) but tmux reports no pane for it — every estate read counts a seat that does not exist`,
         );
       }
@@ -2981,7 +2845,7 @@ export class Daemon {
         const contradiction = proj.openContradictions.find((candidate) =>
           candidate.entity_id === seat
           && candidate.kind === 'pane_absent'
-          && candidate.missing_attestation === 'seat_decommissioned');
+          && candidate.missing_attestation === 'seat_abandoned');
         if (!contradiction) return refused(`seat_not_flagged_absent: ${seat}`);
       }
       const occurred_at = this.now();
@@ -2989,7 +2853,7 @@ export class Daemon {
       await this.store.appendAll(req.seats.map((seat) => ({
         entity_type: 'seat' as const,
         entity_id: seat,
-        event_type: 'reg.seat_decommissioned',
+        event_type: 'reg.seat_abandoned',
         payload: { contradiction: 'pane_absent' },
         provenance,
         occurred_at,
@@ -3224,6 +3088,12 @@ export class Daemon {
       let reconstructed = false;
       let reason: string | null = null;
       let faultedPages = 0;
+      const retiredStackSeats = await this.reconcileDeadStackSeatsUnlocked(transportReceipt, new Set(pages));
+      if (retiredStackSeats.length > 0) {
+        reset_seats.push(...retiredStackSeats);
+        reconstructed = true;
+        faultedPages += new Set(retiredStackSeats.map((seat) => seat.split(':', 1)[0])).size;
+      }
       for (const target of pages) {
         const expected = [...TXD_WINDOWS[target]];
         const pageObserved = observed.filter((seat) => seat.seat_id.startsWith(`${target}:`));
@@ -3299,6 +3169,46 @@ export class Daemon {
     return inputs;
   }
 
+  private async reconcileDeadStackSeatsUnlocked(
+    transportReceipt: string | null,
+    pages: ReadonlySet<TxdPage> | null = null,
+  ): Promise<string[]> {
+    const observed = await this.tmux.listSeats();
+    const paneBySeat = new Map(observed.map((seat) => [seat.seat_id, seat.pane]));
+    const proj = await this.projections();
+    const candidates = new Set<string>();
+    for (const seat of observed) {
+      const page = seat.seat_id.split(':', 1)[0] as TxdPage;
+      if (seat.pane === 'dead' && isStackSeat(seat.seat_id) && !TXD_ESTATE.includes(seat.seat_id)
+        && (pages === null || pages.has(page))) candidates.add(seat.seat_id);
+    }
+    for (const binding of proj.currentBindings) {
+      const page = binding.seat_id.split(':', 1)[0] as TxdPage;
+      if (isStackSeat(binding.seat_id) && !TXD_ESTATE.includes(binding.seat_id)
+        && paneBySeat.get(binding.seat_id) !== 'live' && (pages === null || pages.has(page))) {
+        candidates.add(binding.seat_id);
+      }
+    }
+    const retired: string[] = [];
+    for (const seat of candidates) {
+      const binding = proj.currentBindings.find((candidate) => candidate.seat_id === seat);
+      if (binding) {
+        if (!(await this.executeClose(binding, transportReceipt))) continue;
+      } else {
+        await this.tmux.killSeat(seat);
+        if ((await this.tmux.listSeats()).some((row) => row.seat_id === seat)) {
+          throw new Error(`txd could not verify dynamic stack seat cleanup for ${seat}`);
+        }
+        await this.store.append({
+          entity_type: 'seat', entity_id: seat, event_type: 'reg.seat_abandoned', payload: {},
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+        });
+      }
+      retired.push(seat);
+    }
+    return retired;
+  }
+
   async executeEstateRotation(): Promise<void> {
     // The whole server dies: every staged pane run's completion signal with it.
     for (const seatId of this.paneRuns.keys()) this.abortPaneRuns(seatId);
@@ -3337,7 +3247,8 @@ export class Daemon {
     return {
       ok: open === 0
         && tmux_reachable
-        && (activation_pending || tints.every((tint) => tint.state === 'ready')),
+        && estate_generation === 'canonical'
+        && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,

@@ -34,8 +34,6 @@ import {
   CommHookSchema,
   CommReceiptWaitRequestSchema,
   AgentInjectRequestSchema,
-  CommRedriveRequestSchema,
-  CommRecoverRequestSchema,
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
   EstateAbandonRequestSchema,
@@ -330,36 +328,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const parsed = await parseMutation(req, CommReceiptWaitRequestSchema, 'invalid_comm_receipt_request');
         if (parsed instanceof Response) return parsed;
         return deferredJson(daemon.waitCommReceipt(parsed));
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/agents/comm/redrive'),
-      label: 'POST /agents/comm/redrive',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, CommRedriveRequestSchema, 'invalid_comm_redrive_request');
-        if (parsed instanceof Response) return parsed;
-        try {
-          return json(await daemon.commRedrive(parsed, receipt(req)));
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          return json({ ok: false, error: 'comm_redrive_refused', detail }, 422);
-        }
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/agents/comm/recover'),
-      label: 'POST /agents/comm/recover',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, CommRecoverRequestSchema, 'invalid_comm_recover_request');
-        if (parsed instanceof Response) return parsed;
-        try {
-          return json(await daemon.commRecover(parsed, receipt(req)));
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          return json({ ok: false, error: 'comm_recover_refused', detail }, 422);
-        }
       },
     },
     {
