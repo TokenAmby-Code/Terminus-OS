@@ -121,6 +121,16 @@ export type CommWatchArmInput = {
   composer_interactive_observed: boolean;
 };
 export type ComposerGateInput = { correlation_id: string; target_agent_id: string };
+/** One staged idle-target receipt's lost-Enter watch, armed at its tier-1 deadline. */
+type LostEnterArm = {
+  messageId: string;
+  targetAgentId: string;
+  seatId: string;
+  frame: string;
+  paneGeneration: string;
+  receiptSeq: number;
+  deadlineAt: number;
+};
 export type CommReceiptRuntime = {
   now: () => number;
   schedule: (wake: () => void, delayMs: number) => () => void;
@@ -1449,10 +1459,12 @@ export class Daemon {
       outcomes.push({ plan, sent });
     }
 
+    const completionArms: LostEnterArm[] = [];
     const accepted: CommAccepted = await this.locked(async () => {
       const event_ids = [...prepared.eventIds];
       let allStaged = true;
       for (const { plan, sent } of outcomes) {
+        const receiptDeadline = this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS;
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
             target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: committedTransportBytes(sent),
@@ -1460,10 +1472,32 @@ export class Daemon {
             target_turn: plan.target_turn,
             kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: plan.frame,
-            receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
+            receipt_deadline_at: new Date(receiptDeadline).toISOString(),
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
         allStaged &&= sent.verdict === 'staged';
+        // The lost-Enter watch (live specimen 29fb6cc0). tmux exit 0 proves
+        // the Enter was handed to the pane, never that the engine consumed
+        // it. A staged frame in an AWAITING_INPUT engine whose Enter had no
+        // effect fires no UserPromptSubmit and no later stop, so neither
+        // existing join ever re-examines it. The receipt's own tier-1
+        // deadline is the derived activation: one wake, one at-rest
+        // observation, and only an exact intact frame completes its own
+        // transaction. A WORKING target stays with the turn-stop join.
+        // The binding's pane generation is the physical transaction witness;
+        // without one there is nothing to re-attest against, so no watch.
+        if (sent.verdict === 'staged' && plan.target_turn === 'awaiting_input'
+          && plan.binding.pane_generation !== null) {
+          completionArms.push({
+            messageId: prepared.messageId,
+            targetAgentId: plan.target.agent_id,
+            seatId: plan.target.seat_id,
+            frame: plan.frame,
+            paneGeneration: plan.binding.pane_generation,
+            receiptSeq: event.seq,
+            deadlineAt: receiptDeadline,
+          });
+        }
         if (sent.verdict === 'staged') {
           const events = await this.store.readAll();
           // A command or skill surface submits with no comm envelope in the
@@ -1522,7 +1556,66 @@ export class Daemon {
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
         targets: prepared.targets, staged: allStaged, event_ids };
     });
+    for (const arm of completionArms) {
+      this.commReceiptRuntime.schedule(
+        () => this.completeLostEnter(arm),
+        Math.max(0, arm.deadlineAt - this.commReceiptRuntime.now()),
+      );
+    }
     return accepted;
+  }
+
+  /**
+   * The lost-Enter completion wake, fired once at the receipt's persisted
+   * tier-1 deadline. It acts only on the full evidence chain — no delivery
+   * assertion, no prior drive, the send-time binding still live on the same
+   * pane generation, the target still at rest (a capture against a busy
+   * engine proves nothing, specimen e5757301) — and then only when the tmux
+   * plane observes the exact staged frame intact in the at-rest composer.
+   * Driving Enter there completes the transport transaction that staged the
+   * frame; delivery is still asserted exclusively by the engine's own
+   * UserPromptSubmit. Every other observation is a zero-effect refusal that
+   * leaves the message honestly undelivered.
+   */
+  private async completeLostEnter(arm: LostEnterArm): Promise<void> {
+    const go = await this.locked(async () => {
+      const events = await this.store.readAll();
+      const assertionId = `${arm.messageId}:${arm.targetAgentId}`;
+      if (events.some((event) => event.entity_id === assertionId
+        && event.event_type === 'act.comm_delivery_asserted')) return false;
+      if (events.some((event) => event.event_type === 'act.comm_submit_driven'
+        && event.payload.message_id === arm.messageId
+        && event.payload.target_agent_id === arm.targetAgentId)) return false;
+      const proj = buildProjections(events);
+      const binding = proj.currentBindings.find((row) => row.registered
+        && row.agent_id === arm.targetAgentId
+        && row.seat_id === arm.seatId
+        && row.pane_generation === arm.paneGeneration);
+      if (!binding) return false;
+      return proj.turnByAgent.get(arm.targetAgentId) === 'awaiting_input';
+    });
+    if (!go) return;
+    const outcome = await this.tmux.completeStagedSubmit(arm.seatId, arm.frame, arm.paneGeneration);
+    if (outcome !== 'submit_completed' && outcome !== 'submit_failed') return;
+    await this.locked(async () => {
+      const events = await this.store.readAll();
+      if (events.some((event) => event.event_type === 'act.comm_submit_driven'
+        && event.payload.message_id === arm.messageId
+        && event.payload.target_agent_id === arm.targetAgentId)) return;
+      await this.store.append({
+        entity_type: 'message', entity_id: arm.messageId, event_type: 'act.comm_submit_driven',
+        payload: {
+          message_id: arm.messageId,
+          target_agent_id: arm.targetAgentId,
+          seat_id: arm.seatId,
+          transport_receipt_seq: arm.receiptSeq,
+          frame_observation: 'frame_present',
+          enter: outcome === 'submit_completed' ? 'driven' : 'failed',
+        },
+        provenance: this.prov('observer', null),
+        occurred_at: this.now(),
+      });
+    });
   }
 
   async inject(req: { schema_version: number; target_agent_id: string; text: string }, transportReceipt: string | null = null) {
