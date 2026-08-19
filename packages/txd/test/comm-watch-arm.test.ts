@@ -552,3 +552,54 @@ test('behavioral pin: a spent intent hook does not assert the next identical int
   expect((await d.commDelivery(second)).complete).toBe(false);
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
 });
+
+// ── Delivery attempts first: a gate TRANSPORT failure is not a verdict ──────
+//
+// The comm doctrine (2026-08-19): delivery attempts come first and the effect
+// is post-validated; an unasserted delivery remains ok:false. A slow or
+// unreachable lifecycled is a transport fact about lifecycled, not a truth
+// about the target composer — when txd's own observation already proved the
+// composer interactive, refusing the delivery on gate transport is a
+// preflight false negative. The unpainted newborn keeps its hard stop: there
+// the dead-zone race is real and txd has no interactivity proof of its own.
+
+test('a gate transport failure with an observed-interactive composer attempts delivery and attests the unarmed gap', async () => {
+  const { CommGateTransportFailure } = await import('../src/core.ts');
+  const physical = {
+    machine: 'test',
+    configuration: { generation: 'g', digest: 'd' },
+    agentWrapper: '/wrapper',
+    perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
+    publish: async () => undefined,
+  };
+  const { store, tmux, d } = await fixture(async () => {
+    throw new CommGateTransportFailure('lifecycled_comm_gate_transport_ceiling_exceeded');
+  }, physical);
+  tmux.setPaneText('palace:W', '› Write tests for @filename\n\n  gpt-5.6-sol medium');
+
+  const accepted = await d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'attempted first', ask: false, reply: false });
+
+  expect(tmux.sends('palace:W').length).toBe(1); // the bytes were attempted
+  // …and nothing is claimed that was not observed: no hook fact arrived, so
+  // the delivery remains unasserted.
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted')).toHaveLength(0);
+  const unarmed = (await store.readAll()).filter((e) => e.event_type === 'act.comm_watch_unarmed');
+  expect(unarmed.length).toBe(1);
+  expect(unarmed[0]!.payload.target_agent_id).toBe('worker');
+});
+
+test('a gate transport failure on an unpainted newborn still refuses before bytes', async () => {
+  const { CommGateTransportFailure } = await import('../src/core.ts');
+  const { store, tmux, d } = await fixture(async () => {
+    throw new CommGateTransportFailure('lifecycled_comm_gate_transport_failed');
+  });
+
+  await expect(d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'must not reach a newborn', ask: false, reply: false }))
+    .rejects.toThrow('lifecycled_comm_gate_transport_failed');
+
+  expect(tmux.sends('palace:W')).toEqual([]);
+  const unarmed = (await store.readAll()).filter((e) => e.event_type === 'act.comm_watch_unarmed');
+  expect(unarmed.length).toBe(1);
+});
