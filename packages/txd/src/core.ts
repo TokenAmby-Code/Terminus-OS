@@ -31,8 +31,6 @@ import {
   type CommRequest,
   type CommReceiptWaitRequest,
   type CommReceipt,
-  type CommRedriveRequest,
-  type CommRedriveResponse,
   type CommTarget,
   type CommWaitRequest,
   type CommWaitResponse,
@@ -106,7 +104,7 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 
 type Now = () => string;
 // What txd hands lifecycled to arm one comm watch: enough to name the
-// subscription's agent stream and the message a composer-quiet fact may redrive.
+// subscription's agent stream and the message whose hook will assert delivery.
 export type CommWatchArmInput = {
   message_id: string;
   target_agent_id: string;
@@ -127,9 +125,7 @@ const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
   },
 };
 
-// The ONE comm frame template. comm() stages it and commRedrive() verifies
-// the composer against it; a second copy of this string would let the two
-// silently diverge and turn every redrive into a false `composer_corrupted`.
+// The one comm frame template.
 function commFrame(messageId: string, sourceAgentId: string, askId: string | null, message: string): string {
   return `[tx comm ${messageId} from ${sourceAgentId}${askId ? ` ask ${askId}` : ''}]\n${message}`;
 }
@@ -200,13 +196,8 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-// A normal refusal is proof that rollback restored the pre-call composer.
-// Failed rollback is deliberately different: its byte count is possible live
-// composer effect and must remain visible in journal truth for recovery.
 function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
-  return outcome.verdict === 'staged' || outcome.verdict === 'composer_rollback_failed'
-    ? outcome.bytes
-    : 0;
+  return outcome.verdict === 'seat_unresolved' ? 0 : outcome.bytes;
 }
 
 export class Daemon {
@@ -1436,7 +1427,7 @@ export class Daemon {
       outcomes.push({ plan, sent });
     }
 
-    return this.locked(async () => {
+    const accepted: CommAccepted = await this.locked(async () => {
       const event_ids = [...prepared.eventIds];
       let allStaged = true;
       for (const { plan, sent } of outcomes) {
@@ -1449,11 +1440,65 @@ export class Daemon {
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
         allStaged &&= sent.verdict === 'staged';
+        if (sent.verdict === 'staged') {
+          const events = await this.store.readAll();
+          // A command or skill surface submits with no comm envelope in the
+          // prompt, so its hook carries an empty `message_ids` list and the
+          // rendered frame is the only thing that names it. Enter is driven
+          // outside the journal mutex, so that hook can land before this
+          // receipt exists — the hook then sees no staged transport and
+          // declines, and matching here by message id alone would lose the
+          // delivery with both facts present.
+          //
+          // But a frame names an intent only while ONE intent carries it. Two
+          // identical sends to one target share it byte for byte, and reading
+          // such a hook as this message's would assert a delivery the engine
+          // never made. The frame arm therefore holds only while this message
+          // is the single intent wearing that frame for that target; ambiguity
+          // falls back to the message-id join and stays undelivered.
+          //
+          // Uniqueness counts every ACCEPTED intent with that frame, including
+          // ones already delivered. Counting only the undelivered would let the
+          // set shrink as deliveries land: the first of two identical intents
+          // asserts, the second becomes the lone survivor, and the spent hook
+          // that named the first would then read as a unique witness for a
+          // message the engine never submitted.
+          const intentFrame = prepared.renderedIntent?.frame;
+          const frameCandidates = intentFrame === undefined ? [] : events.filter((candidate) =>
+            candidate.event_type === 'reg.comm_accepted'
+            && (candidate.payload.kind === 'command' || candidate.payload.kind === 'skill')
+            && candidate.payload.rendered_frame === intentFrame
+            && Array.isArray(candidate.payload.target_agent_ids)
+            && candidate.payload.target_agent_ids.includes(plan.target.agent_id));
+          const frameNamesThisMessage = frameCandidates.length === 1
+            && frameCandidates[0]!.entity_id === prepared.messageId;
+          const submitted = events.some((candidate) => candidate.event_type === 'act.prompt_submitted'
+            && candidate.payload.agent_id === plan.target.agent_id
+            && ((Array.isArray(candidate.payload.message_ids)
+                && candidate.payload.message_ids.includes(prepared.messageId))
+              || (frameNamesThisMessage && candidate.payload.content === intentFrame)));
+          const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
+          if (submitted && !events.some((candidate) => candidate.entity_id === assertionId
+            && candidate.event_type === 'act.comm_delivery_asserted')) {
+            const assertion = await this.store.append({
+              entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+              payload: {
+                message_id: prepared.messageId,
+                target_agent_id: plan.target.agent_id,
+                source_agent_id: req.source_agent_id,
+              },
+              provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+            });
+            event_ids.push(assertion.seq);
+            this.wakeDelivery(prepared.messageId);
+          }
+        }
       }
       if (prepared.replyingToAsk) await this.assertCallback(prepared.replyingToAsk, req.source_agent_id, req.message!, 'reply', null, transportReceipt);
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
         targets: prepared.targets, staged: allStaged, event_ids };
     });
+    return accepted;
   }
 
   async inject(req: { schema_version: number; target_agent_id: string; text: string }, transportReceipt: string | null = null) {
@@ -1703,25 +1748,45 @@ export class Daemon {
   // fails deterministically instead of wedging the lane.
   promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[]; dead_lettered: string[] }> {
     return this.locked(async () => {
+      await this.store.append({
+        entity_type: 'agent', entity_id: hook.agent_id, event_type: 'act.prompt_submitted',
+        payload: {
+          agent_id: hook.agent_id,
+          message_ids: hook.message_ids,
+          content: hook.content ?? null,
+          session_id: hook.session_id ?? null,
+        },
+        provenance: this.prov('hook', receipt), occurred_at: this.now(),
+      });
       const events = await this.store.readAll();
       const asserted: string[] = [];
       const matchedMessageIds: string[] = [];
       const confirmations = new Map<string, string[]>();
       let matched = false;
-      const intentMessage = hook.content === undefined ? undefined : events.find((event) =>
+      // Same one-to-one rule as the staged-receipt join above, counted the same
+      // stable way: a rendered frame identifies an intent only while exactly one
+      // ACCEPTED intent wears it for this target, delivered ones included.
+      // Taking the first of several identical frames — or letting the set shrink
+      // as deliveries assert — would attribute one submission to a message the
+      // engine never submitted, so an ambiguous frame yields no correlation and
+      // the hook stays non-delivery evidence.
+      const intentCandidates = hook.content === undefined ? [] : events.filter((event) =>
         event.event_type === 'reg.comm_accepted'
         && (event.payload.kind === 'command' || event.payload.kind === 'skill')
         && event.payload.rendered_frame === hook.content
         && Array.isArray(event.payload.target_agent_ids)
-        && event.payload.target_agent_ids.includes(hook.agent_id)
-        && !events.some((candidate) => candidate.event_type === 'act.comm_delivery_asserted'
-          && candidate.payload.message_id === event.entity_id
-          && candidate.payload.target_agent_id === hook.agent_id));
+        && event.payload.target_agent_ids.includes(hook.agent_id));
+      const intentMessage = intentCandidates.length === 1 ? intentCandidates[0] : undefined;
       const messageIds = [...new Set([...hook.message_ids, ...(intentMessage ? [intentMessage.entity_id] : [])])];
       for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
         matched = true;
+        const staged = events.some((event) => event.entity_id === messageId
+          && event.event_type === 'act.comm_bytes_sent'
+          && event.payload.target_agent_id === hook.agent_id
+          && event.payload.submit_verdict === 'staged');
+        if (!staged) continue;
         matchedMessageIds.push(messageId);
         const assertionId = `${messageId}:${hook.agent_id}`;
         if (!events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) {
@@ -1812,41 +1877,6 @@ export class Daemon {
     });
   }
 
-  // The remedial half of the two-phase comm contract is a deliberate pane
-  // action. Lifecycled's named fact edge decides WHEN; this is mechanism only
-  // and remains idempotent against a late organic submit.
-  private async commRemedialContext(messageId: string, targetAgentId: string) {
-    const events = await this.store.readAll();
-    const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
-    if (!accepted) throw new Error('message_absent');
-    if (!(accepted.payload.target_agent_ids as unknown[]).includes(targetAgentId)) throw new Error('target_mismatch');
-    const delivered = events.some((e) => e.entity_id === `${messageId}:${targetAgentId}` && e.event_type === 'act.comm_delivery_asserted');
-    return { events, accepted, delivered };
-  }
-
-  commRedrive(req: CommRedriveRequest, transportReceipt: string | null = null): Promise<CommRedriveResponse> {
-    return this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const { accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
-      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
-      // The assertion arriving first is the good ending, not an error — and
-      // the pane is not touched, because there is nothing left to submit.
-      if (delivered) return { ...base, outcome: 'already_delivered' };
-      const proj = await this.projections();
-      const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
-      if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
-      const askId = typeof accepted.payload.ask_id === 'string' ? accepted.payload.ask_id : null;
-      const frame = accepted.payload.kind === 'command' || accepted.payload.kind === 'skill'
-        ? String(accepted.payload.rendered_frame)
-        : commFrame(req.message_id, String(accepted.payload.source_agent_id), askId, String(accepted.payload.message));
-      const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
-      await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
-        payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
-        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
-      return { ...base, outcome };
-    });
-  }
-
   // Phase two, read back. The delivery fact for one message and every target it
   // was snapshotted against, derived from `act.comm_delivery_asserted` alone —
   // never from the bytes that were staged, which is the conflation this surface
@@ -1882,7 +1912,8 @@ export class Daemon {
       if (!accepted) throw new Error('message_absent');
       if (accepted.payload.source_agent_id !== req.source_agent_id) throw new Error('comm_source_mismatch');
       const delivery = await this.commDelivery(req.message_id);
-      const sent = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
+      const sentRows = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
+      const sent = [...new Map(sentRows.map((event) => [String(event.payload.target_agent_id), event])).values()];
       const deadline = Math.max(...sent.map((event) => Date.parse(String(event.payload.receipt_deadline_at ?? ''))));
       if (!Number.isFinite(deadline)) throw new Error('comm_receipt_deadline_absent');
       const deadlineByTarget = new Map(sent.map((event) => [
@@ -1915,12 +1946,12 @@ export class Daemon {
           targets,
           bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
           submit_verdict: verdicts.size === 1
-            ? [...verdicts][0] as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'
+            ? [...verdicts][0] as 'submit_failed' | 'transport_failed' | 'seat_unresolved'
             : 'multiple',
           refusals: unstaged.map((row) => ({
             target: targets.find((target) => target.agent_id === row.payload.target_agent_id)!,
             bytes: Number(row.payload.bytes ?? 0),
-            submit_verdict: String(row.payload.submit_verdict) as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved',
+            submit_verdict: String(row.payload.submit_verdict) as 'submit_failed' | 'transport_failed' | 'seat_unresolved',
             event_id: row.seq,
           })),
           event_ids: current.sent.map((row) => row.seq),
@@ -1947,7 +1978,8 @@ export class Daemon {
         message_id: req.message_id, source_agent_id: req.source_agent_id,
         targets,
         bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
-        staged: current.sent.length === targets.length && current.sent.every((row) => row.payload.submit_verdict === 'staged'),
+        staged: current.sent.length === targets.length && current.sent.every((row) =>
+          row.payload.submit_verdict === 'staged'),
         event_ids: current.sent.map((row) => row.seq),
       };
     } finally {

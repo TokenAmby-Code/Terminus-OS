@@ -27,12 +27,11 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(42);
+    expect(EVENT_TYPES).toHaveLength(41);
     expect(EVENT_TYPES).toContain('act.agent_input_injected');
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('reg.placement_attested');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
-    expect(EVENT_TYPES).toContain('act.comm_redrive_attempted');
     expect(EVENT_TYPES).toContain('act.comm_delivery_failed');
     expect(EVENT_TYPES).toContain('act.comm_delivery_confirmation_dead_lettered');
     expect(EVENT_TYPES).toContain('act.comm_watch_unarmed');
@@ -42,7 +41,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(EVENT_TYPES).toContain('act.mode_transition_attested');
     expect(EVENT_TYPES).toContain('act.mode_transition_failed');
     expect(REG_EVENT_NAMES).toHaveLength(20);
-    expect(ACT_EVENT_NAMES).toHaveLength(15);
+    expect(ACT_EVENT_NAMES).toHaveLength(14);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
       'scoped_reset_refused', 'scoped_reset_requested', 'scoped_reset_completed', 'scoped_reset_failed',
@@ -186,26 +185,16 @@ describe("txd lifecycle vocabulary", () => {
       source_agent_id: "source",
       targets: [{ agent_id: "target", seat_id: "palace:W", persona: null }],
       bytes_sent: 0,
-      submit_verdict: "composer_corrupted",
+      submit_verdict: "transport_failed",
       refusals: [{
         target: { agent_id: "target", seat_id: "palace:W", persona: null },
         bytes: 0,
-        submit_verdict: "composer_corrupted",
+        submit_verdict: "transport_failed",
         event_id: 43,
       }],
       event_ids: [43],
     } as const;
     expect(CommReceiptSchema.parse(refused).phase).toBe("transport_refused");
-    expect(CommReceiptSchema.parse({
-      ...refused,
-      submit_verdict: "composer_draft_present",
-      refusals: [{ ...refused.refusals[0], submit_verdict: "composer_draft_present" }],
-    })).toMatchObject({ submit_verdict: "composer_draft_present" });
-    expect(CommReceiptSchema.parse({
-      ...refused,
-      submit_verdict: "composer_unreadable",
-      refusals: [{ ...refused.refusals[0], submit_verdict: "composer_unreadable" }],
-    })).toMatchObject({ submit_verdict: "composer_unreadable" });
     expect(() => CommReceiptSchema.parse({ ...refused, refusals: [] })).toThrow();
   });
 

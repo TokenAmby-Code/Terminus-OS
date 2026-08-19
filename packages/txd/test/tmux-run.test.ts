@@ -141,7 +141,6 @@ test('a claude run enters bash mode with a literal ! keystroke, pastes, verifies
   };
   const tmux = new RealTmux('scratch', {
     run,
-    observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
   });
 
   const outcome = await tmux.runInAgentComposer('council:custodes', RUN_ID, command, 'claude');
@@ -155,7 +154,7 @@ test('a claude run enters bash mode with a literal ! keystroke, pastes, verifies
   expect(pasteIndex).toBeGreaterThan(calls.findIndex((args) => args.at(-1) === '!'));
 });
 
-test('a claude run refuses a painted composer before any key is sent', async () => {
+test('a claude run is not blocked by visible composer paint', async () => {
   const calls: string[][] = [];
   const run: Runner = async (_socket, args) => {
     calls.push(args);
@@ -165,11 +164,11 @@ test('a claude run refuses a painted composer before any key is sent', async () 
   };
   const tmux = new RealTmux('scratch', {
     run,
-    observePaneOutput: async () => { throw new Error('dirty composer must refuse before arming'); },
   });
   const outcome = await tmux.runInAgentComposer('council:custodes', RUN_ID, 'echo x', 'claude');
-  expect(outcome).toEqual({ bytes: 0, verdict: 'composer_draft_present' });
-  expect(calls.filter((args) => ['send-keys', 'load-buffer', 'paste-buffer'].includes(args[0]!))).toHaveLength(0);
+  expect(outcome).toEqual({ bytes: 6, verdict: 'staged' });
+  expect(calls.some((args) => args[0] === 'paste-buffer')).toBe(true);
+  expect(calls.some((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toBe(true);
 });
 
 test('a codex run rides the verified send path with the whole !-prefixed line', async () => {
@@ -196,7 +195,6 @@ test('a codex run rides the verified send path with the whole !-prefixed line', 
   };
   const tmux = new RealTmux('scratch', {
     run,
-    observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
   });
 
   const outcome = await tmux.runInAgentComposer('palace:N', RUN_ID, command, 'codex');

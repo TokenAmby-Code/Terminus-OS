@@ -213,7 +213,6 @@ export const ACT_EVENT_NAMES = [
   'agent_input_injected',
   'comm_delivery_asserted',
   'comm_delivery_confirmation_dead_lettered',
-  'comm_redrive_attempted',
   'comm_delivery_failed',
   'comm_watch_unarmed',
   'composer_interactive_announced',
@@ -262,7 +261,6 @@ export const EVENT_TYPES = [
   'act.agent_input_injected',
   'act.comm_delivery_asserted',
   'act.comm_delivery_confirmation_dead_lettered',
-  'act.comm_redrive_attempted',
   'act.comm_delivery_failed',
   'act.comm_watch_unarmed',
   'act.composer_interactive_announced',
@@ -711,9 +709,8 @@ export const AgentInjectRequestSchema = z.object({
 
 export const CommTargetSchema = z.object({ agent_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
 export type CommTarget = z.infer<typeof CommTargetSchema>;
-// `staged` = the bytes are in the target pane and Enter was pressed. It is NOT
-// receipt: a busy composer queues input and submits it whenever its current
-// turn ends. Delivery is asserted later and separately by
+// `staged` = this message's bytes were handed to the target pane and Enter was
+// pressed. Delivery is asserted later and separately by
 // `act.comm_delivery_asserted`, correlated to `message_id` — which is why the
 // message id is the caller's correlation handle, not a bare receipt number.
 export const CommAcceptedSchema = z.object({
@@ -722,10 +719,8 @@ export const CommAcceptedSchema = z.object({
 });
 export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
 
-// One prompt submission can carry MANY comm frames. A composer that is mid-turn
-// queues every comm it receives and flushes them together when the turn ends, so
-// the engine reports one `user_prompt_submit` holding two, three, or four whole
-// messages. Each of them was delivered; each of them needs its own fact.
+// One prompt submission can carry many comm frames. Each named message still
+// needs its own staged transport fact before this hook may assert delivery.
 export const CommHookSchema = z.object({
   schema_version: z.number().int(), agent_id: z.string().min(1),
   message_ids: z.array(z.string().min(1)).default([]),
@@ -783,11 +778,11 @@ export const CommTransportRefusedReceiptSchema = z.object({
   source_agent_id: CanonicalIdSchema,
   targets: z.array(CommTargetSchema),
   bytes_sent: z.number().int().nonnegative(),
-  submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved', 'multiple']),
+  submit_verdict: z.enum(['submit_failed', 'transport_failed', 'seat_unresolved', 'multiple']),
   refusals: z.array(z.object({
     target: CommTargetSchema,
     bytes: z.number().int().nonnegative(),
-    submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved']),
+    submit_verdict: z.enum(['submit_failed', 'transport_failed', 'seat_unresolved']),
     event_id: z.number().int(),
   })).min(1),
   event_ids: z.array(z.number().int()),
@@ -798,24 +793,6 @@ export const CommReceiptSchema = z.discriminatedUnion('phase', [
   CommTransportRefusedReceiptSchema,
 ]);
 export type CommReceipt = z.infer<typeof CommReceiptSchema>;
-
-// The remedial half of the two-phase comm contract is a deliberate pane
-// action: lifecycled decides WHEN, txd is the only mechanism.
-// Redrive submits a parked frame with a single Enter — never by retyping —
-// and only after the visible composer text verifies byte-honest against the
-// payload that was staged; a corrupted composer is refused, not submitted.
-export const CommRedriveRequestSchema = z.object({
-  schema_version: z.number().int(),
-  message_id: z.string().min(1),
-  target_agent_id: z.string().min(1),
-});
-export type CommRedriveRequest = z.infer<typeof CommRedriveRequestSchema>;
-export const COMM_REDRIVE_OUTCOMES = ['enter_redriven', 'already_delivered', 'composer_corrupted', 'frame_absent', 'seat_unresolved'] as const;
-export const CommRedriveResponseSchema = z.object({
-  ok: z.literal(true), message_id: z.string(), target_agent_id: z.string(),
-  outcome: z.enum(COMM_REDRIVE_OUTCOMES),
-});
-export type CommRedriveResponse = z.infer<typeof CommRedriveResponseSchema>;
 
 export const CommWaitRequestSchema = z.object({
   schema_version: z.number().int(), ask_id: CanonicalIdSchema, subscriber_agent_id: CanonicalIdSchema,
