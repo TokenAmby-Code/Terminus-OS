@@ -1454,18 +1454,22 @@ export class Daemon {
           // identical sends to one target share it byte for byte, and reading
           // such a hook as this message's would assert a delivery the engine
           // never made. The frame arm therefore holds only while this message
-          // is the single unasserted intent wearing that frame for that target;
-          // ambiguity falls back to the message-id join and stays undelivered.
+          // is the single intent wearing that frame for that target; ambiguity
+          // falls back to the message-id join and stays undelivered.
+          //
+          // Uniqueness counts every ACCEPTED intent with that frame, including
+          // ones already delivered. Counting only the undelivered would let the
+          // set shrink as deliveries land: the first of two identical intents
+          // asserts, the second becomes the lone survivor, and the spent hook
+          // that named the first would then read as a unique witness for a
+          // message the engine never submitted.
           const intentFrame = prepared.renderedIntent?.frame;
           const frameCandidates = intentFrame === undefined ? [] : events.filter((candidate) =>
             candidate.event_type === 'reg.comm_accepted'
             && (candidate.payload.kind === 'command' || candidate.payload.kind === 'skill')
             && candidate.payload.rendered_frame === intentFrame
             && Array.isArray(candidate.payload.target_agent_ids)
-            && candidate.payload.target_agent_ids.includes(plan.target.agent_id)
-            && !events.some((asserted) => asserted.event_type === 'act.comm_delivery_asserted'
-              && asserted.payload.message_id === candidate.entity_id
-              && asserted.payload.target_agent_id === plan.target.agent_id));
+            && candidate.payload.target_agent_ids.includes(plan.target.agent_id));
           const frameNamesThisMessage = frameCandidates.length === 1
             && frameCandidates[0]!.entity_id === prepared.messageId;
           const submitted = events.some((candidate) => candidate.event_type === 'act.prompt_submitted'
@@ -1759,21 +1763,19 @@ export class Daemon {
       const matchedMessageIds: string[] = [];
       const confirmations = new Map<string, string[]>();
       let matched = false;
-      // Same one-to-one rule as the staged-receipt join above: a rendered frame
-      // identifies an intent only while exactly one unasserted intent wears it
-      // for this target. Taking the first of several identical frames would
-      // attribute one submission to a message the engine never submitted, so an
-      // ambiguous frame yields no correlation and the hook stays non-delivery
-      // evidence.
+      // Same one-to-one rule as the staged-receipt join above, counted the same
+      // stable way: a rendered frame identifies an intent only while exactly one
+      // ACCEPTED intent wears it for this target, delivered ones included.
+      // Taking the first of several identical frames — or letting the set shrink
+      // as deliveries assert — would attribute one submission to a message the
+      // engine never submitted, so an ambiguous frame yields no correlation and
+      // the hook stays non-delivery evidence.
       const intentCandidates = hook.content === undefined ? [] : events.filter((event) =>
         event.event_type === 'reg.comm_accepted'
         && (event.payload.kind === 'command' || event.payload.kind === 'skill')
         && event.payload.rendered_frame === hook.content
         && Array.isArray(event.payload.target_agent_ids)
-        && event.payload.target_agent_ids.includes(hook.agent_id)
-        && !events.some((candidate) => candidate.event_type === 'act.comm_delivery_asserted'
-          && candidate.payload.message_id === event.entity_id
-          && candidate.payload.target_agent_id === hook.agent_id));
+        && event.payload.target_agent_ids.includes(hook.agent_id));
       const intentMessage = intentCandidates.length === 1 ? intentCandidates[0] : undefined;
       const messageIds = [...new Set([...hook.message_ids, ...(intentMessage ? [intentMessage.entity_id] : [])])];
       for (const messageId of messageIds) {

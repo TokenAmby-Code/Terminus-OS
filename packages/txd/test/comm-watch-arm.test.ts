@@ -515,3 +515,40 @@ test('behavioral pin: identical intent frames to one target assert neither witho
   expect((await d.commDelivery(second)).complete).toBe(false);
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(0);
 });
+
+// Uniqueness has to be a stable property of the accepted intents, not of the
+// ones still awaiting assertion. If delivered messages drop out of the
+// candidate set, that set shrinks as deliveries land: the first of two
+// identical intents asserts, the second becomes the only survivor, and the
+// spent hook that named the first then reads as a unique witness for a message
+// the engine never submitted. A hook is spent once it has asserted.
+test('behavioral pin: a spent intent hook does not assert the next identical intent', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
+  const rendered = '/compact hard';
+  const instrumented = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
+  };
+  let hookPending = true;
+  instrumented.sendVerifiedToSeat = async (_seat, _id, text) => {
+    if (hookPending) {
+      hookPending = false;
+      await d.promptSubmitted({
+        schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+      });
+    }
+    return { bytes: Buffer.byteLength(text), verdict: 'staged' };
+  };
+  const send = async () => (await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
+  } as never)).message_id;
+
+  const first = await send();
+  expect((await d.commDelivery(first)).complete).toBe(true);
+
+  const second = await send();
+
+  expect((await d.commDelivery(second)).complete).toBe(false);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+});
