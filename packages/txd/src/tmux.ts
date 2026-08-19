@@ -135,8 +135,6 @@ export interface TmuxControlPlane {
   ensureEstate(): Promise<EstateEnsureResult>;
   /** Classify the observed estate; an unrecognized topology is foreign, never repaired blind. */
   estateGeneration(): Promise<EstateGeneration>;
-  /** Correct display-only drift without replacing a pane process. */
-  reconcilePresentation(): Promise<void>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
   createSeat(seatId: string): Promise<void>;
   /** Split one dynamic pane into a mitosis page and tile the page once. */
@@ -818,29 +816,59 @@ export class RealTmux implements TmuxControlPlane {
     return this.checked(args.includes('-c') ? args : [...args, '-c', this.homeDirectory()], operation, target);
   }
 
-  private async estateRows(): Promise<EstateRow[]> {
-    const result = await this.command('observe_estate', 'estate', [
-      'list-panes', '-a', '-F',
-      `#{session_name}\t#{window_name}\t#{${CANON_OPT}}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}`,
-    ]);
-    if (result.code !== 0) return [];
-    return result.stdout.trim().split('\n').filter(Boolean).map((line) => {
-      const [
-        session = '', window = '', seat = '', left = '', top = '', width = '',
-        height = '', windowWidth = '', windowHeight = '',
-      ] = line.split('\t');
-      return {
-        session,
-        window,
-        seat,
+  /**
+   * Pane geometry as the window lays it out.
+   *
+   * `pane_left` and its siblings report the *visible* projection, so a zoomed
+   * pane answers with the whole window while the panes beside it keep their
+   * real coordinates — a page read through a zoom looks exactly like a page
+   * whose panes have drifted apart. `window_layout` is the layout itself and a
+   * zoom never touches it; `window_visible_layout` is where the zoom lands.
+   * The estate is observed through the layout so that an operator zooming a
+   * pane to read it cannot be mistaken for the estate coming apart.
+   *
+   * A leaf in a layout is `WxH,x,y,<pane id>`; a container is the same shape
+   * followed by `{` or `[`. The trailing pane id is what separates the two,
+   * and neither brace can appear inside a match, so the leaves are exactly the
+   * five-number runs.
+   */
+  private static layoutGeometry(layout: string): Map<string, Omit<EstateRow, 'session' | 'window' | 'seat'>> {
+    const panes = new Map<string, Omit<EstateRow, 'session' | 'window' | 'seat'>>();
+    const [, windowWidth = '', windowHeight = ''] = layout.match(/^[^,]*,(\d+)x(\d+),/) ?? [];
+    for (const [, width, height, left, top, pane] of layout.matchAll(/(\d+)x(\d+),(\d+),(\d+),(\d+)/g)) {
+      panes.set(`%${pane}`, {
         left: Number(left),
         top: Number(top),
         width: Number(width),
         height: Number(height),
         windowWidth: Number(windowWidth),
         windowHeight: Number(windowHeight),
-      };
-    }).filter((row) => row.seat.length > 0);
+      });
+    }
+    return panes;
+  }
+
+  private async estateRows(): Promise<EstateRow[]> {
+    const result = await this.command('observe_estate', 'estate', [
+      'list-panes', '-a', '-F',
+      `#{session_name}\t#{window_name}\t#{${CANON_OPT}}\t#{pane_id}\t#{window_layout}`,
+    ]);
+    if (result.code !== 0) return [];
+    const layouts = new Map<string, Map<string, Omit<EstateRow, 'session' | 'window' | 'seat'>>>();
+    return result.stdout.trim().split('\n').filter(Boolean).flatMap((line) => {
+      const [session = '', window = '', seat = '', pane = '', layout = ''] = line.split('\t');
+      if (seat.length === 0) return [];
+      let geometry = layouts.get(layout);
+      if (!geometry) {
+        geometry = RealTmux.layoutGeometry(layout);
+        layouts.set(layout, geometry);
+      }
+      // A pane its own window's layout does not carry is a pane whose geometry
+      // cannot be observed. Dropping it reads as a missing seat, which is the
+      // divergence it is — never a seat quietly accepted unmeasured.
+      const placement = geometry.get(pane);
+      return placement ? [{ session, window, seat, ...placement }] : [];
+    });
   }
 
   private pageGeometryMatches(window: string, seats: readonly string[], rows: EstateRow[]): boolean {
@@ -950,15 +978,6 @@ export class RealTmux implements TmuxControlPlane {
     return recoverable ? 'recoverable' : 'foreign';
   }
 
-  async reconcilePresentation(): Promise<void> {
-    for (const page of Object.keys(TXD_WINDOWS)) {
-      if (isStackPage(page)) continue;
-      if (!(await this.clearPageZoom(page, `${TXD_SESSION}:=${page}`))) {
-        throw new Error(`txd could not reconcile ${page} presentation zoom`);
-      }
-    }
-  }
-
   async ensureLifecycleHooks(): Promise<void> {
     const commands = {
       'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name}"',
@@ -1063,10 +1082,13 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   /**
-   * Clear display-only zoom on a page. Zoom is the one canonical-shape
-   * violation that costs nothing to correct: every pane is the right process in
-   * the right place, so un-zooming restores canonical geometry without
-   * replacing a single terminal.
+   * Drop a page's zoom as part of reconstructing it.
+   *
+   * Zoom is the operator's, and txd does not get to take it back to tidy the
+   * estate: a page whose every pane is the right process in the right place is
+   * canonical whether or not somebody is reading one of them full-window. The
+   * only callers are the paths that are already replacing the page's panes,
+   * where there is no zoom left to preserve.
    */
   private async clearPageZoom(page: string, target: string): Promise<boolean> {
     const zoomed = await this.command('observe_page_zoom', page, ['display-message', '-p', '-t', target, '#{window_zoomed_flag}']);
@@ -1092,9 +1114,10 @@ export class RealTmux implements TmuxControlPlane {
   /**
    * Drive one canonical page to canonical shape. Recovery enforces rather than
    * observes: it acts, then re-reads the estate to attest what the action did.
-   * Enforcement escalates so repair stays proportionate to the damage —
-   * display-only drift is corrected in place, and only damage that survives
-   * that earns the destructive rebuild which replaces every process on the page.
+   * A page reaches here only once it has been read as genuinely diverged, so
+   * the repair left is the destructive rebuild that replaces every process on
+   * the page — a flexible page's missing allocation pane is the one exception,
+   * repaired by splitting into the window its workers already occupy.
    */
   private async enforcePage(page: string, expected: readonly string[]): Promise<{ canonical: boolean; rebuilt: boolean }> {
     if (await this.pageIsCanonical(page, expected)) return { canonical: true, rebuilt: false };
@@ -1113,9 +1136,6 @@ export class RealTmux implements TmuxControlPlane {
         await this.createStackSeat(page, TXD_STACK_WINDOWS[page]);
         return { canonical: await this.pageIsCanonical(page, expected), rebuilt: false };
       }
-    }
-    if (await this.clearPageZoom(page, `${TXD_SESSION}:=${page}`) && await this.pageIsCanonical(page, expected)) {
-      return { canonical: true, rebuilt: false };
     }
     if (!(await this.rebuildPage(page))) return { canonical: false, rebuilt: true };
     return { canonical: await this.pageIsCanonical(page, expected), rebuilt: true };
@@ -2189,7 +2209,6 @@ export class FakeTmux implements TmuxControlPlane {
     });
     return recoverable ? 'recoverable' : 'foreign';
   }
-  async reconcilePresentation(): Promise<void> {}
   estateShape(): { sessions: string[]; windows: Record<string, string[]> } {
     return structuredClone(this.shape);
   }
