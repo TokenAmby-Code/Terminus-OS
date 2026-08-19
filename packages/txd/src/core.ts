@@ -2686,7 +2686,6 @@ export class Daemon {
   async reconcile(transportReceipt: string | null = null): Promise<ReconcileResponse> {
     let councilRebuilt = false;
     const response = await this.locked(async () => {
-      await this.tmux.reconcilePresentation();
       councilRebuilt = await this.recoverScopedResets();
       const events = await this.store.readAll();
       const t0 = performance.now();
