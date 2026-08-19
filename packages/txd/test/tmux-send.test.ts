@@ -28,9 +28,10 @@ test('behavioral pin: a visible draft and prompt suggestion never block a comm t
     frame,
     undefined,
     'codex',
-  )).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+  )).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged', frame_departed: false });
   expect(pasted).toEqual([frame]);
-  expect(calls.some((args) => args[0] === 'capture-pane')).toBe(false);
+  // Captures observe frame departure only; no capture verdict ever gates the
+  // transport — the unmatched paint above still stages and submits.
   expect(calls.some((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toBe(true);
 });
 
@@ -41,7 +42,7 @@ test('behavioral pin: concurrent comm frames remain whole serialized transaction
 
   const outcomes = await Promise.all(frames.map((frame) => tmux.sendVerifiedToSeat('palace:S', crypto.randomUUID(), frame)));
 
-  expect(outcomes).toEqual(frames.map((frame) => ({ bytes: Buffer.byteLength(frame), verdict: 'staged' })));
+  expect(outcomes).toEqual(frames.map((frame) => ({ bytes: Buffer.byteLength(frame), verdict: 'staged', frame_departed: false })));
   expect(pasted).toEqual(frames);
 });
 

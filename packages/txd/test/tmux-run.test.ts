@@ -133,9 +133,9 @@ test('a claude run enters bash mode with a literal ! keystroke, pastes, verifies
     if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tcouncil:custodes\n', stderr: '' };
     if (args[0] === 'capture-pane') {
       capture += 1;
-      // Baseline: the idle interactive paint. After input: the bash-mode
-      // paint, whose prompt marker is the bang itself.
-      return { code: 0, stdout: capture === 1 ? CLAUDE_IDLE : `transcript\n\n! ${command}\n`, stderr: '' };
+      // Before Enter: the bash-mode paint, whose prompt marker is the bang
+      // itself. After Enter: back to the idle paint — the command departed.
+      return { code: 0, stdout: capture === 1 ? `transcript\n\n! ${command}\n` : CLAUDE_IDLE, stderr: '' };
     }
     return { code: 0, stdout: '', stderr: '' };
   };
@@ -145,7 +145,7 @@ test('a claude run enters bash mode with a literal ! keystroke, pastes, verifies
 
   const outcome = await tmux.runInAgentComposer('council:custodes', RUN_ID, command, 'claude');
 
-  expect(outcome).toEqual({ bytes: Buffer.byteLength(command), verdict: 'staged' });
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(command), verdict: 'staged', frame_departed: true });
   const keys = calls.filter((args) => args[0] === 'send-keys');
   expect(keys[0]).toEqual(['send-keys', '-t', '%7', '-l', '!']);
   expect(keys.at(-1)).toEqual(['send-keys', '-t', '%7', 'Enter']);
@@ -166,7 +166,7 @@ test('a claude run is not blocked by visible composer paint', async () => {
     run,
   });
   const outcome = await tmux.runInAgentComposer('council:custodes', RUN_ID, 'echo x', 'claude');
-  expect(outcome).toEqual({ bytes: 6, verdict: 'staged' });
+  expect(outcome).toEqual({ bytes: 6, verdict: 'staged', frame_departed: false });
   expect(calls.some((args) => args[0] === 'paste-buffer')).toBe(true);
   expect(calls.some((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toBe(true);
 });
@@ -186,8 +186,8 @@ test('a codex run rides the verified send path with the whole !-prefixed line', 
       return {
         code: 0,
         stdout: capture === 1
-          ? 'transcript\n\n› Summarize recent commits\n\n  gpt-5.6-sol medium'
-          : `› ${frame}\n`,
+          ? `› ${frame}\n`
+          : 'transcript\n\n› Summarize recent commits\n\n  gpt-5.6-sol medium',
         stderr: '',
       };
     }
@@ -199,7 +199,7 @@ test('a codex run rides the verified send path with the whole !-prefixed line', 
 
   const outcome = await tmux.runInAgentComposer('palace:N', RUN_ID, command, 'codex');
 
-  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged' });
+  expect(outcome).toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged', frame_departed: true });
   expect(payloads).toEqual([frame]);
   // No bang keystroke on codex: the bang is literal composer text there.
   expect(calls.filter((args) => args[0] === 'send-keys' && args.at(-1) === '!')).toHaveLength(0);

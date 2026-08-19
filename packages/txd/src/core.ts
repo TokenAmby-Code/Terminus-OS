@@ -1398,7 +1398,10 @@ export class Daemon {
           && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
         const frame = prepared.renderedIntent?.frame
           ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
-        return { target, binding, frame };
+        // The target's turn state at send, stamped on the receipt: a frame
+        // staged into a WORKING engine is queued into that turn, and only that
+        // stamp lets the turn-stop join later read the receipt as consumable.
+        return { target, binding, frame, target_turn: proj.turnByAgent.get(target.agent_id) ?? 'unobserved' };
       });
     });
 
@@ -1434,7 +1437,10 @@ export class Daemon {
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
             target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: committedTransportBytes(sent),
-            submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
+            submit_verdict: sent.verdict,
+            frame_departed: sent.verdict === 'staged' && sent.frame_departed === true,
+            target_turn: plan.target_turn,
+            kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: plan.frame,
             receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
@@ -2692,7 +2698,7 @@ export class Daemon {
       }
 
       // Fresh stop for a live, bound agent → record it (turn → awaiting_input).
-      await this.store.append({
+      const stopEvent = await this.store.append({
         entity_type: 'agent',
         entity_id: req.agent_id,
         event_type: 'act.stop_reported',
@@ -2700,6 +2706,44 @@ export class Daemon {
         provenance: this.prov('hook', transportReceipt),
         occurred_at: this.now(),
       });
+
+      // The turn-stop delivery join. A mid-turn comm frame produces NO
+      // UserPromptSubmit — the engine queues it into the running turn (live
+      // specimens 994854e0, b9c1ca52, 2a243960) — so the hook join above can
+      // never speak for it. The full evidence chain substitutes: the exact
+      // frame verifiably departed the composer (frame_departed), it departed
+      // into an engine observed WORKING at send (target_turn), and this stop
+      // attests that turn completed and consumed its queue. Any partial chain
+      // stays undelivered; a deduped or refused stop never reaches this join.
+      // Known bound, pinned adversarially: a turn interrupted between
+      // departure and stop could drop its queue — the join asserts only with
+      // all three facts, and never from departure or stop alone.
+      const events = await this.store.readAll();
+      for (const receipt of events) {
+        if (receipt.event_type !== 'act.comm_bytes_sent'
+          || receipt.payload.target_agent_id !== req.agent_id
+          || receipt.payload.submit_verdict !== 'staged'
+          || receipt.payload.frame_departed !== true
+          || receipt.payload.target_turn !== 'working') continue;
+        const messageId = receipt.entity_id;
+        const accepted = events.find((event) => event.entity_id === messageId && event.event_type === 'reg.comm_accepted');
+        if (!accepted) continue;
+        const assertionId = `${messageId}:${req.agent_id}`;
+        if (events.some((event) => event.entity_id === assertionId && event.event_type === 'act.comm_delivery_asserted')) continue;
+        await this.store.append({
+          entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+          payload: {
+            message_id: messageId,
+            target_agent_id: req.agent_id,
+            source_agent_id: accepted.payload.source_agent_id,
+            attestation: 'turn_stop',
+            stop_event_seq: stopEvent.seq,
+            transport_receipt_seq: receipt.seq,
+          },
+          provenance: this.prov('hook', transportReceipt), occurred_at: this.now(),
+        });
+        this.wakeDelivery(messageId);
+      }
 
       return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, turn: 'awaiting_input' };
     });
