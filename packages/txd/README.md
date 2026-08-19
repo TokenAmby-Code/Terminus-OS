@@ -122,9 +122,16 @@ each route is the ruled daemon behavior, unchanged.
   never split, spill, encode, or select a transport. A failed transport or
   submit records its possible-effect byte count but remains permanently
   undelivered.
-- Delivery requires the exact target's `staged` transport fact joined with the
-  receiving engine's exact `UserPromptSubmit` message id. Bytes, process
-  success, and an `ok: true` envelope are never delivery assertions.
+- Delivery requires the exact target's `staged` transport fact joined with an
+  engine attestation. An idle engine attests through its exact
+  `UserPromptSubmit` message id. A WORKING engine queues a mid-turn frame into
+  the running turn and fires no `UserPromptSubmit` for it; there the receipt's
+  verified frame departure (the exact frame captured intact in the composer
+  before Enter and gone after) joined with the target's own turn stop is the
+  attestation — the stop proves the turn that owned the queue completed and
+  consumed it. Departure alone, a stop alone, or a frame staged without
+  observed working turn state never asserts. Bytes, process success, and an
+  `ok: true` envelope are never delivery assertions.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an

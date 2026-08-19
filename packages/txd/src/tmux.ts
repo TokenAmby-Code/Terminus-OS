@@ -84,11 +84,15 @@ export type WrapperPlacementAttestation =
 
 // Below-membrane STAGING outcome (discriminated by verdict). tmux can prove it
 // handed this frame to a pane and pressed Enter; it cannot prove the engine
-// consumed it.
-// Submission is a fact of the receiving engine — its UserPromptSubmit hook,
-// which txd folds into `act.comm_delivery_asserted`. That is the only fact
-// permitted to mean delivered, and no verdict here may spell that word.
-export type SendOutcome = { verdict: 'staged'; bytes: number };
+// consumed it. `frame_departed` records one further transport observation:
+// the exact frame was captured intact in the active composer before Enter and
+// gone from it after. Departure is still transport truth, never delivery.
+// Delivery is a fact of the receiving engine, folded by txd into
+// `act.comm_delivery_asserted` from engine attestation only: the engine's
+// UserPromptSubmit hook, or — for a frame that verifiably departed into a
+// WORKING engine — the engine's turn stop, which attests the turn that owned
+// the queue completed. No verdict here may spell the word delivered.
+export type SendOutcome = { verdict: 'staged'; bytes: number; frame_departed: boolean };
 
 export type ComposerVerdict = 'intact' | 'corrupted' | 'absent';
 export type ComposerRefusal =
@@ -1780,10 +1784,31 @@ export class RealTmux implements TmuxControlPlane {
         return { bytes, verdict: 'transport_failed' };
       }
     }
+    // Observe the composer before Enter so departure can mean something after
+    // it. A tab-completed intent send repaints the frame as the committed
+    // surface name, so the exact-frame verdict has nothing to match; only the
+    // plain opaque frame is observable. Observation never gates the send.
+    const preVerdict = tabAfterPrefix === undefined
+      ? await this.observeComposerFrame(seatId, paneId, text)
+      : null;
     const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-    return enter.code === 0
-      ? { bytes, verdict: 'staged' }
-      : { bytes, verdict: 'submit_failed' };
+    if (enter.code !== 0) return { bytes, verdict: 'submit_failed' };
+    const postVerdict = preVerdict === 'intact'
+      ? await this.observeComposerFrame(seatId, paneId, text)
+      : null;
+    return { bytes, verdict: 'staged', frame_departed: preVerdict === 'intact' && postVerdict !== null && postVerdict !== 'intact' };
+  }
+
+  /**
+   * One exact-frame composer observation: what the active prompt holds right
+   * now, judged by the pinned `composerVerdict`. An unobservable pane returns
+   * null — absence of evidence, which no caller may read as departure.
+   */
+  private async observeComposerFrame(seatId: string, paneId: string, expectedFrame: string): Promise<ComposerVerdict | null> {
+    const captured = await this.command('observe_frame_departure', seatId, [
+      'capture-pane', '-p', '-e', '-J', '-t', paneId,
+    ]);
+    return captured.code === 0 ? RealTmux.composerVerdict(captured.stdout, '', expectedFrame) : null;
   }
 
   /**
@@ -1856,10 +1881,22 @@ export class RealTmux implements TmuxControlPlane {
     if (!await this.pasteLiteral(seatId, paneId, command, 'paste_literal_run')) {
       return { bytes: 1, verdict: 'transport_failed' };
     }
+    // Same departure observation as the ordinary verified send, judged by the
+    // shell-mode verdict because Claude's bash mode repaints the prompt marker.
+    const preVerdict = await this.observeShellComposerFrame(seatId, paneId, command);
     const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
-    return enter.code === 0
-      ? { bytes, verdict: 'staged' }
-      : { bytes, verdict: 'submit_failed' };
+    if (enter.code !== 0) return { bytes, verdict: 'submit_failed' };
+    const postVerdict = preVerdict === 'intact'
+      ? await this.observeShellComposerFrame(seatId, paneId, command)
+      : null;
+    return { bytes, verdict: 'staged', frame_departed: preVerdict === 'intact' && postVerdict !== null && postVerdict !== 'intact' };
+  }
+
+  private async observeShellComposerFrame(seatId: string, paneId: string, command: string): Promise<ComposerVerdict | null> {
+    const captured = await this.command('observe_frame_departure', seatId, [
+      'capture-pane', '-p', '-e', '-J', '-t', paneId,
+    ]);
+    return captured.code === 0 ? RealTmux.shellComposerVerdict(captured.stdout, command) : null;
   }
 
   async runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged> {
@@ -2413,6 +2450,16 @@ export class FakeTmux implements TmuxControlPlane {
   }
   private sentLines = new Map<string, string[]>();
   private paneTexts = new Map<string, string>();
+  private departureObservedSeats = new Set<string>();
+
+  /**
+   * Test control: the post-Enter capture proves this seat's composer held the
+   * frame and released it. A seat absent from the set proves nothing — the
+   * default is NO departure evidence, exactly as the real capture demands.
+   */
+  observeFrameDeparture(seatId: string): void { this.departureObservedSeats.add(seatId); }
+  /** Test control: withdraw the departure observation for this seat. */
+  withholdFrameDeparture(seatId: string): void { this.departureObservedSeats.delete(seatId); }
 
   async sendVerifiedToSeat(seatId: string, _correlationId: string, text: string, _tabAfterPrefix?: string, _engine?: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     const s = this.seats.get(seatId);
@@ -2420,7 +2467,7 @@ export class FakeTmux implements TmuxControlPlane {
       return { bytes: 0, verdict: 'seat_unresolved' as const };
     }
     this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
-    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' as const };
+    return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' as const, frame_departed: this.departureObservedSeats.has(seatId) };
   }
   async observeComposerInteractive(seatId: string): Promise<boolean> {
     const s = this.seats.get(seatId);
@@ -2451,7 +2498,7 @@ export class FakeTmux implements TmuxControlPlane {
     }
     if (this.agentRunFailures.has(seatId)) return { bytes: 0, verdict: 'transport_failed' as const };
     this.agentRuns.push({ seat_id: seatId, run_id: runId, command, engine });
-    return { bytes: Buffer.byteLength(command, 'utf8'), verdict: 'staged' as const };
+    return { bytes: Buffer.byteLength(command, 'utf8'), verdict: 'staged' as const, frame_departed: this.departureObservedSeats.has(seatId) };
   }
   async runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged> {
     const s = this.seats.get(seatId);
