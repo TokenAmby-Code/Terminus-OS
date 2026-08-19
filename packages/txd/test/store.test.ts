@@ -11,7 +11,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { SQL } from 'bun';
 import { connectDb, DbEndpoint, type DbEndpointT } from '@terminus-os/db';
 import { MemoryEventStore, PostgresEventStore } from '../src/store.ts';
-import type { EventInput } from '@terminus-os/contracts';
+import { EVENT_TYPES, type EventInput } from '@terminus-os/contracts';
 
 function ev(over: Partial<EventInput> = {}): EventInput {
   return {
@@ -220,5 +220,36 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     // The append-only fence is back up after the migration's scoped trigger disable.
     const driven = async (q: PromiseLike<unknown>) => { await q; };
     await expect(driven(raw`update txd.events set entity_id = 'x' where entity_id = 'legacy:double-encoded'`)).rejects.toThrow(/append-only/);
+  });
+  test('migration 0022 purges rows outside the admitted event-type union and spares every admitted type', async () => {
+    // Plant one raw row per admitted type plus one row whose type the contract
+    // union does not admit — append is allowed; only UPDATE/DELETE/TRUNCATE
+    // are fenced. Boot replay validates every stored row against the union, so
+    // an unadmitted row refuses the whole stream until the purge removes it.
+    for (const eventType of EVENT_TYPES) {
+      await raw`
+        INSERT INTO txd.events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
+        VALUES ('seat', 'purge:admitted', ${eventType},
+                '{}'::jsonb, '{"source":"wrapper"}'::jsonb,
+                '2026-07-12T00:00:00.000Z', '2026-07-12T00:00:00.000Z')`;
+    }
+    await raw`
+      INSERT INTO txd.events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
+      VALUES ('seat', 'purge:unadmitted', 'act.retired_transport_probe',
+              '{}'::jsonb, '{"source":"wrapper"}'::jsonb,
+              '2026-07-12T00:00:00.000Z', '2026-07-12T00:00:00.000Z')`;
+    // Exercise the migration SQL directly, as the 0005 test does above.
+    const migration = await Bun.file(
+      new URL("../../db/migrations/0022_txd_admitted_event_type_purge.sql", import.meta.url),
+    ).text();
+    await raw.unsafe(migration);
+    const counts = (await raw`
+      SELECT entity_id, count(*)::int AS n FROM txd.events
+      WHERE entity_id IN ('purge:unadmitted', 'purge:admitted')
+      GROUP BY entity_id ORDER BY entity_id`) as { entity_id: string; n: number }[];
+    expect(counts).toEqual([{ entity_id: 'purge:admitted', n: EVENT_TYPES.length }]);
+    // The append-only fence is back up after the migration's scoped trigger disable.
+    const driven = async (q: PromiseLike<unknown>) => { await q; };
+    await expect(driven(raw`delete from txd.events where entity_id = 'purge:admitted'`)).rejects.toThrow(/append-only/);
   });
 });
