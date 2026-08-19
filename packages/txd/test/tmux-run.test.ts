@@ -255,8 +255,8 @@ test('a concurrent verified send cannot interleave bytes into a claude shell run
   // Real turns for the send to misbehave in while the run is held open.
   await new Promise((resolve) => setTimeout(resolve, 20));
   releaseRunPaste();
-  expect(await running).toEqual({ bytes: Buffer.byteLength(command), verdict: 'staged' });
-  expect(await sending).toEqual({ bytes: Buffer.byteLength(commText), verdict: 'staged' });
+  expect(await running).toEqual({ bytes: Buffer.byteLength(command), verdict: 'staged', frame_departed: false });
+  expect(await sending).toEqual({ bytes: Buffer.byteLength(commText), verdict: 'staged', frame_departed: false });
 
   // The pane saw the run transaction whole — ! → paste → Enter — before a
   // single byte of the send entered.
