@@ -103,6 +103,20 @@ export type SendOutcome = { verdict: 'staged'; bytes: number };
  */
 export type FrameRestObservation = 'frame_absent' | 'frame_present' | 'unobservable';
 
+/**
+ * The lost-Enter completion outcome. `submit_completed` — the exact staged
+ * frame was observed intact in the at-rest composer and one Enter was driven;
+ * `submit_failed` — the frame was intact but the Enter keypress could not be
+ * handed to the pane. Everything else is a zero-effect refusal: the evidence
+ * for driving anything was absent.
+ */
+export type StagedSubmitCompletion =
+  | 'submit_completed'
+  | 'submit_failed'
+  | 'frame_absent'
+  | 'unobservable'
+  | 'seat_unresolved';
+
 export type ComposerVerdict = 'intact' | 'corrupted' | 'absent';
 export type ComposerRefusal =
   | 'submit_failed'
@@ -206,6 +220,15 @@ export interface TmuxControlPlane {
    * delivery join; `unobservable` is absence of evidence, never absence.
    */
   observeFrameAbsence(seatId: string, expectedFrame: string): Promise<FrameRestObservation>;
+  /**
+   * Complete one staged submit whose Enter had no engine effect (live specimen
+   * 29fb6cc0): in ONE serialized pane transaction, observe the at-rest
+   * composer, and only when it holds the EXACT staged frame drive one Enter
+   * for the same transaction. Every other observation refuses with zero
+   * effect. This proves transport completion only — delivery stays a fact of
+   * the receiving engine's own attestation.
+   */
+  completeStagedSubmit(seatId: string, expectedFrame: string, expectedPaneGeneration?: string): Promise<StagedSubmitCompletion>;
   /**
    * Observe whether an engine process for `agentId` is running under this
    * seat's pane, RIGHT NOW. The turn fold cannot answer this — nothing in it
@@ -1825,6 +1848,34 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   /**
+   * The lost-Enter completion (live specimen 29fb6cc0). Observation and Enter
+   * share one serialized pane transaction so no other staging can interleave
+   * between the evidence and the keypress: the at-rest capture must show the
+   * ACTIVE composer holding exactly the staged frame — the payload observably
+   * arrived and observably never left — and only then is one Enter driven for
+   * the transaction that staged it. Anything else refuses with zero effect.
+   */
+  completeStagedSubmit(seatId: string, expectedFrame: string, expectedPaneGeneration?: string): Promise<StagedSubmitCompletion> {
+    return this.serializePaneInput(seatId, async () => {
+      const paneId = await this.resolvePane(seatId);
+      if (!paneId) return 'seat_unresolved';
+      if (expectedPaneGeneration !== undefined
+        && await this.generationForPane(seatId, paneId) !== expectedPaneGeneration) {
+        return 'seat_unresolved';
+      }
+      const captured = await this.command('observe_frame_at_rest', seatId, [
+        'capture-pane', '-p', '-e', '-J', '-t', paneId,
+      ]);
+      if (captured.code !== 0) return 'unobservable';
+      const verdict = RealTmux.composerVerdict(captured.stdout, '', expectedFrame);
+      if (verdict === 'absent') return 'unobservable';
+      if (verdict === 'corrupted') return 'frame_absent';
+      const enter = await this.command('submit_enter', seatId, ['send-keys', '-t', paneId, 'Enter']);
+      return enter.code === 0 ? 'submit_completed' : 'submit_failed';
+    });
+  }
+
+  /**
    * The shell-mode composer verdict. Claude's bash mode repaints the prompt
    * marker itself as `!`; a paint that keeps the standard caret shows the bang
    * as leading text instead. Both prove the same staged bytes; anything else
@@ -2474,6 +2525,23 @@ export class FakeTmux implements TmuxControlPlane {
     }
     this.sentLines.set(seatId, [...(this.sentLines.get(seatId) ?? []), text]);
     return { bytes: Buffer.byteLength(text, 'utf8'), verdict: 'staged' as const };
+  }
+
+  private enterDrives = new Map<string, number>();
+  /** Test observation: how many lost-Enter completions drove Enter on this seat. */
+  entersDriven(seatId: string): number { return this.enterDrives.get(seatId) ?? 0; }
+  async completeStagedSubmit(seatId: string, expectedFrame: string, expectedPaneGeneration?: string): Promise<StagedSubmitCompletion> {
+    const s = this.seats.get(seatId);
+    if (!s || s.pane === 'dead' || (expectedPaneGeneration !== undefined && s.generation !== expectedPaneGeneration)) {
+      return 'seat_unresolved';
+    }
+    const pane = this.paneTexts.get(seatId);
+    if (pane === undefined) return 'unobservable';
+    const verdict = RealTmux.composerVerdict(pane, '', expectedFrame);
+    if (verdict === 'absent') return 'unobservable';
+    if (verdict === 'corrupted') return 'frame_absent';
+    this.enterDrives.set(seatId, (this.enterDrives.get(seatId) ?? 0) + 1);
+    return 'submit_completed';
   }
   async observeComposerInteractive(seatId: string): Promise<boolean> {
     const s = this.seats.get(seatId);
