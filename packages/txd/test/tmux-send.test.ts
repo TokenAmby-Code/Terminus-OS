@@ -83,3 +83,57 @@ test('behavioral pin: a replaced pane generation refuses before transport effect
   )).toEqual({ bytes: 0, verdict: 'seat_unresolved' });
   expect(calls.some((args) => args[0] === 'paste-buffer')).toBe(false);
 });
+
+// ── Post-Enter frame-departure observation ──────────────────────────────────
+// The exact frame is captured intact in the active composer before Enter and
+// gone after: transport observed the frame depart into the engine. Departure
+// is transport observation, never a delivery assertion by itself.
+
+function departureTransport(frame: string, { post, failCapture }: { post?: string; failCapture?: boolean } = {}) {
+  const composer = (payload: string) => `transcript line\n › ${payload}\n\nsome chrome\n`;
+  const captures: string[] = [];
+  let enterDriven = false;
+  const buffers = new Map<string, string>();
+  const pasted: string[] = [];
+  const run = async (_socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> => {
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tpalace:W\n', stderr: '' };
+    if (args[0] === 'load-buffer') buffers.set(args[2]!, new TextDecoder().decode(stdin));
+    if (args[0] === 'paste-buffer') pasted.push(buffers.get(args[args.indexOf('-b') + 1]!) ?? '');
+    if (args[0] === 'send-keys' && args.at(-1) === 'Enter') enterDriven = true;
+    if (args[0] === 'capture-pane') {
+      captures.push(enterDriven ? 'post' : 'pre');
+      if (failCapture) return { code: 1, stdout: '', stderr: 'no server' };
+      return { code: 0, stdout: enterDriven ? (post ?? composer('')) : composer(frame), stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  return { captures, pasted, run };
+}
+
+test('behavioral pin: an intact-then-cleared composer observation records frame departure', async () => {
+  const frame = '[tx comm 33333333-3333-4333-8333-333333333333 from sender]\nmid-turn frame';
+  const { captures, run } = departureTransport(frame);
+  const tmux = new RealTmux('scratch', { run });
+
+  expect(await tmux.sendVerifiedToSeat('palace:W', '33333333-3333-4333-8333-333333333333', frame))
+    .toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged', frame_departed: true });
+  expect(captures).toEqual(['pre', 'post']);
+});
+
+test('behavioral pin: a frame still painted after Enter stays plain staged', async () => {
+  const frame = '[tx comm 44444444-4444-4444-8444-444444444444 from sender]\nsticky frame';
+  const { run } = departureTransport(frame, { post: `transcript line\n › ${frame}\n\nsome chrome\n` });
+  const tmux = new RealTmux('scratch', { run });
+
+  expect(await tmux.sendVerifiedToSeat('palace:W', '44444444-4444-4444-8444-444444444444', frame))
+    .toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged', frame_departed: false });
+});
+
+test('behavioral pin: an unobservable pane never blocks the transport and never claims departure', async () => {
+  const frame = '[tx comm 55555555-5555-4555-8555-555555555555 from sender]\nblind frame';
+  const { run } = departureTransport(frame, { failCapture: true });
+  const tmux = new RealTmux('scratch', { run });
+
+  expect(await tmux.sendVerifiedToSeat('palace:W', '55555555-5555-4555-8555-555555555555', frame))
+    .toEqual({ bytes: Buffer.byteLength(frame), verdict: 'staged', frame_departed: false });
+});
