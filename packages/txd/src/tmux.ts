@@ -1829,12 +1829,18 @@ export class RealTmux implements TmuxControlPlane {
     return promptBlock.map((line) => line.replace(/^\s*[│┃]\s?/, '')).join('\n');
   }
 
-  async runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
+  runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     if (engine === 'codex') {
       // Codex parses a literal `!`-prefixed composer line at submit, so the
-      // whole form rides the ordinary verified send path.
+      // whole form rides the ordinary verified send path — which serializes
+      // on the seat's pane-input queue itself.
       return this.sendVerifiedToSeat(seatId, runId, `!${command}`, undefined, 'codex', expectedPaneGeneration);
     }
+    return this.serializePaneInput(seatId, () =>
+      this.runInAgentComposerUnlocked(seatId, command, expectedPaneGeneration));
+  }
+
+  private async runInAgentComposerUnlocked(seatId: string, command: string, expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }> {
     // Claude: the `!` must be a KEYSTROKE on the interactive composer —
     // a bracketed paste of `!` stays text and would submit a prompt instead
     // of entering bash mode.
