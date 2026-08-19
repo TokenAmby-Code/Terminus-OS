@@ -105,6 +105,15 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 type Now = () => string;
 // What txd hands lifecycled to arm one comm watch: enough to name the
 // subscription's agent stream and the message whose hook will assert delivery.
+/**
+ * A gate call that never reached lifecycled (or never heard it answer): the
+ * transport failed or its ceiling expired. Distinct from a typed domain
+ * refusal, which is lifecycled affirmatively answering that the gate is not
+ * open. The daemon's gate closure throws this class for fetch-level failures
+ * so the comm path can tell the two apart.
+ */
+export class CommGateTransportFailure extends Error {}
+
 export type CommWatchArmInput = {
   message_id: string;
   target_agent_id: string;
@@ -1210,8 +1219,17 @@ export class Daemon {
   }
 
   // Arm the delivery watch and composer gate BEFORE bytes go to the pane.
-  // A dead lifecycle plane is a hard stop: sending without its gate would
-  // recreate the newborn-composer race this contract exists to prevent.
+  //
+  // Delivery attempts come first: a gate TRANSPORT failure is a fact about
+  // lifecycled's reachability, not a verdict about the target composer. When
+  // txd's own observation already proved the composer interactive, the
+  // attempt proceeds with the unarmed gap attested — the delivery stays
+  // unasserted (ok:false) until its effect fact arrives, so nothing is
+  // claimed that was not observed. The unpainted newborn keeps its hard
+  // stop: there the dead-zone race is real and txd holds no interactivity
+  // proof of its own, so sending without the gate would recreate it. A typed
+  // domain refusal from lifecycled is an affirmative answer and refuses as
+  // before.
   private async armCommWatch(
     messageId: string,
     sourceAgentId: string,
@@ -1219,8 +1237,8 @@ export class Daemon {
     transportReceipt: string | null,
   ): Promise<void> {
     if (!this.commWatchArm) return;
+    const composerInteractiveObserved = await this.backfillComposerInteractivity(targetAgentId, transportReceipt);
     try {
-      const composerInteractiveObserved = await this.backfillComposerInteractivity(targetAgentId, transportReceipt);
       await this.commWatchArm({
         message_id: messageId,
         target_agent_id: targetAgentId,
@@ -1231,6 +1249,7 @@ export class Daemon {
       await this.locked(() => this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
         payload: { message_id: messageId, target_agent_id: targetAgentId, detail: String(error) },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() }));
+      if (error instanceof CommGateTransportFailure && composerInteractiveObserved) return;
       throw error;
     }
   }
