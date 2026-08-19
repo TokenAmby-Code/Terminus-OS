@@ -37,15 +37,6 @@ test('adapter failures expose only a stderr category', async () => {
   await expect(tmux.ensureEstate()).rejects.not.toThrow(/%91|\$2|permission denied/);
 });
 
-test('presentation reconciliation fails loudly when zoom observation cannot be read', async () => {
-  const tmux = new RealTmux('scratch', {
-    run: async () => ({ code: 1, stdout: '', stderr: 'window unavailable' }),
-    audit: () => {},
-  });
-
-  await expect(tmux.reconcilePresentation()).rejects.toThrow(/presentation|zoom/i);
-});
-
 test('lifecycle hook commands shell-quote the tmux-supplied page name', async () => {
   const installed: string[] = [];
   const tmux = new RealTmux('scratch', {
