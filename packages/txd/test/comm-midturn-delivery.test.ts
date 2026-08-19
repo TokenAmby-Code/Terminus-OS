@@ -1,14 +1,19 @@
 // Behavioral-pin lane: mid-turn comm delivery truth is the staged transport
-// fact joined with an engine attestation. A frame that verifiably departed the
-// composer into a WORKING engine is queued into that turn; the engine's stop
-// attests the turn completed and consumed its queue. The idle path keeps its
-// UserPromptSubmit hook join unchanged.
+// fact joined with engine attestation. A frame staged into a WORKING engine
+// produces no UserPromptSubmit (live specimens 994854e0, b9c1ca52, 2a243960;
+// e5757301 pinned the send-time observation racing the busy engine's repaint),
+// so the join reads its evidence when the target's own stop lands: the engine
+// is at rest, and a visible composer that no longer holds the exact frame
+// proves the frame left it into the turn the stop attests complete. The idle
+// path keeps its UserPromptSubmit hook join unchanged.
 
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { Daemon } from '../src/core.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
+
+const IDLE_COMPOSER = 'transcript\n\n › \n\nchrome\n';
 
 async function rig() {
   const store = new MemoryEventStore();
@@ -36,10 +41,9 @@ async function targetWorking(store: MemoryEventStore) {
   });
 }
 
-test('behavioral pin: a mid-turn staged frame with verified departure asserts delivery on the target stop', async () => {
+test('behavioral pin: a mid-turn staged frame absent from the composer at the target stop asserts delivery', async () => {
   const { store, tmux, daemon } = await rig();
   await targetWorking(store);
-  tmux.observeFrameDeparture('palace:W');
 
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION,
@@ -54,6 +58,8 @@ test('behavioral pin: a mid-turn staged frame with verified departure asserts de
   // receipt alone never means delivered.
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
 
+  // At the stop the engine paints its idle composer, the frame long consumed.
+  tmux.setPaneText('palace:W', IDLE_COMPOSER);
   const stop = await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
   expect(stop).toMatchObject({ ok: true, recorded: true });
 
@@ -70,10 +76,13 @@ test('behavioral pin: a mid-turn staged frame with verified departure asserts de
   });
 });
 
-test('behavioral pin: the bytes-sent receipt records the departure observation and the target turn at send', async () => {
-  const { store, tmux, daemon } = await rig();
+// The receipt records transport facts and the target turn only; that no
+// send-time departure field exists is pinned by the adversarial sweep in
+// comm-midturn-attestation.adversarial.test.ts, the one place the corpse may
+// be remembered.
+test('behavioral pin: the bytes-sent receipt records the target turn at send', async () => {
+  const { store, daemon } = await rig();
   await targetWorking(store);
-  tmux.observeFrameDeparture('palace:W');
 
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION,
@@ -88,14 +97,39 @@ test('behavioral pin: the bytes-sent receipt records the departure observation a
     event.event_type === 'act.comm_bytes_sent' && event.entity_id === accepted.message_id);
   expect(receipt?.payload).toMatchObject({
     submit_verdict: 'staged',
-    frame_departed: true,
     target_turn: 'working',
   });
 });
 
+test('behavioral pin: a frame the first stop could not clear asserts on a later fresh stop that can', async () => {
+  const { store, tmux, daemon } = await rig();
+  await targetWorking(store);
+  const accepted = await daemon.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'target',
+    message: 'slow-consumed frame',
+    ask: false,
+    reply: false,
+  });
+
+  // First stop: the pane is unobservable — no evidence, no assertion.
+  await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
+
+  // The engine works again, then stops with the frame verifiably gone.
+  await targetWorking(store);
+  tmux.setPaneText('palace:W', IDLE_COMPOSER);
+  await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
+
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  const receipts = (await store.readAll()).filter((event) =>
+    event.event_type === 'act.comm_bytes_sent' && event.entity_id === accepted.message_id);
+  expect(receipts).toHaveLength(1); // reconciled to confirmed with no duplicate send
+});
+
 test('behavioral pin: the idle-target UserPromptSubmit hook join is unchanged', async () => {
-  const { tmux, daemon } = await rig();
-  tmux.observeFrameDeparture('palace:W');
+  const { daemon } = await rig();
 
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION,
@@ -118,7 +152,6 @@ test('behavioral pin: the idle-target UserPromptSubmit hook join is unchanged', 
 test('behavioral pin: a hook-asserted delivery is not re-asserted by the later stop join', async () => {
   const { store, tmux, daemon } = await rig();
   await targetWorking(store);
-  tmux.observeFrameDeparture('palace:W');
 
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION,
@@ -133,6 +166,7 @@ test('behavioral pin: a hook-asserted delivery is not re-asserted by the later s
     agent_id: 'target',
     message_ids: [accepted.message_id],
   });
+  tmux.setPaneText('palace:W', IDLE_COMPOSER);
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   const assertions = (await store.readAll()).filter((event) =>

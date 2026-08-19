@@ -1457,7 +1457,6 @@ export class Daemon {
           payload: {
             target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict,
-            frame_departed: sent.verdict === 'staged' && sent.frame_departed === true,
             target_turn: plan.target_turn,
             kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: plan.frame,
@@ -2729,26 +2728,33 @@ export class Daemon {
       // The turn-stop delivery join. A mid-turn comm frame produces NO
       // UserPromptSubmit — the engine queues it into the running turn (live
       // specimens 994854e0, b9c1ca52, 2a243960) — so the hook join above can
-      // never speak for it. The full evidence chain substitutes: the exact
-      // frame verifiably departed the composer (frame_departed), it departed
-      // into an engine observed WORKING at send (target_turn), and this stop
-      // attests that turn completed and consumed its queue. Any partial chain
-      // stays undelivered; a deduped or refused stop never reaches this join.
-      // Known bound, pinned adversarially: a turn interrupted between
-      // departure and stop could drop its queue — the join asserts only with
-      // all three facts, and never from departure or stop alone.
+      // never speak for it. The full evidence chain substitutes: the frame was
+      // staged into an engine observed WORKING at send (target_turn), this
+      // fresh stop attests that turn completed, and one composer-at-rest
+      // capture proves the exact frame no longer sits in the visible composer
+      // — it left it into the queue the finished turn consumed. The capture
+      // happens HERE, at the stop, because the engine is at rest: a capture at
+      // send time races the busy engine's repaint and proves nothing
+      // (specimen e5757301). Any partial chain stays undelivered — a frame an
+      // interrupted turn left painted refuses as frame_present, an invisible
+      // composer refuses as unobservable, and a later fresh stop retries with
+      // fresh evidence. A deduped or refused stop never reaches this join.
       const events = await this.store.readAll();
       for (const receipt of events) {
         if (receipt.event_type !== 'act.comm_bytes_sent'
           || receipt.payload.target_agent_id !== req.agent_id
           || receipt.payload.submit_verdict !== 'staged'
-          || receipt.payload.frame_departed !== true
           || receipt.payload.target_turn !== 'working') continue;
         const messageId = receipt.entity_id;
         const accepted = events.find((event) => event.entity_id === messageId && event.event_type === 'reg.comm_accepted');
         if (!accepted) continue;
         const assertionId = `${messageId}:${req.agent_id}`;
         if (events.some((event) => event.entity_id === assertionId && event.event_type === 'act.comm_delivery_asserted')) continue;
+        const observation = await this.tmux.observeFrameAbsence(
+          String(receipt.payload.seat_id),
+          String(receipt.payload.rendered_frame),
+        );
+        if (observation !== 'frame_absent') continue;
         await this.store.append({
           entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
           payload: {
@@ -2758,6 +2764,7 @@ export class Daemon {
             attestation: 'turn_stop',
             stop_event_seq: stopEvent.seq,
             transport_receipt_seq: receipt.seq,
+            frame_observation: observation,
           },
           provenance: this.prov('hook', transportReceipt), occurred_at: this.now(),
         });

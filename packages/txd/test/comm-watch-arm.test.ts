@@ -308,7 +308,7 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
     });
     hookReturned = true;
     expect(result.asserted).toEqual([]);
-    return { bytes: Buffer.byteLength(frame), verdict: 'staged' as const, frame_departed: false };
+    return { bytes: Buffer.byteLength(frame), verdict: 'staged' as const };
   };
 
   const accepted = await d.comm({
