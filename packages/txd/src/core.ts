@@ -1448,15 +1448,31 @@ export class Daemon {
           // outside the journal mutex, so that hook can land before this
           // receipt exists — the hook then sees no staged transport and
           // declines, and matching here by message id alone would lose the
-          // delivery with both facts present. The frame arm stays exact: the
-          // same target, and content identical to the frame this transaction
-          // rendered and staged.
+          // delivery with both facts present.
+          //
+          // But a frame names an intent only while ONE intent carries it. Two
+          // identical sends to one target share it byte for byte, and reading
+          // such a hook as this message's would assert a delivery the engine
+          // never made. The frame arm therefore holds only while this message
+          // is the single unasserted intent wearing that frame for that target;
+          // ambiguity falls back to the message-id join and stays undelivered.
           const intentFrame = prepared.renderedIntent?.frame;
+          const frameCandidates = intentFrame === undefined ? [] : events.filter((candidate) =>
+            candidate.event_type === 'reg.comm_accepted'
+            && (candidate.payload.kind === 'command' || candidate.payload.kind === 'skill')
+            && candidate.payload.rendered_frame === intentFrame
+            && Array.isArray(candidate.payload.target_agent_ids)
+            && candidate.payload.target_agent_ids.includes(plan.target.agent_id)
+            && !events.some((asserted) => asserted.event_type === 'act.comm_delivery_asserted'
+              && asserted.payload.message_id === candidate.entity_id
+              && asserted.payload.target_agent_id === plan.target.agent_id));
+          const frameNamesThisMessage = frameCandidates.length === 1
+            && frameCandidates[0]!.entity_id === prepared.messageId;
           const submitted = events.some((candidate) => candidate.event_type === 'act.prompt_submitted'
             && candidate.payload.agent_id === plan.target.agent_id
             && ((Array.isArray(candidate.payload.message_ids)
                 && candidate.payload.message_ids.includes(prepared.messageId))
-              || (intentFrame !== undefined && candidate.payload.content === intentFrame)));
+              || (frameNamesThisMessage && candidate.payload.content === intentFrame)));
           const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
           if (submitted && !events.some((candidate) => candidate.entity_id === assertionId
             && candidate.event_type === 'act.comm_delivery_asserted')) {
@@ -1743,7 +1759,13 @@ export class Daemon {
       const matchedMessageIds: string[] = [];
       const confirmations = new Map<string, string[]>();
       let matched = false;
-      const intentMessage = hook.content === undefined ? undefined : events.find((event) =>
+      // Same one-to-one rule as the staged-receipt join above: a rendered frame
+      // identifies an intent only while exactly one unasserted intent wears it
+      // for this target. Taking the first of several identical frames would
+      // attribute one submission to a message the engine never submitted, so an
+      // ambiguous frame yields no correlation and the hook stays non-delivery
+      // evidence.
+      const intentCandidates = hook.content === undefined ? [] : events.filter((event) =>
         event.event_type === 'reg.comm_accepted'
         && (event.payload.kind === 'command' || event.payload.kind === 'skill')
         && event.payload.rendered_frame === hook.content
@@ -1752,6 +1774,7 @@ export class Daemon {
         && !events.some((candidate) => candidate.event_type === 'act.comm_delivery_asserted'
           && candidate.payload.message_id === event.entity_id
           && candidate.payload.target_agent_id === hook.agent_id));
+      const intentMessage = intentCandidates.length === 1 ? intentCandidates[0] : undefined;
       const messageIds = [...new Set([...hook.message_ids, ...(intentMessage ? [intentMessage.entity_id] : [])])];
       for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');

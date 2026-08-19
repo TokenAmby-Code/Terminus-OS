@@ -483,3 +483,35 @@ test('behavioral pin: a hook that beats the staged receipt still asserts the int
   expect(delivery.complete).toBe(true);
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
 });
+
+// The rendered frame names an intent only while one intent carries it. Two
+// identical sends to one target share a frame byte for byte, so a hook with an
+// empty `message_ids` list cannot say which of them the engine submitted.
+// Attributing it to whichever was found first would assert delivery for a
+// message that was never submitted — the exact `UserPromptSubmit` join has to
+// stay one-to-one. An ambiguous hook is non-delivery evidence: it asserts
+// nothing and consumes nothing.
+test('behavioral pin: identical intent frames to one target assert neither without a unique witness', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
+  const rendered = '/compact hard';
+  const instrumented = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
+  };
+  instrumented.sendVerifiedToSeat = async (_seat, _id, text) => ({ bytes: Buffer.byteLength(text), verdict: 'staged' });
+  const send = async () => (await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
+  } as never)).message_id;
+
+  const first = await send();
+  const second = await send();
+
+  await expect(d.promptSubmitted({
+    schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+  })).rejects.toThrow('message_target_mismatch');
+
+  expect((await d.commDelivery(first)).complete).toBe(false);
+  expect((await d.commDelivery(second)).complete).toBe(false);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(0);
+});
