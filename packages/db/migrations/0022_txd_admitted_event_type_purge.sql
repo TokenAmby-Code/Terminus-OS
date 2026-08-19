@@ -36,6 +36,7 @@ DELETE FROM txd.events
    'act.comm_delivery_asserted',
    'act.comm_delivery_confirmation_dead_lettered',
    'act.comm_delivery_failed',
+   'act.comm_submit_driven',
    'act.comm_watch_unarmed',
    'act.composer_interactive_announced',
    'act.comm_callback_asserted',
