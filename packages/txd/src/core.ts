@@ -43,6 +43,7 @@ import {
   type DispatchRequested,
   type SeatDisqualifier,
   type EventInput,
+  type EventRecord,
   type Health,
   type EstateRotateRequest,
   type EstateRotateResponse,
@@ -1167,8 +1168,9 @@ export class Daemon {
         throw new Error(`txd failed to resume pending ${seats[0]} pane reconstruction`);
       }
       const occurred_at = this.now();
+      const resetEvents = await this.store.readAll();
       const inputs = bindings.flatMap((binding) =>
-        this.resetBindingInputs(binding, null, occurred_at),
+        this.resetBindingInputs(binding, null, occurred_at, resetEvents),
       );
       inputs.push({
         entity_type: 'estate',
@@ -1179,6 +1181,7 @@ export class Daemon {
         occurred_at,
       });
       await this.store.appendAll(inputs);
+      this.wakeCommDeliveryFailures(inputs);
       await this.publishRetirements(bindings, 'estate_reset', occurred_at);
       closed.add(request.entity_id);
     }
@@ -1535,6 +1538,9 @@ export class Daemon {
             && candidate.payload.agent_id === plan.target.agent_id
             && ((Array.isArray(candidate.payload.message_ids)
                 && candidate.payload.message_ids.includes(prepared.messageId))
+              || (plan.frame.includes(prepared.messageId)
+                && typeof candidate.payload.content === 'string'
+                && candidate.payload.content.includes(plan.frame))
               || (frameNamesThisMessage && candidate.payload.content === intentFrame)));
           const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
           if (submitted && !events.some((candidate) => candidate.entity_id === assertionId
@@ -1855,6 +1861,53 @@ export class Daemon {
     this.wakeAsk(askId);
   }
 
+  /**
+   * Every message whose staged frame the engine handed back inside the prompt
+   * it submitted. This is the transport's own bytes observed leaving the
+   * composer: txd wrote that exact frame into that exact seat, and the engine
+   * returned it in a submission, so the delivery happened whatever the frame
+   * parser could name.
+   *
+   * The parser reads a frame only where a frame begins its own line, which is
+   * the right rule for reading an IDENTIFIER out of prose. It is the wrong rule
+   * for reading an EFFECT: a composer that already held an operator draft
+   * continues that draft's line with the pasted frame, and the whole thing is
+   * submitted as one prompt. On 2026-08-19 that shape lost seven deliveries,
+   * five of them addressed to Custodes — specimen 9dc15225, staged at event
+   * 56994 and submitted 246ms later at event 56995 behind the words `im going
+   * to wait until home from the gym to do the `.
+   *
+   * A quoted frame cannot forge this. The evidence is the receipt, not the
+   * prompt: there must be a `staged` transport fact naming this agent.
+   *
+   * Only a SELF-NAMING frame qualifies — one carrying its own message id, which
+   * is every `message` comm and no `command`/`skill` intent. An intent frame
+   * renders the surface call and nothing else, so two identical intents to one
+   * target wear one frame byte for byte and containment could not tell them
+   * apart; reading such a hook here would assert a delivery the engine never
+   * made. Intents keep their own uniqueness-counted join and are left alone.
+   */
+  private stagedFrameDeliveries(events: EventRecord[], agentId: string, content: string | undefined): string[] {
+    if (content === undefined) return [];
+    const named = new Set<string>();
+    for (const receipt of events) {
+      if (receipt.event_type !== 'act.comm_bytes_sent'
+        || receipt.payload.target_agent_id !== agentId
+        || receipt.payload.submit_verdict !== 'staged') continue;
+      const frame = receipt.payload.rendered_frame;
+      if (typeof frame !== 'string' || !frame.includes(receipt.entity_id)) continue;
+      if (content.includes(frame)) named.add(receipt.entity_id);
+    }
+    return [...named];
+  }
+
+  /** Every sender blocked on a receipt for a comm this transaction just refused. */
+  private wakeCommDeliveryFailures(inputs: readonly EventInput[]): void {
+    for (const input of inputs) {
+      if (input.event_type === 'act.comm_delivery_failed') this.wakeDelivery(String(input.payload.message_id));
+    }
+  }
+
   private wakeDelivery(messageId: string): void {
     for (const wake of this.deliveryWaiters.get(messageId) ?? []) wake();
     this.deliveryWaiters.delete(messageId);
@@ -1895,7 +1948,11 @@ export class Daemon {
         && Array.isArray(event.payload.target_agent_ids)
         && event.payload.target_agent_ids.includes(hook.agent_id));
       const intentMessage = intentCandidates.length === 1 ? intentCandidates[0] : undefined;
-      const messageIds = [...new Set([...hook.message_ids, ...(intentMessage ? [intentMessage.entity_id] : [])])];
+      const messageIds = [...new Set([
+        ...hook.message_ids,
+        ...(intentMessage ? [intentMessage.entity_id] : []),
+        ...this.stagedFrameDeliveries(events, hook.agent_id, hook.content),
+      ])];
       for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
@@ -2008,10 +2065,20 @@ export class Daemon {
     const deliveries = targets.map((target) => {
       const assertion = events.find((e) => e.event_type === 'act.comm_delivery_asserted'
         && e.payload.message_id === messageId && e.payload.target_agent_id === target.agent_id);
+      // Read from `act.comm_delivery_failed` alone, exactly as `delivered`
+      // reads from the assertion alone. A refusal is never inferred from an
+      // assertion's absence — that absence is the silence this pair exists to
+      // stop being the only answer.
+      const failure = events.find((e) => e.event_type === 'act.comm_delivery_failed'
+        && e.payload.message_id === messageId && e.payload.target_agent_id === target.agent_id);
       return {
         target, delivered: assertion !== undefined,
         asserted_at: assertion?.occurred_at ?? null,
         assertion_event_id: assertion?.seq ?? null,
+        failed: assertion === undefined && failure !== undefined,
+        failed_at: assertion === undefined ? failure?.occurred_at ?? null : null,
+        failure_event_id: assertion === undefined ? failure?.seq ?? null : null,
+        failure_reason: assertion === undefined ? (failure ? String(failure.payload.reason) : null) : null,
       };
     });
     return {
@@ -2019,6 +2086,7 @@ export class Daemon {
       source_agent_id: String(accepted.payload.source_agent_id),
       accepted_at: accepted.occurred_at,
       deliveries, complete: deliveries.length > 0 && deliveries.every((d) => d.delivered),
+      resolved: deliveries.length > 0 && deliveries.every((d) => d.delivered || d.failed),
     };
   }
 
@@ -2087,6 +2155,16 @@ export class Daemon {
       if (current.timely) {
         return {
           ok: true, schema_version: SCHEMA_VERSION, phase: 'delivery_confirmed',
+          message_id: req.message_id, source_agent_id: req.source_agent_id,
+          deliveries: current.delivery.deliveries,
+        };
+      }
+      // Transport landed and delivery then became impossible. The sender is
+      // told so rather than handed `bytes_sent`, which would read as a message
+      // still on its way to a composer that no longer exists.
+      if (current.delivery.deliveries.some((row) => row.failed)) {
+        return {
+          ok: false, schema_version: SCHEMA_VERSION, phase: 'delivery_failed',
           message_id: req.message_id, source_agent_id: req.source_agent_id,
           deliveries: current.delivery.deliveries,
         };
@@ -2424,11 +2502,13 @@ export class Daemon {
         return page !== undefined && isTxdPage(page) && rebuiltPages.has(page);
       });
       const bootRetiredAt = this.now();
+      const bootEvents = await this.store.readAll();
       const bootRetirements = bindings.flatMap((binding) =>
-        this.resetBindingInputs(binding, null, bootRetiredAt),
+        this.resetBindingInputs(binding, null, bootRetiredAt, bootEvents),
       );
       if (bootRetirements.length > 0) {
         await this.store.appendAll(bootRetirements);
+        this.wakeCommDeliveryFailures(bootRetirements);
         await this.publishRetirements(bindings, 'estate_reset', bootRetiredAt);
       }
       // Seats that already carry a `reg.pane_created` fact. A prior boot could
@@ -2789,7 +2869,11 @@ export class Daemon {
     if (isStackSeat(binding.seat_id)) {
       inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_abandoned', payload: {}, provenance: prov, occurred_at });
     }
+    inputs.push(...this.commDeliveryFailures(
+      await this.store.readAll(), binding.agent_id, 'delivery_target_closed', occurred_at, prov,
+    ));
     await this.store.appendAll(inputs);
+    this.wakeCommDeliveryFailures(inputs);
     await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
     // The seat is now cleared, and if it is one the estate keeps staffed the
     // vacancy is announced rather than filled: registrationd mints the next
@@ -3346,8 +3430,9 @@ export class Daemon {
       // The pane processes are replaced: any shell run staged in them lost
       // the shell that would signal its completion. Fail those runs loud now.
       for (const seat of seats) this.abortPaneRuns(seat);
+      const resetEvents = await this.store.readAll();
       const inputs = bindings.flatMap((binding) =>
-        this.resetBindingInputs(binding, transportReceipt, completedAt),
+        this.resetBindingInputs(binding, transportReceipt, completedAt, resetEvents),
       );
       inputs.push({
         entity_type: 'estate',
@@ -3358,6 +3443,7 @@ export class Daemon {
         occurred_at: completedAt,
       });
       await this.store.appendAll(inputs);
+      this.wakeCommDeliveryFailures(inputs);
       await this.publishRetirements(bindings, 'estate_reset', completedAt);
     return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
   }
@@ -3459,16 +3545,70 @@ export class Daemon {
     return result;
   }
 
+  /**
+   * The refusal every staged-but-unattested comm to this agent is owed, written
+   * in the same transaction that ends the agent's binding. The binding ending
+   * IS the moment delivery became impossible — the composer holding those bytes
+   * is gone — so this is an observed effect, not a deadline expiring and not an
+   * inference from a missing assertion.
+   *
+   * Without it a dropped comm and a pending one read identically forever:
+   * `delivered: false` with nothing else to distinguish them. The sibling of
+   * `abortPaneRuns`, which fails a reset seat's staged shell runs loud for the
+   * same reason.
+   */
+  private commDeliveryFailures(
+    events: EventRecord[],
+    agentId: string | null,
+    reason: 'delivery_target_closed' | 'delivery_target_reset',
+    occurred_at: string,
+    prov: EventInput['provenance'],
+  ): EventInput[] {
+    if (!agentId) return [];
+    const inputs: EventInput[] = [];
+    for (const receipt of events) {
+      if (receipt.event_type !== 'act.comm_bytes_sent'
+        || receipt.payload.target_agent_id !== agentId
+        || receipt.payload.submit_verdict !== 'staged') continue;
+      const messageId = receipt.entity_id;
+      const assertionId = `${messageId}:${agentId}`;
+      if (events.some((event) => event.entity_id === assertionId
+        && event.event_type === 'act.comm_delivery_asserted')) continue;
+      const failureId = `comm-delivery-failure:${messageId}:${agentId}`;
+      if (events.some((event) => event.entity_id === failureId
+        && event.event_type === 'act.comm_delivery_failed')) continue;
+      if (inputs.some((input) => input.entity_id === failureId)) continue;
+      const accepted = events.find((event) => event.entity_id === messageId
+        && event.event_type === 'reg.comm_accepted');
+      if (!accepted) continue;
+      inputs.push({
+        entity_type: 'assertion', entity_id: failureId, event_type: 'act.comm_delivery_failed',
+        payload: {
+          message_id: messageId,
+          target_agent_id: agentId,
+          source_agent_id: accepted.payload.source_agent_id,
+          seat_id: receipt.payload.seat_id,
+          transport_receipt_seq: receipt.seq,
+          reason,
+        },
+        provenance: prov, occurred_at,
+      });
+    }
+    return inputs;
+  }
+
   private resetBindingInputs(
     binding: CurrentBinding,
     transportReceipt: string | null,
     occurred_at: string,
+    events: EventRecord[],
   ): EventInput[] {
     const prov = this.prov('observer', transportReceipt);
     const inputs: EventInput[] = [];
     if (binding.agent_id) inputs.push({ entity_type: 'agent', entity_id: binding.agent_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
+    inputs.push(...this.commDeliveryFailures(events, binding.agent_id, 'delivery_target_reset', occurred_at, prov));
     return inputs;
   }
 

@@ -142,7 +142,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(() => CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [] }, engine: "codex" })).toThrow();
   });
 
-  test("behavioral pin: comm receipt wait has a fixed ceiling, two success tiers, and a typed refusal", () => {
+  test("behavioral pin: comm receipt wait has a fixed ceiling, two success tiers, and two typed refusals", () => {
     expect(COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toBe(30_000);
     expect(CommReceiptWaitRequestSchema.parse({
       schema_version: 12,
@@ -166,6 +166,10 @@ describe("txd lifecycle vocabulary", () => {
         delivered: true,
         asserted_at: "2026-08-15T17:00:01.000Z",
         assertion_event_id: 42,
+        failed: false,
+        failed_at: null,
+        failure_event_id: null,
+        failure_reason: null,
       }],
     }).phase).toBe("delivery_confirmed");
     expect(CommReceiptSchema.parse({
@@ -198,6 +202,26 @@ describe("txd lifecycle vocabulary", () => {
     } as const;
     expect(CommReceiptSchema.parse(refused).phase).toBe("transport_refused");
     expect(() => CommReceiptSchema.parse({ ...refused, refusals: [] })).toThrow();
+    // Transport landed; delivery then became impossible. A separate refusal
+    // from transport_refused, and never ok — a sender must not read a dropped
+    // comm as a delivered one, nor as one still in flight.
+    expect(CommReceiptSchema.parse({
+      ok: false,
+      schema_version: 12,
+      phase: "delivery_failed",
+      message_id: "message-4",
+      source_agent_id: "source",
+      deliveries: [{
+        target: { agent_id: "target", seat_id: "palace:W", persona: null },
+        delivered: false,
+        asserted_at: null,
+        assertion_event_id: null,
+        failed: true,
+        failed_at: "2026-08-15T17:00:31.000Z",
+        failure_event_id: 44,
+        failure_reason: "delivery_target_closed",
+      }],
+    }).phase).toBe("delivery_failed");
   });
 
   test("health names the service txd — nothing k12-named survives of the daemon", () => {
