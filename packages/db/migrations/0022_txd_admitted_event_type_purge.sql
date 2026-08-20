@@ -23,6 +23,7 @@ DELETE FROM txd.events
    'reg.comm_target_snapshotted',
    'reg.composer_observation_prepared',
    'reg.contradiction_flagged',
+   'reg.journal_publication_dropped',
    'reg.teardown_started',
    'reg.process_reaped',
    'reg.retired',

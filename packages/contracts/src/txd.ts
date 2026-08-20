@@ -197,6 +197,11 @@ export const REG_EVENT_NAMES = [
   'comm_target_snapshotted',
   'composer_observation_prepared',
   'contradiction_flagged',
+  // A fact txd owed the journal and could not put there. The close it belongs
+  // to is already committed, so the publication can never be un-owed; what it
+  // must never be is silent. The boot census is the recovery, this is the
+  // count.
+  'journal_publication_dropped',
   'teardown_started',
   'process_reaped',
   'retired',
@@ -250,6 +255,7 @@ export const EVENT_TYPES = [
   'reg.comm_target_snapshotted',
   'reg.composer_observation_prepared',
   'reg.contradiction_flagged',
+  'reg.journal_publication_dropped',
   'reg.teardown_started',
   'reg.process_reaped',
   'reg.retired',

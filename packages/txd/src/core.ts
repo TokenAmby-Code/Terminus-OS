@@ -37,6 +37,7 @@ import {
   type CurrentBinding,
   DispatchAttestedSchema,
   PerpetualSeatVacantSchema,
+  EstateOccupancyCensusSchema,
   DispatchRefusedSchema,
   type DispatchRefused,
   type DispatchRequested,
@@ -2544,6 +2545,7 @@ export class Daemon {
       return { created, existing, backfilled, failed };
     });
     await this.announceVacantPerpetualSeats();
+    await this.assertOccupancyCensus();
     return result;
   }
 
@@ -2693,9 +2695,11 @@ export class Daemon {
   // Retirement publication (chapter-locks spec §4): every reg.retired append is
   // followed by `agent.retired` on the bus — the reactive leg of the retirement
   // authority split. The store facts are already committed when this runs, so a
-  // bus refusal is reported loud and never un-closes the seat; a payload the
-  // contract refuses (a non-registration launch identity) is skipped loud for
-  // the same reason. Both are insurance gaps, not close failures.
+  // bus refusal never un-closes the seat; a payload the contract refuses (a
+  // non-registration launch identity) is skipped for the same reason. Both are
+  // insurance gaps, not close failures — and both leave `recordDroppedPublication`
+  // behind, because the gap that cost a consumer a leaked seat was not the
+  // refusal, it was the silence after it.
   //
   // Retirement is a post-birth concept: a binding whose agent never registered
   // dies by registration abort instead, and registrationd can only abort on
@@ -2729,27 +2733,23 @@ export class Daemon {
         retired_at: retiredAt,
       });
       if (!retirement.success) {
-        console.error(JSON.stringify({
-          level: 'error',
-          event: 'agent_retired_publish_skipped',
-          agent_id: binding.agent_id,
-          seat_id: binding.seat_id,
-          cause,
-          reason: retirement.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
-        }));
+        await this.recordDroppedPublication(
+          'agent.retired',
+          { entity_type: 'agent', entity_id: binding.agent_id, seat_id: binding.seat_id },
+          'contract_refused',
+          retirement.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+        );
         continue;
       }
       try {
         await this.physicalRegistration.publish('agent.retired', retirement.data);
       } catch (error) {
-        console.error(JSON.stringify({
-          level: 'error',
-          event: 'agent_retired_publish_failed',
-          agent_id: binding.agent_id,
-          seat_id: binding.seat_id,
-          cause,
-          error: String(error),
-        }));
+        await this.recordDroppedPublication(
+          'agent.retired',
+          { entity_type: 'agent', entity_id: binding.agent_id, seat_id: binding.seat_id },
+          'transport_refused',
+          String(error),
+        );
       }
     }
   }
@@ -2774,28 +2774,63 @@ export class Daemon {
       closed_at: closedAt,
     });
     if (!signal.success) {
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'unregistered_closed_publish_skipped',
-        agent_id: binding.agent_id,
-        seat_id: binding.seat_id,
-        cause,
-        reason: signal.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
-      }));
+      await this.recordDroppedPublication(
+        'agent.unregistered_closed',
+        { entity_type: 'agent', entity_id: binding.agent_id!, seat_id: binding.seat_id },
+        'contract_refused',
+        signal.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+      );
       return;
     }
     try {
       await this.physicalRegistration.publish('agent.unregistered_closed', signal.data);
     } catch (error) {
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'unregistered_closed_publish_failed',
-        agent_id: binding.agent_id,
-        seat_id: binding.seat_id,
-        cause,
-        error: String(error),
-      }));
+      await this.recordDroppedPublication(
+        'agent.unregistered_closed',
+        { entity_type: 'agent', entity_id: binding.agent_id!, seat_id: binding.seat_id },
+        'transport_refused',
+        String(error),
+      );
     }
+  }
+
+  // A fact txd owed the journal and could not put there. Nothing is retried
+  // here: the retry is the next boot's census, which asserts present truth
+  // rather than replaying a stale one, and a timer over a refused bus would be
+  // a number derived from nothing. What this adds is the trace — a dropped
+  // publication that leaves no evidence is indistinguishable from a fact that
+  // was never owed, which is precisely how a consumer came to hold a seat for
+  // an agent that left it and never learned otherwise.
+  private async recordDroppedPublication(
+    publishedEventType: TxdPublishedEventType,
+    // The thing the lost fact was about: the agent whose close it announced, or
+    // the estate whose census it was.
+    subject: { entity_type: 'agent' | 'estate'; entity_id: string; seat_id: string | null },
+    reason: 'contract_refused' | 'transport_refused',
+    detail: string,
+  ): Promise<void> {
+    console.error(JSON.stringify({
+      level: 'error',
+      event: 'journal_publication_dropped',
+      published_event_type: publishedEventType,
+      entity_id: subject.entity_id,
+      seat_id: subject.seat_id,
+      reason,
+      detail,
+    }));
+    await this.store.append({
+      entity_type: subject.entity_type,
+      entity_id: subject.entity_id,
+      event_type: 'reg.journal_publication_dropped',
+      payload: {
+        published_event_type: publishedEventType,
+        seat_id: subject.seat_id,
+        reason,
+        detail,
+      },
+      provenance: this.prov('observer', null),
+      occurred_at: this.now(),
+    });
   }
 
   // The generic close mechanism, shared by /agents/close and the reflexive auto-close.
@@ -3212,6 +3247,76 @@ export class Daemon {
           seat_id: seatId,
           engine,
         }));
+      }
+    });
+  }
+
+  /**
+   * Assert who is seated. The sweep above says which declared seats the estate
+   * wants filled; this says who is actually in them, and it is the same kind of
+   * statement: txd owns where an agent sits, so it says so, and consumers fold
+   * it like any other journal fact.
+   *
+   * The assertion is COMPLETE over this machine — these and only these agents
+   * are seated on it — because completeness is the only thing that reaches an
+   * agent nobody will ever publish another event about. `agent.retired` is
+   * published after the close is already committed and a refusal is never
+   * revisited; a consumer that missed one is not waiting for anything. Neither
+   * is a seat-keyed reconciliation enough: a seat from an estate generation
+   * this machine no longer declares can never be reassigned, so nothing will
+   * ever displace the agent recorded in it. A roster of the living can.
+   *
+   * It is taken once, at boot fold completion, from binding truth just folded.
+   * Not a timer, not a repeating sweep: the estate changes at close, launch,
+   * and reset, and each of those already publishes its own fact. This is the
+   * assertion of present truth that lets a consumer that missed one recover.
+   *
+   * A payload the contract refuses publishes NOTHING. A roster missing an
+   * occupant it could not represent, asserted as complete, would tell a
+   * consumer to release a live agent — the leak pointed the other way, and
+   * silent. Fail dark and leave the trace.
+   */
+  async assertOccupancyCensus(): Promise<void> {
+    if (!this.physicalRegistration) return;
+    return this.locked(async () => {
+      const machine = this.physicalRegistration!.machine;
+      const takenAt = this.now();
+      const occupied = (await this.projections()).currentBindings
+        .filter((binding) => binding.agent_id !== null)
+        .map((binding) => ({
+          seat_id: binding.seat_id,
+          agent_id: binding.agent_id,
+          birth_generation: binding.birth_generation,
+          pane_generation: binding.pane_generation,
+          registered: binding.registered,
+        }))
+        .sort((left, right) => left.seat_id.localeCompare(right.seat_id));
+      const census = EstateOccupancyCensusSchema.safeParse({
+        schema_version: AGENT_SCHEMA_VERSION,
+        machine,
+        configuration: this.physicalRegistration!.configuration,
+        occupied,
+        taken_at: takenAt,
+      });
+      const subject = { entity_type: 'estate' as const, entity_id: machine, seat_id: null };
+      if (!census.success) {
+        await this.recordDroppedPublication(
+          'agent.estate_occupancy_census',
+          subject,
+          'contract_refused',
+          census.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+        );
+        return;
+      }
+      try {
+        await this.physicalRegistration!.publish('agent.estate_occupancy_census', census.data);
+      } catch (error) {
+        await this.recordDroppedPublication(
+          'agent.estate_occupancy_census',
+          subject,
+          'transport_refused',
+          String(error),
+        );
       }
     });
   }
