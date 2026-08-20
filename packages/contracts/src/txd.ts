@@ -731,19 +731,33 @@ export const CommHookSchema = z.object({
 });
 export type CommHook = z.infer<typeof CommHookSchema>;
 
-// The durable delivery read model, derived from
-// `act.comm_delivery_asserted` and nothing else. Absence of a delivery here is
-// silence, never a verdict: a target whose turn has not ended has not refused
-// the message, and observed latency to this fact ranges from 64ms to nearly ten
-// hours. The CLI's bounded receipt wait below does not alter this durable truth.
+// The durable delivery read model. `delivered` derives from
+// `act.comm_delivery_asserted` and nothing else; `failed` derives from
+// `act.comm_delivery_failed` and nothing else. Neither is inferred from the
+// other, and a row carrying neither is silence rather than a verdict: a target
+// whose turn has not ended has not refused the message, and observed latency to
+// the assertion ranges from 64ms to nearly ten hours. The CLI's bounded receipt
+// wait below does not alter this durable truth.
+//
+// The refusal exists because silence alone left a sender unable to tell a
+// dropped comm from a pending one. A staged comm whose target binding ends can
+// never be delivered, and that moment is the fact — not a deadline, and not the
+// absence of an assertion.
 export const CommDeliverySchema = z.object({
   target: CommTargetSchema, delivered: z.boolean(),
   asserted_at: z.string().nullable(), assertion_event_id: z.number().int().nullable(),
+  failed: z.boolean(),
+  failed_at: z.string().nullable(), failure_event_id: z.number().int().nullable(),
+  failure_reason: z.string().nullable(),
 });
 export type CommDelivery = z.infer<typeof CommDeliverySchema>;
 export const CommDeliveryReadResponseSchema = z.object({
   schema_version: z.number().int(), message_id: z.string(), source_agent_id: z.string(),
   accepted_at: z.string(), deliveries: z.array(CommDeliverySchema), complete: z.boolean(),
+  // Every target has spoken: delivered or refused. `complete` stays the
+  // narrower question — did every target receive it — so a caller cannot read
+  // a refusal as a success.
+  resolved: z.boolean(),
 });
 export type CommDeliveryReadResponse = z.infer<typeof CommDeliveryReadResponseSchema>;
 
@@ -789,10 +803,22 @@ export const CommTransportRefusedReceiptSchema = z.object({
   })).min(1),
   event_ids: z.array(z.number().int()),
 });
+// Transport succeeded and delivery then became impossible — the target binding
+// ended with the frame still unattested. Distinct from `transport_refused`,
+// which never got the bytes into the composer at all.
+export const CommDeliveryFailedReceiptSchema = z.object({
+  ok: z.literal(false),
+  schema_version: z.number().int(),
+  phase: z.literal('delivery_failed'),
+  message_id: CanonicalIdSchema,
+  source_agent_id: CanonicalIdSchema,
+  deliveries: z.array(CommDeliverySchema),
+});
 export const CommReceiptSchema = z.discriminatedUnion('phase', [
   CommDeliveryConfirmedReceiptSchema,
   CommBytesSentReceiptSchema,
   CommTransportRefusedReceiptSchema,
+  CommDeliveryFailedReceiptSchema,
 ]);
 export type CommReceipt = z.infer<typeof CommReceiptSchema>;
 
