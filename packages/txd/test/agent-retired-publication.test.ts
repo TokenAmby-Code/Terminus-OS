@@ -27,7 +27,9 @@ function setup(options: { failPublish?: boolean } = {}) {
     perpetual: {},
     sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
-      if (options.failPublish && type === 'agent.retired') throw new Error('bus_publish_refused:503');
+      if (options.failPublish && (type === 'agent.retired' || type === 'agent.unregistered_closed')) {
+        throw new Error('bus_publish_refused:503');
+      }
       published.push({ type, payload });
     },
   };
@@ -35,9 +37,23 @@ function setup(options: { failPublish?: boolean } = {}) {
 }
 
 async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): Promise<PhysicalDeclaration> {
+  const declaration = await declarePhysically(tmux, d, seatId);
+  await declareRegistration(d, declaration);
+  return declaration;
+}
+
+// The physical declaration alone: a bound seat whose birth has not completed.
+// Its close travels as agent.unregistered_closed, never agent.retired.
+async function declarePhysically(tmux: FakeTmux, d: Daemon, seatId: string): Promise<PhysicalDeclaration> {
+  const declaration = await physicalDeclaration(tmux, seatId);
+  await d.recordPhysicalDeclaration(declaration);
+  return declaration;
+}
+
+async function physicalDeclaration(tmux: FakeTmux, seatId: string): Promise<PhysicalDeclaration> {
   await tmux.createSeat(seatId);
   tmux.bindWrapper(4101, seatId);
-  const declaration: PhysicalDeclaration = {
+  return {
     schema_version: AGENT_SCHEMA_VERSION,
     agent_id: AGENT_ID,
     birth_generation: BIRTH_GENERATION,
@@ -50,9 +66,11 @@ async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): P
     rank: 'astartes',
     tint: '#111111',
   };
-  await d.recordPhysicalDeclaration(declaration);
-  // Retirement is a post-birth concept: only a REGISTERED agent's close
-  // publishes agent.retired, so the fixture completes the birth.
+}
+
+// Retirement is a post-birth concept: only a REGISTERED agent's close
+// publishes agent.retired, so the fixture completes the birth.
+async function declareRegistration(d: Daemon, declaration: PhysicalDeclaration): Promise<PhysicalDeclaration> {
   await d.activateRegisteredAgent({
     schema_version: AGENT_SCHEMA_VERSION,
     agent_id: AGENT_ID,
@@ -61,7 +79,7 @@ async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): P
     engine: 'claude',
     launch: { argv: [], requested_cwd: '/manual/work' },
     placement: {
-      pane_id: seatId,
+      pane_id: declaration.pane_id,
       pane_generation: declaration.pane_generation,
       machine: 'k12-personal',
       kind: 'local',
@@ -159,6 +177,62 @@ test('a bus refusal does not fail the close — the reap and event truth stand',
   const res = await d.close(closeRequest([AGENT_ID]));
   expect(res).toMatchObject({ ok: true, closed_count: 1 });
   expect((await store.readAll()).map((e) => e.event_type)).toContain('reg.retired');
+});
+
+// The insurance gap is real and stays real: the close is committed, so a
+// refused publication can never un-close the seat. What it must never be is
+// SILENT. A drop that leaves nothing behind is indistinguishable from a fact
+// that was never owed, and the consumer left holding the seat has no way to
+// learn otherwise. The trace is typed and durable so the gap is countable; the
+// boot census is what actually closes it.
+test('a refused publication leaves a typed durable trace of the fact that never landed', async () => {
+  const { store, tmux, d } = setup({ failPublish: true });
+  await bindRegisteredAgent(tmux, d, 'palace:W');
+
+  await bindOverseerSource(d, store);
+  expect((await d.close(closeRequest([AGENT_ID]))).ok).toBe(true);
+
+  const dropped = (await store.readAll()).filter((e) => e.event_type === 'reg.journal_publication_dropped');
+  expect(dropped).toHaveLength(1);
+  expect(dropped[0]).toMatchObject({
+    entity_type: 'agent',
+    entity_id: AGENT_ID,
+    payload: {
+      published_event_type: 'agent.retired',
+      seat_id: 'palace:W',
+      reason: 'transport_refused',
+    },
+  });
+});
+
+test('a refused close-of-unregistered publication leaves the same trace', async () => {
+  const { store, tmux, d } = setup({ failPublish: true });
+  await declarePhysically(tmux, d, 'palace:N');
+
+  await bindOverseerSource(d, store);
+  expect((await d.close(closeRequest([AGENT_ID]))).ok).toBe(true);
+
+  const dropped = (await store.readAll()).filter((e) => e.event_type === 'reg.journal_publication_dropped');
+  expect(dropped).toHaveLength(1);
+  expect(dropped[0]).toMatchObject({
+    entity_type: 'agent',
+    entity_id: AGENT_ID,
+    payload: {
+      published_event_type: 'agent.unregistered_closed',
+      seat_id: 'palace:N',
+      reason: 'transport_refused',
+    },
+  });
+});
+
+test('a publication that lands leaves no trace — the drop event means a drop', async () => {
+  const { store, tmux, d } = setup();
+  await bindRegisteredAgent(tmux, d, 'palace:W');
+
+  await bindOverseerSource(d, store);
+  expect((await d.close(closeRequest([AGENT_ID]))).ok).toBe(true);
+
+  expect((await store.readAll()).map((e) => e.event_type)).not.toContain('reg.journal_publication_dropped');
 });
 
 test('an unregistered daemon (no bus runtime) closes without publishing', async () => {

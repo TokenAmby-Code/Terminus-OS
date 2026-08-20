@@ -334,6 +334,60 @@ export const PerpetualSeatVacantSchema = z.object({
 }).strict();
 export type PerpetualSeatVacant = z.infer<typeof PerpetualSeatVacantSchema>;
 
+// The occupancy census: the symmetric partner of the vacancy sweep above. The
+// sweep says which declared seats the estate wants filled; the census says who
+// is seated. txd asserts it once, at boot fold completion, from the binding
+// truth it has just finished folding — not on a timer and not as a repeating
+// sweep.
+//
+// The assertion is COMPLETE over the machine: these and ONLY these agents are
+// seated on it. Completeness is the whole point. A departure whose own
+// `agent.retired` never reached the journal leaves a consumer holding a seat
+// forever, because no further event about that agent is ever coming — and a
+// seat-keyed reconciliation cannot reach it either when the seat belongs to an
+// estate generation that no longer exists. Only a complete roster of the
+// living reaches an agent nothing else will ever speak about again.
+//
+// `taken_at` is what makes absence safe to read. txd sees an agent only once it
+// is seated, so absence means departed ONLY for a placement the estate made
+// strictly before that instant; a birth placed after it is not missing from the
+// roster, it is not yet in it. A consumer that reads absence without comparing
+// `taken_at` releases live agents — the leak pointed the other way, and silent.
+//
+// A census terminalizes nothing. txd owns the reactive retirement leg and says
+// so through `agent.retired`; this says only who is sitting where, which is the
+// question an occupancy projection was answering wrong.
+export const SeatOccupantSchema = z.object({
+  seat_id: z.string().min(1),
+  // The identity the seat actually carries, not necessarily one a birth minted:
+  // txd's launch door admits an operator-supplied identity, and a roster that
+  // refused to represent one would go dark on the whole machine rather than
+  // omit a line. A consumer matches this against its own rows; an identity that
+  // matches nothing releases nothing.
+  agent_id: z.string().min(1),
+  birth_generation: BirthGenerationSchema.nullable(),
+  pane_generation: PaneGenerationSchema.nullable(),
+  // A bound-but-unregistered seat is occupied; its birth simply has not
+  // completed. txd attests the occupancy either way — what a consumer's own
+  // birth row may conclude from an incomplete birth is the consumer's ruling.
+  registered: z.boolean(),
+}).strict();
+export type SeatOccupant = z.infer<typeof SeatOccupantSchema>;
+
+export const EstateOccupancyCensusSchema = z.object({
+  schema_version: z.literal(AGENT_SCHEMA_VERSION),
+  machine: z.string().min(1),
+  // The estate declaration the fold observed. A census speaks for the estate
+  // generation it was taken in and no other.
+  configuration: z.object({
+    generation: z.string().min(1),
+    digest: Sha256Schema,
+  }).strict(),
+  occupied: z.array(SeatOccupantSchema),
+  taken_at: z.string().datetime({ offset: true }),
+}).strict();
+export type EstateOccupancyCensus = z.infer<typeof EstateOccupancyCensusSchema>;
+
 // Post-birth, registrationd never initiates retirement. txd publishes this at
 // the point it writes reg.retired — the reactive leg of the retirement
 // authority split; lifecycled owns the proactive leg. Consumers terminalize
