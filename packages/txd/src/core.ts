@@ -31,19 +31,19 @@ import {
   type CommRequest,
   type CommReceiptWaitRequest,
   type CommReceipt,
-  type CommRedriveRequest,
-  type CommRedriveResponse,
   type CommTarget,
   type CommWaitRequest,
   type CommWaitResponse,
   type CurrentBinding,
   DispatchAttestedSchema,
   PerpetualSeatVacantSchema,
+  EstateOccupancyCensusSchema,
   DispatchRefusedSchema,
   type DispatchRefused,
   type DispatchRequested,
   type SeatDisqualifier,
   type EventInput,
+  type EventRecord,
   type Health,
   type EstateRotateRequest,
   type EstateRotateResponse,
@@ -93,12 +93,13 @@ import {
   type TxdPage,
   type TxdStackPage,
 } from './estate.ts';
+import { acceptCommIdentity, sameIdentity } from './comm-identity.ts';
+import { commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
 import type { TxdPublishedEventType } from './events.ts';
-import { commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
 
 // Reg-audit attestation set DEFINED SO FAR (door step 1). The refusal machinery
 // is day-one; later doors grow this list as they add witnesses (rank, commander,
@@ -107,7 +108,16 @@ export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as co
 
 type Now = () => string;
 // What txd hands lifecycled to arm one comm watch: enough to name the
-// subscription's agent stream and the message a composer-quiet fact may redrive.
+// subscription's agent stream and the message whose hook will assert delivery.
+/**
+ * A gate call that never reached lifecycled (or never heard it answer): the
+ * transport failed or its ceiling expired. Distinct from a typed domain
+ * refusal, which is lifecycled affirmatively answering that the gate is not
+ * open. The daemon's gate closure throws this class for fetch-level failures
+ * so the comm path can tell the two apart.
+ */
+export class CommGateTransportFailure extends Error {}
+
 export type CommWatchArmInput = {
   message_id: string;
   target_agent_id: string;
@@ -115,6 +125,16 @@ export type CommWatchArmInput = {
   composer_interactive_observed: boolean;
 };
 export type ComposerGateInput = { correlation_id: string; target_agent_id: string };
+/** One staged idle-target receipt's lost-Enter watch, armed at its tier-1 deadline. */
+type LostEnterArm = {
+  messageId: string;
+  targetAgentId: string;
+  seatId: string;
+  frame: string;
+  paneGeneration: string;
+  receiptSeq: number;
+  deadlineAt: number;
+};
 export type CommReceiptRuntime = {
   now: () => number;
   schedule: (wake: () => void, delayMs: number) => () => void;
@@ -192,6 +212,10 @@ function liveClaim(
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
+  return outcome.verdict === 'seat_unresolved' ? 0 : outcome.bytes;
 }
 
 export class Daemon {
@@ -365,7 +389,7 @@ export class Daemon {
       const workloads = new Map((await this.tmux.workloads()).map((row) => [row.seat_id, row]));
       // One candidate's seat-level truth, first disqualifier in a fixed order.
       const disqualify = (candidate: string): Exclude<SeatDisqualifier, 'foreign_process'> | null => {
-        if (projections.decommissionedSeats.has(candidate)) return 'decommissioned';
+        if (projections.abandonedSeats.has(candidate)) return 'abandoned';
         if (pendingResetSeats.has(candidate)) return 'reset_pending';
         if (bound.has(candidate)) return 'bound';
         if (launching.has(candidate)) return 'launching';
@@ -376,7 +400,7 @@ export class Daemon {
       const idle = (candidate: string) => workloads.get(candidate)?.idle ?? false;
       let seatId: string;
       let mintedStackSeat: string | null = null;
-      const decommissionMintedStackSeat = async (): Promise<void> => {
+      const abandonMintedStackSeat = async (): Promise<void> => {
         if (!mintedStackSeat) return;
         const seat = mintedStackSeat;
         await this.tmux.killSeat(seat);
@@ -386,7 +410,7 @@ export class Daemon {
         await this.store.append({
           entity_type: 'seat',
           entity_id: seat,
-          event_type: 'reg.seat_decommissioned',
+          event_type: 'reg.seat_abandoned',
           payload: {},
           provenance: this.prov('observer', null),
           occurred_at: this.now(),
@@ -411,7 +435,7 @@ export class Daemon {
             occurred_at: this.now(),
           });
         } catch (error) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           throw error;
         }
         return candidate;
@@ -480,7 +504,7 @@ export class Daemon {
             const reason = ({
               bound: 'seat_bound',
               launching: 'seat_launching',
-              decommissioned: 'seat_decommissioned',
+              abandoned: 'seat_abandoned',
               reset_pending: 'seat_reset_pending',
               dead: 'pane_dead',
             } as const)[state];
@@ -493,7 +517,7 @@ export class Daemon {
       try {
         const paneGeneration = await this.tmux.seatGeneration(seatId);
         if (!paneGeneration) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_generation_unattested');
           return;
         }
@@ -515,7 +539,7 @@ export class Daemon {
           ...(sshTarget ? { sshTarget } : {}),
           ...(request.prompt === undefined ? {} : { prompt: request.prompt }),
         }))) {
-          await decommissionMintedStackSeat();
+          await abandonMintedStackSeat();
           await refuse('seat_start_failed');
           return;
         }
@@ -565,7 +589,7 @@ export class Daemon {
             });
           }
         }
-        await decommissionMintedStackSeat();
+        await abandonMintedStackSeat();
         throw error;
       }
     });
@@ -1141,8 +1165,9 @@ export class Daemon {
         throw new Error(`txd failed to resume pending ${seats[0]} pane reconstruction`);
       }
       const occurred_at = this.now();
+      const resetEvents = await this.store.readAll();
       const inputs = bindings.flatMap((binding) =>
-        this.resetBindingInputs(binding, null, occurred_at),
+        this.resetBindingInputs(binding, null, occurred_at, resetEvents),
       );
       inputs.push({
         entity_type: 'estate',
@@ -1153,6 +1178,7 @@ export class Daemon {
         occurred_at,
       });
       await this.store.appendAll(inputs);
+      this.wakeCommDeliveryFailures(inputs);
       await this.publishRetirements(bindings, 'estate_reset', occurred_at);
       closed.add(request.entity_id);
     }
@@ -1195,17 +1221,31 @@ export class Daemon {
     });
   }
 
+  // Casing is folded here, at the comparison, and nowhere else: the target a
+  // caller names is matched case-insensitively, and the identity that comes
+  // back is the binding's own — canonical by construction.
   private commTargets(identity: string, proj: Projections): CommTarget[] {
     const matches = proj.currentBindings.filter((b) =>
       b.registered
-      && (b.agent_id === identity || b.persona === identity || b.seat_id === identity),
+      && ((b.agent_id !== null && sameIdentity(b.agent_id, identity))
+        || (b.persona !== null && sameIdentity(b.persona, identity))
+        || sameIdentity(b.seat_id, identity)),
     );
     return matches.map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
   }
 
   // Arm the delivery watch and composer gate BEFORE bytes go to the pane.
-  // A dead lifecycle plane is a hard stop: sending without its gate would
-  // recreate the newborn-composer race this contract exists to prevent.
+  //
+  // Delivery attempts come first: a gate TRANSPORT failure is a fact about
+  // lifecycled's reachability, not a verdict about the target composer. When
+  // txd's own observation already proved the composer interactive, the
+  // attempt proceeds with the unarmed gap attested — the delivery stays
+  // unasserted (ok:false) until its effect fact arrives, so nothing is
+  // claimed that was not observed. The unpainted newborn keeps its hard
+  // stop: there the dead-zone race is real and txd holds no interactivity
+  // proof of its own, so sending without the gate would recreate it. A typed
+  // domain refusal from lifecycled is an affirmative answer and refuses as
+  // before.
   private async armCommWatch(
     messageId: string,
     sourceAgentId: string,
@@ -1213,8 +1253,8 @@ export class Daemon {
     transportReceipt: string | null,
   ): Promise<void> {
     if (!this.commWatchArm) return;
+    const composerInteractiveObserved = await this.backfillComposerInteractivity(targetAgentId, transportReceipt);
     try {
-      const composerInteractiveObserved = await this.backfillComposerInteractivity(targetAgentId, transportReceipt);
       await this.commWatchArm({
         message_id: messageId,
         target_agent_id: targetAgentId,
@@ -1225,6 +1265,7 @@ export class Daemon {
       await this.locked(() => this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
         payload: { message_id: messageId, target_agent_id: targetAgentId, detail: String(error) },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() }));
+      if (error instanceof CommGateTransportFailure && composerInteractiveObserved) return;
       throw error;
     }
   }
@@ -1327,12 +1368,21 @@ export class Daemon {
       const sourceBindings = proj.currentBindings.filter((b) =>
         b.registered && b.agent_id === req.source_agent_id);
       if (sourceBindings.length === 0) throw new Error('source_not_registered');
+      // The frame names its sender as persona AND seat. A persona alone is not
+      // a key — several seats may wear one — so a source whose identity cannot
+      // be pinned to exactly one seat, or whose seat carries no persona,
+      // refuses here rather than stage a frame that misattributes itself.
       if (sourceBindings.length !== 1) throw new Error('source_identity_ambiguous');
       const sourceBinding = sourceBindings[0]!;
       if (!sourceBinding.persona) throw new Error('source_persona_unresolved');
       const source: CommFrameSource = { persona: sourceBinding.persona, seat_id: sourceBinding.seat_id };
       const events = await this.store.readAll();
-      let targetIdentity = req.target === '--self' ? req.source_agent_id : req.target;
+      // The funnel mouth. A caller-supplied identity is softened to its
+      // canonical form exactly once, here; `--self` and `--reply` name an
+      // agent id txd itself recorded, which is canonical already.
+      let targetIdentity = req.target === '--self'
+        ? req.source_agent_id
+        : req.target === undefined ? undefined : acceptCommIdentity(req.target);
       let replyingToAsk: string | null = null;
       if (req.reply) {
         const inbound = [...events].reverse().find((e) => e.event_type === 'reg.comm_accepted'
@@ -1397,7 +1447,10 @@ export class Daemon {
           && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
         const frame = prepared.renderedIntent?.frame
           ?? commFrame(prepared.messageId, prepared.source, req.message!);
-        return { target, binding, frame };
+        // The target's turn state at send, stamped on the receipt: a frame
+        // staged into a WORKING engine is queued into that turn, and only that
+        // stamp lets the turn-stop join later read the receipt as consumable.
+        return { target, binding, frame, target_turn: proj.turnByAgent.get(target.agent_id) ?? 'unobserved' };
       });
     });
 
@@ -1408,33 +1461,183 @@ export class Daemon {
     // reached txd with the hook, and timed out before txd could admit it.
     const outcomes: Array<{ plan: typeof plans[number]; sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>> }> = [];
     for (const plan of plans) {
-      const sent = await this.tmux.sendVerifiedToSeat(
-        plan.target.seat_id,
-        prepared.messageId,
-        plan.frame,
-        prepared.renderedIntent?.tabAfter,
-        plan.binding.engine ?? undefined,
-      );
+      // The binding's opaque pane generation is the physical transaction
+      // witness. Re-attest immediately before mutation: a replaced/unreadable
+      // pane refuses with zero effect instead of letting a stale logical seat
+      // address type into whatever now occupies that name.
+      const generation = await this.tmux.seatGeneration(plan.target.seat_id);
+      const sent = generation !== plan.binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(
+          plan.target.seat_id,
+          prepared.messageId,
+          plan.frame,
+          prepared.renderedIntent?.tabAfter,
+          plan.binding.engine ?? undefined,
+          plan.binding.pane_generation,
+        );
       outcomes.push({ plan, sent });
     }
 
-    return this.locked(async () => {
+    const completionArms: LostEnterArm[] = [];
+    const accepted: CommAccepted = await this.locked(async () => {
       const event_ids = [...prepared.eventIds];
       let allStaged = true;
       for (const { plan, sent } of outcomes) {
+        const receiptDeadline = this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS;
         const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
           payload: {
-            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: sent.bytes,
-            submit_verdict: sent.verdict, kind: req.intent?.kind ?? 'message',
+            target_agent_id: plan.target.agent_id, seat_id: plan.target.seat_id, bytes: committedTransportBytes(sent),
+            submit_verdict: sent.verdict,
+            target_turn: plan.target_turn,
+            kind: req.intent?.kind ?? 'message',
             name: req.intent?.name ?? null, rendered_frame: plan.frame,
-            receipt_deadline_at: new Date(this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toISOString(),
+            receipt_deadline_at: new Date(receiptDeadline).toISOString(),
           }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
         event_ids.push(event.seq);
         allStaged &&= sent.verdict === 'staged';
+        // The lost-Enter watch (live specimen 29fb6cc0). tmux exit 0 proves
+        // the Enter was handed to the pane, never that the engine consumed
+        // it. A staged frame in an AWAITING_INPUT engine whose Enter had no
+        // effect fires no UserPromptSubmit and no later stop, so neither
+        // existing join ever re-examines it. The receipt's own tier-1
+        // deadline is the derived activation: one wake, one at-rest
+        // observation, and only an exact intact frame completes its own
+        // transaction. A WORKING target stays with the turn-stop join.
+        // The binding's pane generation is the physical transaction witness;
+        // without one there is nothing to re-attest against, so no watch.
+        if (sent.verdict === 'staged' && plan.target_turn === 'awaiting_input'
+          && plan.binding.pane_generation !== null) {
+          completionArms.push({
+            messageId: prepared.messageId,
+            targetAgentId: plan.target.agent_id,
+            seatId: plan.target.seat_id,
+            frame: plan.frame,
+            paneGeneration: plan.binding.pane_generation,
+            receiptSeq: event.seq,
+            deadlineAt: receiptDeadline,
+          });
+        }
+        if (sent.verdict === 'staged') {
+          const events = await this.store.readAll();
+          // A command or skill surface submits with no comm envelope in the
+          // prompt, so its hook carries an empty `message_ids` list and the
+          // rendered frame is the only thing that names it. Enter is driven
+          // outside the journal mutex, so that hook can land before this
+          // receipt exists — the hook then sees no staged transport and
+          // declines, and matching here by message id alone would lose the
+          // delivery with both facts present.
+          //
+          // But a frame names an intent only while ONE intent carries it. Two
+          // identical sends to one target share it byte for byte, and reading
+          // such a hook as this message's would assert a delivery the engine
+          // never made. The frame arm therefore holds only while this message
+          // is the single intent wearing that frame for that target; ambiguity
+          // falls back to the message-id join and stays undelivered.
+          //
+          // Uniqueness counts every ACCEPTED intent with that frame, including
+          // ones already delivered. Counting only the undelivered would let the
+          // set shrink as deliveries land: the first of two identical intents
+          // asserts, the second becomes the lone survivor, and the spent hook
+          // that named the first would then read as a unique witness for a
+          // message the engine never submitted.
+          const intentFrame = prepared.renderedIntent?.frame;
+          const frameCandidates = intentFrame === undefined ? [] : events.filter((candidate) =>
+            candidate.event_type === 'reg.comm_accepted'
+            && (candidate.payload.kind === 'command' || candidate.payload.kind === 'skill')
+            && candidate.payload.rendered_frame === intentFrame
+            && Array.isArray(candidate.payload.target_agent_ids)
+            && candidate.payload.target_agent_ids.includes(plan.target.agent_id));
+          const frameNamesThisMessage = frameCandidates.length === 1
+            && frameCandidates[0]!.entity_id === prepared.messageId;
+          const submitted = events.some((candidate) => candidate.event_type === 'act.prompt_submitted'
+            && candidate.payload.agent_id === plan.target.agent_id
+            && ((Array.isArray(candidate.payload.message_ids)
+                && candidate.payload.message_ids.includes(prepared.messageId))
+              || (plan.frame.includes(commTokenForMessageId(prepared.messageId))
+                && typeof candidate.payload.content === 'string'
+                && candidate.payload.content.includes(plan.frame))
+              || (frameNamesThisMessage && candidate.payload.content === intentFrame)));
+          const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
+          if (submitted && !events.some((candidate) => candidate.entity_id === assertionId
+            && candidate.event_type === 'act.comm_delivery_asserted')) {
+            const assertion = await this.store.append({
+              entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+              payload: {
+                message_id: prepared.messageId,
+                target_agent_id: plan.target.agent_id,
+                source_agent_id: req.source_agent_id,
+              },
+              provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+            });
+            event_ids.push(assertion.seq);
+            this.wakeDelivery(prepared.messageId);
+          }
+        }
       }
       if (prepared.replyingToAsk) await this.assertCallback(prepared.replyingToAsk, req.source_agent_id, req.message!, 'reply', null, transportReceipt);
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
         targets: prepared.targets, staged: allStaged, event_ids };
+    });
+    for (const arm of completionArms) {
+      this.commReceiptRuntime.schedule(
+        () => this.completeLostEnter(arm),
+        Math.max(0, arm.deadlineAt - this.commReceiptRuntime.now()),
+      );
+    }
+    return accepted;
+  }
+
+  /**
+   * The lost-Enter completion wake, fired once at the receipt's persisted
+   * tier-1 deadline. It acts only on the full evidence chain — no delivery
+   * assertion, no prior drive, the send-time binding still live on the same
+   * pane generation, the target still at rest (a capture against a busy
+   * engine proves nothing, specimen e5757301) — and then only when the tmux
+   * plane observes the exact staged frame intact in the at-rest composer.
+   * Driving Enter there completes the transport transaction that staged the
+   * frame; delivery is still asserted exclusively by the engine's own
+   * UserPromptSubmit. Every other observation is a zero-effect refusal that
+   * leaves the message honestly undelivered.
+   */
+  private async completeLostEnter(arm: LostEnterArm): Promise<void> {
+    const go = await this.locked(async () => {
+      const events = await this.store.readAll();
+      const assertionId = `${arm.messageId}:${arm.targetAgentId}`;
+      if (events.some((event) => event.entity_id === assertionId
+        && event.event_type === 'act.comm_delivery_asserted')) return false;
+      if (events.some((event) => event.event_type === 'act.comm_submit_driven'
+        && event.payload.message_id === arm.messageId
+        && event.payload.target_agent_id === arm.targetAgentId)) return false;
+      const proj = buildProjections(events);
+      const binding = proj.currentBindings.find((row) => row.registered
+        && row.agent_id === arm.targetAgentId
+        && row.seat_id === arm.seatId
+        && row.pane_generation === arm.paneGeneration);
+      if (!binding) return false;
+      return proj.turnByAgent.get(arm.targetAgentId) === 'awaiting_input';
+    });
+    if (!go) return;
+    const outcome = await this.tmux.completeStagedSubmit(arm.seatId, arm.frame, arm.paneGeneration);
+    if (outcome !== 'submit_completed' && outcome !== 'submit_failed') return;
+    await this.locked(async () => {
+      const events = await this.store.readAll();
+      if (events.some((event) => event.event_type === 'act.comm_submit_driven'
+        && event.payload.message_id === arm.messageId
+        && event.payload.target_agent_id === arm.targetAgentId)) return;
+      await this.store.append({
+        entity_type: 'message', entity_id: arm.messageId, event_type: 'act.comm_submit_driven',
+        payload: {
+          message_id: arm.messageId,
+          target_agent_id: arm.targetAgentId,
+          seat_id: arm.seatId,
+          transport_receipt_seq: arm.receiptSeq,
+          frame_observation: 'frame_present',
+          enter: outcome === 'submit_completed' ? 'driven' : 'failed',
+        },
+        provenance: this.prov('observer', null),
+        occurred_at: this.now(),
+      });
     });
   }
 
@@ -1455,9 +1658,12 @@ export class Daemon {
       const binding = proj.currentBindings.find((row) => row.registered
         && row.agent_id === req.target_agent_id && row.seat_id === prepared.binding.seat_id);
       if (!binding) throw new Error(`target_binding_changed: ${req.target_agent_id}`);
-      const sent = await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined);
+      const generation = await this.tmux.seatGeneration(binding.seat_id);
+      const sent = generation !== binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(binding.seat_id, prepared.correlationId, req.text, undefined, binding.engine ?? undefined, binding.pane_generation);
       await this.store.append({ entity_type: 'message', entity_id: prepared.correlationId, event_type: 'act.agent_input_injected',
-        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: sent.bytes, submit_verdict: sent.verdict, input_class: 'machine_feed' },
+        payload: { target_agent_id: req.target_agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent), submit_verdict: sent.verdict, input_class: 'machine_feed' },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
       // The HTTP success is lifecycled's acknowledgement boundary. Anything
       // short of a verified Enter must fail the request so its durable bus
@@ -1502,7 +1708,7 @@ export class Daemon {
       // No registered binding answers to this identity, so the only reading
       // left is a bare declared seat. Anything else is absent — loud.
       if (!TXD_ESTATE.includes(req.target)) throw new Error(`identity_absent: ${req.target}`);
-      if (proj.decommissionedSeats.has(req.target)) throw new Error(`seat_decommissioned: ${req.target}`);
+      if (proj.abandonedSeats.has(req.target)) throw new Error(`seat_abandoned: ${req.target}`);
       // A binding mid-birth is an agent arriving; racing its registration
       // with a shell line would type into its wrapper.
       if (proj.currentBindings.some((binding) => binding.seat_id === req.target)) {
@@ -1521,14 +1727,17 @@ export class Daemon {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === prepared.binding.agent_id && row.seat_id === prepared.binding.seat_id);
         if (!binding) throw new Error(`target_binding_changed: ${req.target}`);
-        const sent = await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!);
+        const generation = await this.tmux.seatGeneration(binding.seat_id);
+        const sent = generation !== binding.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.runInAgentComposer(binding.seat_id, runId, req.command, binding.engine!, binding.pane_generation);
         // Payload holds dumb correlation facts only. The command LINE never
         // enters the append-only stream: like inject's text, it can carry
         // credentials, and an event cannot be redacted later — the digest
         // correlates without persisting the bytes.
         const event = await this.store.append({ entity_type: 'message', entity_id: runId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: sent.bytes,
+            target_agent_id: binding.agent_id, seat_id: binding.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'harness_shell', command_digest: sha256(req.command),
           },
           provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
@@ -1658,11 +1867,65 @@ export class Daemon {
     if (events.some((e) => e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === askId && e.payload.target_agent_id === targetAgent)) return;
     const accepted = events.find((e) => e.entity_id === snapshot?.payload.message_id && e.event_type === 'reg.comm_accepted');
     const subscriber = String(accepted?.payload.source_agent_id ?? '');
-    const assertionId = source === 'stop' ? `${stopEventId ?? 'stop'}:${subscriber}:${targetAgent}` : `${askId}:${targetAgent}`;
+    // Callback identity belongs to the ask. One lifecycle stop may satisfy
+    // several asks that were already open, but it cannot become a reusable
+    // subscriber/target fact that future asks inherit.
+    const assertionId = `${askId}:${targetAgent}`;
     if (events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_callback_asserted')) return;
     await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_callback_asserted',
       payload: { ask_id: askId, subscriber_agent_id: subscriber, target_agent_id: targetAgent, content, source, stop_event_id: stopEventId }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
     this.wakeAsk(askId);
+  }
+
+  /**
+   * Every message whose staged frame the engine handed back inside the prompt
+   * it submitted. This is the transport's own bytes observed leaving the
+   * composer: txd wrote that exact frame into that exact seat, and the engine
+   * returned it in a submission, so the delivery happened whatever the frame
+   * parser could name.
+   *
+   * The parser reads a frame only where a frame begins its own line, which is
+   * the right rule for reading an IDENTIFIER out of prose. It is the wrong rule
+   * for reading an EFFECT: a composer that already held an operator draft
+   * continues that draft's line with the pasted frame, and the whole thing is
+   * submitted as one prompt. On 2026-08-19 that shape lost seven deliveries,
+   * five of them addressed to Custodes — specimen 9dc15225, staged at event
+   * 56994 and submitted 246ms later at event 56995 behind the words `im going
+   * to wait until home from the gym to do the `.
+   *
+   * A quoted frame cannot forge this. The evidence is the receipt, not the
+   * prompt: there must be a `staged` transport fact naming this agent.
+   *
+   * Only a SELF-NAMING frame qualifies — one carrying its own comm token, which
+   * is every `message` comm and no `command`/`skill` intent. An intent frame
+   * renders the surface call and nothing else, so two identical intents to one
+   * target wear one frame byte for byte and containment could not tell them
+   * apart; reading such a hook here would assert a delivery the engine never
+   * made. Intents keep their own uniqueness-counted join and are left alone.
+   */
+  private stagedFrameDeliveries(events: EventRecord[], agentId: string, content: string | undefined): string[] {
+    if (content === undefined) return [];
+    const named = new Set<string>();
+    for (const receipt of events) {
+      if (receipt.event_type !== 'act.comm_bytes_sent'
+        || receipt.payload.target_agent_id !== agentId
+        || receipt.payload.submit_verdict !== 'staged') continue;
+      const frame = receipt.payload.rendered_frame;
+      if (typeof frame !== 'string') continue;
+      let token: string;
+      try { token = commTokenForMessageId(receipt.entity_id); }
+      catch { continue; } // Non-UUID entities never staged a self-naming frame.
+      if (!frame.includes(token)) continue;
+      if (content.includes(frame)) named.add(receipt.entity_id);
+    }
+    return [...named];
+  }
+
+  /** Every sender blocked on a receipt for a comm this transaction just refused. */
+  private wakeCommDeliveryFailures(inputs: readonly EventInput[]): void {
+    for (const input of inputs) {
+      if (input.event_type === 'act.comm_delivery_failed') this.wakeDelivery(String(input.payload.message_id));
+    }
   }
 
   private wakeDelivery(messageId: string): void {
@@ -1676,22 +1939,13 @@ export class Daemon {
   // fails deterministically instead of wedging the lane.
   promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[]; dead_lettered: string[] }> {
     return this.locked(async () => {
-      const events = await this.store.readAll();
-      const asserted: string[] = [];
-      const matchedMessageIds: string[] = [];
-      const confirmations = new Map<string, string[]>();
-      let matched = false;
-      const intentMessage = hook.content === undefined ? undefined : events.find((event) =>
-        event.event_type === 'reg.comm_accepted'
-        && (event.payload.kind === 'command' || event.payload.kind === 'skill')
-        && event.payload.rendered_frame === hook.content
-        && Array.isArray(event.payload.target_agent_ids)
-        && event.payload.target_agent_ids.includes(hook.agent_id)
-        && !events.some((candidate) => candidate.event_type === 'act.comm_delivery_asserted'
-          && candidate.payload.message_id === event.entity_id
-          && candidate.payload.target_agent_id === hook.agent_id));
+      // The hook names frames by their compact comm tokens — the only identity
+      // the frame carries. The event stream records canonical ids, so each
+      // token resolves to its accepted message here, at the ingress, and an
+      // unresolvable token simply names no correspondence of ours.
+      const preEvents = await this.store.readAll();
       const acceptedByToken = new Map<string, string>();
-      for (const event of events) {
+      for (const event of preEvents) {
         if (event.event_type !== 'reg.comm_accepted') continue;
         try { acceptedByToken.set(commTokenForMessageId(event.entity_id), event.entity_id); }
         catch { /* Non-UUID fixtures and unrelated historical entities are not comm frames. */ }
@@ -1700,11 +1954,50 @@ export class Daemon {
         const messageId = acceptedByToken.get(token);
         return messageId ? [messageId] : [];
       });
-      const messageIds = [...new Set([...framedMessageIds, ...(intentMessage ? [intentMessage.entity_id] : [])])];
+      await this.store.append({
+        entity_type: 'agent', entity_id: hook.agent_id, event_type: 'act.prompt_submitted',
+        payload: {
+          agent_id: hook.agent_id,
+          comm_tokens: hook.comm_tokens,
+          message_ids: framedMessageIds,
+          content: hook.content ?? null,
+          session_id: hook.session_id ?? null,
+        },
+        provenance: this.prov('hook', receipt), occurred_at: this.now(),
+      });
+      const events = await this.store.readAll();
+      const asserted: string[] = [];
+      const matchedMessageIds: string[] = [];
+      const confirmations = new Map<string, string[]>();
+      let matched = false;
+      // Same one-to-one rule as the staged-receipt join above, counted the same
+      // stable way: a rendered frame identifies an intent only while exactly one
+      // ACCEPTED intent wears it for this target, delivered ones included.
+      // Taking the first of several identical frames — or letting the set shrink
+      // as deliveries assert — would attribute one submission to a message the
+      // engine never submitted, so an ambiguous frame yields no correlation and
+      // the hook stays non-delivery evidence.
+      const intentCandidates = hook.content === undefined ? [] : events.filter((event) =>
+        event.event_type === 'reg.comm_accepted'
+        && (event.payload.kind === 'command' || event.payload.kind === 'skill')
+        && event.payload.rendered_frame === hook.content
+        && Array.isArray(event.payload.target_agent_ids)
+        && event.payload.target_agent_ids.includes(hook.agent_id));
+      const intentMessage = intentCandidates.length === 1 ? intentCandidates[0] : undefined;
+      const messageIds = [...new Set([
+        ...framedMessageIds,
+        ...(intentMessage ? [intentMessage.entity_id] : []),
+        ...this.stagedFrameDeliveries(events, hook.agent_id, hook.content),
+      ])];
       for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
         matched = true;
+        const staged = events.some((event) => event.entity_id === messageId
+          && event.event_type === 'act.comm_bytes_sent'
+          && event.payload.target_agent_id === hook.agent_id
+          && event.payload.submit_verdict === 'staged');
+        if (!staged) continue;
         matchedMessageIds.push(messageId);
         const assertionId = `${messageId}:${hook.agent_id}`;
         if (!events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) {
@@ -1779,55 +2072,19 @@ export class Daemon {
         if (!sender) continue;
         const correlationId = crypto.randomUUID();
         const renderedFrame = `[tx comm delivery confirmed ${messageIds.join(' ')} target ${hook.agent_id}]`;
-        const sent = await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined);
+        const generation = await this.tmux.seatGeneration(sender.seat_id);
+        const sent = generation !== sender.pane_generation
+          ? { bytes: 0, verdict: 'seat_unresolved' as const }
+          : await this.tmux.sendVerifiedToSeat(sender.seat_id, correlationId, renderedFrame, undefined, sender.engine ?? undefined, sender.pane_generation);
         await this.store.append({ entity_type: 'message', entity_id: correlationId, event_type: 'act.agent_input_injected',
           payload: {
-            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: sent.bytes,
+            target_agent_id: sourceAgentId, seat_id: sender.seat_id, bytes: committedTransportBytes(sent),
             submit_verdict: sent.verdict, input_class: 'delivery_confirmation',
             message_ids: messageIds, rendered_frame: renderedFrame,
           }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
         if (sent.verdict !== 'staged') throw new Error(`delivery_confirmation_not_staged:${sent.verdict}`);
       }
       return { ok: true, asserted, dead_lettered: [] };
-    });
-  }
-
-  // The remedial half of the two-phase comm contract is a deliberate pane
-  // action. Lifecycled's named fact edge decides WHEN; this is mechanism only
-  // and remains idempotent against a late organic submit.
-  private async commRemedialContext(messageId: string, targetAgentId: string) {
-    const events = await this.store.readAll();
-    const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
-    if (!accepted) throw new Error('message_absent');
-    if (!(accepted.payload.target_agent_ids as unknown[]).includes(targetAgentId)) throw new Error('target_mismatch');
-    const delivered = events.some((e) => e.entity_id === `${messageId}:${targetAgentId}` && e.event_type === 'act.comm_delivery_asserted');
-    return { events, accepted, delivered };
-  }
-
-  commRedrive(req: CommRedriveRequest, transportReceipt: string | null = null): Promise<CommRedriveResponse> {
-    return this.locked(async () => {
-      if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const { accepted, delivered } = await this.commRemedialContext(req.message_id, req.target_agent_id);
-      const base = { ok: true as const, message_id: req.message_id, target_agent_id: req.target_agent_id };
-      // The assertion arriving first is the good ending, not an error — and
-      // the pane is not touched, because there is nothing left to submit.
-      if (delivered) return { ...base, outcome: 'already_delivered' };
-      const proj = await this.projections();
-      const binding = proj.currentBindings.find((b) => b.registered && b.agent_id === req.target_agent_id);
-      if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
-      let frame: string;
-      if (accepted.payload.kind === 'command' || accepted.payload.kind === 'skill') {
-        frame = String(accepted.payload.rendered_frame);
-      } else {
-        const source = accepted.payload.source as CommFrameSource | undefined;
-        if (!source?.persona || !source.seat_id) throw new Error('comm_frame_source_absent');
-        frame = commFrame(req.message_id, source, String(accepted.payload.message));
-      }
-      const outcome = await this.tmux.redriveSeatComm(binding.seat_id, req.message_id, frame);
-      await this.store.append({ entity_type: 'message', entity_id: req.message_id, event_type: 'act.comm_redrive_attempted',
-        payload: { message_id: req.message_id, target_agent_id: req.target_agent_id, seat_id: binding.seat_id, outcome },
-        provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
-      return { ...base, outcome };
     });
   }
 
@@ -1844,10 +2101,20 @@ export class Daemon {
     const deliveries = targets.map((target) => {
       const assertion = events.find((e) => e.event_type === 'act.comm_delivery_asserted'
         && e.payload.message_id === messageId && e.payload.target_agent_id === target.agent_id);
+      // Read from `act.comm_delivery_failed` alone, exactly as `delivered`
+      // reads from the assertion alone. A refusal is never inferred from an
+      // assertion's absence — that absence is the silence this pair exists to
+      // stop being the only answer.
+      const failure = events.find((e) => e.event_type === 'act.comm_delivery_failed'
+        && e.payload.message_id === messageId && e.payload.target_agent_id === target.agent_id);
       return {
         target, delivered: assertion !== undefined,
         asserted_at: assertion?.occurred_at ?? null,
         assertion_event_id: assertion?.seq ?? null,
+        failed: assertion === undefined && failure !== undefined,
+        failed_at: assertion === undefined ? failure?.occurred_at ?? null : null,
+        failure_event_id: assertion === undefined ? failure?.seq ?? null : null,
+        failure_reason: assertion === undefined ? (failure ? String(failure.payload.reason) : null) : null,
       };
     });
     return {
@@ -1855,6 +2122,7 @@ export class Daemon {
       source_agent_id: String(accepted.payload.source_agent_id),
       accepted_at: accepted.occurred_at,
       deliveries, complete: deliveries.length > 0 && deliveries.every((d) => d.delivered),
+      resolved: deliveries.length > 0 && deliveries.every((d) => d.delivered || d.failed),
     };
   }
 
@@ -1866,7 +2134,8 @@ export class Daemon {
       if (!accepted) throw new Error('message_absent');
       if (accepted.payload.source_agent_id !== req.source_agent_id) throw new Error('comm_source_mismatch');
       const delivery = await this.commDelivery(req.message_id);
-      const sent = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
+      const sentRows = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
+      const sent = [...new Map(sentRows.map((event) => [String(event.payload.target_agent_id), event])).values()];
       const deadline = Math.max(...sent.map((event) => Date.parse(String(event.payload.receipt_deadline_at ?? ''))));
       if (!Number.isFinite(deadline)) throw new Error('comm_receipt_deadline_absent');
       const deadlineByTarget = new Map(sent.map((event) => [
@@ -1899,12 +2168,12 @@ export class Daemon {
           targets,
           bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
           submit_verdict: verdicts.size === 1
-            ? [...verdicts][0] as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved'
+            ? [...verdicts][0] as 'submit_failed' | 'transport_failed' | 'seat_unresolved'
             : 'multiple',
           refusals: unstaged.map((row) => ({
             target: targets.find((target) => target.agent_id === row.payload.target_agent_id)!,
             bytes: Number(row.payload.bytes ?? 0),
-            submit_verdict: String(row.payload.submit_verdict) as 'composer_draft_present' | 'composer_unreadable' | 'composer_corrupted' | 'frame_absent' | 'seat_unresolved',
+            submit_verdict: String(row.payload.submit_verdict) as 'submit_failed' | 'transport_failed' | 'seat_unresolved',
             event_id: row.seq,
           })),
           event_ids: current.sent.map((row) => row.seq),
@@ -1926,12 +2195,23 @@ export class Daemon {
           deliveries: current.delivery.deliveries,
         };
       }
+      // Transport landed and delivery then became impossible. The sender is
+      // told so rather than handed `bytes_sent`, which would read as a message
+      // still on its way to a composer that no longer exists.
+      if (current.delivery.deliveries.some((row) => row.failed)) {
+        return {
+          ok: false, schema_version: SCHEMA_VERSION, phase: 'delivery_failed',
+          message_id: req.message_id, source_agent_id: req.source_agent_id,
+          deliveries: current.delivery.deliveries,
+        };
+      }
       return {
         ok: true, schema_version: SCHEMA_VERSION, phase: 'bytes_sent',
         message_id: req.message_id, source_agent_id: req.source_agent_id,
         targets,
         bytes_sent: current.sent.reduce((sum, row) => sum + Number(row.payload.bytes ?? 0), 0),
-        staged: current.sent.length === targets.length && current.sent.every((row) => row.payload.submit_verdict === 'staged'),
+        staged: current.sent.length === targets.length && current.sent.every((row) =>
+          row.payload.submit_verdict === 'staged'),
         event_ids: current.sent.map((row) => row.seq),
       };
     } finally {
@@ -1964,10 +2244,9 @@ export class Daemon {
       const targets = snapshot.payload.targets as CommTarget[];
       const accepted = events.find((e) => e.entity_id === snapshot.payload.message_id && e.event_type === 'reg.comm_accepted');
       if (accepted?.payload.source_agent_id !== req.subscriber_agent_id) throw new Error('ask_subscriber_mismatch');
-      const targetIds = new Set(targets.map((t) => t.agent_id));
-      const callbacks: CommCallback[] = events.filter((e) => e.event_type === 'act.comm_callback_asserted' && (
-        e.payload.ask_id === req.ask_id || (e.payload.source === 'stop' && e.payload.subscriber_agent_id === req.subscriber_agent_id && targetIds.has(String(e.payload.target_agent_id)))
-      )).map((e) => ({
+      const callbacks: CommCallback[] = events.filter((e) =>
+        e.event_type === 'act.comm_callback_asserted' && e.payload.ask_id === req.ask_id,
+      ).map((e) => ({
         target: targets.find((t) => t.agent_id === e.payload.target_agent_id)!, content: String(e.payload.content), assertion_event_id: e.seq, source: e.payload.source as 'reply' | 'stop',
       }));
       const done = new Set(callbacks.map((c) => c.target.agent_id));
@@ -2031,13 +2310,13 @@ export class Daemon {
           reason: `scoped_reset_pending: ${req.seat_id}`,
         };
       }
-      if (proj.decommissionedSeats.has(req.seat_id)) {
+      if (proj.abandonedSeats.has(req.seat_id)) {
         return {
           ok: false,
           seat_id: req.seat_id,
           handover: false,
           missing_attestations: [],
-          reason: `seat_decommissioned: ${req.seat_id}`,
+          reason: `seat_abandoned: ${req.seat_id}`,
         };
       }
       const seatBinding = proj.currentBindings.find((binding) => binding.seat_id === req.seat_id);
@@ -2185,6 +2464,8 @@ export class Daemon {
         throw new Error('txd refused non-canonical existing tmux estate');
       }
 
+      await this.reconcileDeadStackSeatsUnlocked(null);
+
       await this.recoverScopedResets();
 
       // Boot-observed Council damage must enter the same durable page-reset
@@ -2257,11 +2538,13 @@ export class Daemon {
         return page !== undefined && isTxdPage(page) && rebuiltPages.has(page);
       });
       const bootRetiredAt = this.now();
+      const bootEvents = await this.store.readAll();
       const bootRetirements = bindings.flatMap((binding) =>
-        this.resetBindingInputs(binding, null, bootRetiredAt),
+        this.resetBindingInputs(binding, null, bootRetiredAt, bootEvents),
       );
       if (bootRetirements.length > 0) {
         await this.store.appendAll(bootRetirements);
+        this.wakeCommDeliveryFailures(bootRetirements);
         await this.publishRetirements(bindings, 'estate_reset', bootRetiredAt);
       }
       // Seats that already carry a `reg.pane_created` fact. A prior boot could
@@ -2298,6 +2581,7 @@ export class Daemon {
       return { created, existing, backfilled, failed };
     });
     await this.announceVacantPerpetualSeats();
+    await this.assertOccupancyCensus();
     return result;
   }
 
@@ -2447,9 +2731,11 @@ export class Daemon {
   // Retirement publication (chapter-locks spec §4): every reg.retired append is
   // followed by `agent.retired` on the bus — the reactive leg of the retirement
   // authority split. The store facts are already committed when this runs, so a
-  // bus refusal is reported loud and never un-closes the seat; a payload the
-  // contract refuses (a non-registration launch identity) is skipped loud for
-  // the same reason. Both are insurance gaps, not close failures.
+  // bus refusal never un-closes the seat; a payload the contract refuses (a
+  // non-registration launch identity) is skipped for the same reason. Both are
+  // insurance gaps, not close failures — and both leave `recordDroppedPublication`
+  // behind, because the gap that cost a consumer a leaked seat was not the
+  // refusal, it was the silence after it.
   //
   // Retirement is a post-birth concept: a binding whose agent never registered
   // dies by registration abort instead, and registrationd can only abort on
@@ -2483,27 +2769,23 @@ export class Daemon {
         retired_at: retiredAt,
       });
       if (!retirement.success) {
-        console.error(JSON.stringify({
-          level: 'error',
-          event: 'agent_retired_publish_skipped',
-          agent_id: binding.agent_id,
-          seat_id: binding.seat_id,
-          cause,
-          reason: retirement.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
-        }));
+        await this.recordDroppedPublication(
+          'agent.retired',
+          { entity_type: 'agent', entity_id: binding.agent_id, seat_id: binding.seat_id },
+          'contract_refused',
+          retirement.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+        );
         continue;
       }
       try {
         await this.physicalRegistration.publish('agent.retired', retirement.data);
       } catch (error) {
-        console.error(JSON.stringify({
-          level: 'error',
-          event: 'agent_retired_publish_failed',
-          agent_id: binding.agent_id,
-          seat_id: binding.seat_id,
-          cause,
-          error: String(error),
-        }));
+        await this.recordDroppedPublication(
+          'agent.retired',
+          { entity_type: 'agent', entity_id: binding.agent_id, seat_id: binding.seat_id },
+          'transport_refused',
+          String(error),
+        );
       }
     }
   }
@@ -2528,28 +2810,63 @@ export class Daemon {
       closed_at: closedAt,
     });
     if (!signal.success) {
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'unregistered_closed_publish_skipped',
-        agent_id: binding.agent_id,
-        seat_id: binding.seat_id,
-        cause,
-        reason: signal.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
-      }));
+      await this.recordDroppedPublication(
+        'agent.unregistered_closed',
+        { entity_type: 'agent', entity_id: binding.agent_id!, seat_id: binding.seat_id },
+        'contract_refused',
+        signal.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+      );
       return;
     }
     try {
       await this.physicalRegistration.publish('agent.unregistered_closed', signal.data);
     } catch (error) {
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'unregistered_closed_publish_failed',
-        agent_id: binding.agent_id,
-        seat_id: binding.seat_id,
-        cause,
-        error: String(error),
-      }));
+      await this.recordDroppedPublication(
+        'agent.unregistered_closed',
+        { entity_type: 'agent', entity_id: binding.agent_id!, seat_id: binding.seat_id },
+        'transport_refused',
+        String(error),
+      );
     }
+  }
+
+  // A fact txd owed the journal and could not put there. Nothing is retried
+  // here: the retry is the next boot's census, which asserts present truth
+  // rather than replaying a stale one, and a timer over a refused bus would be
+  // a number derived from nothing. What this adds is the trace — a dropped
+  // publication that leaves no evidence is indistinguishable from a fact that
+  // was never owed, which is precisely how a consumer came to hold a seat for
+  // an agent that left it and never learned otherwise.
+  private async recordDroppedPublication(
+    publishedEventType: TxdPublishedEventType,
+    // The thing the lost fact was about: the agent whose close it announced, or
+    // the estate whose census it was.
+    subject: { entity_type: 'agent' | 'estate'; entity_id: string; seat_id: string | null },
+    reason: 'contract_refused' | 'transport_refused',
+    detail: string,
+  ): Promise<void> {
+    console.error(JSON.stringify({
+      level: 'error',
+      event: 'journal_publication_dropped',
+      published_event_type: publishedEventType,
+      entity_id: subject.entity_id,
+      seat_id: subject.seat_id,
+      reason,
+      detail,
+    }));
+    await this.store.append({
+      entity_type: subject.entity_type,
+      entity_id: subject.entity_id,
+      event_type: 'reg.journal_publication_dropped',
+      payload: {
+        published_event_type: publishedEventType,
+        seat_id: subject.seat_id,
+        reason,
+        detail,
+      },
+      provenance: this.prov('observer', null),
+      occurred_at: this.now(),
+    });
   }
 
   // The generic close mechanism, shared by /agents/close and the reflexive auto-close.
@@ -2586,9 +2903,13 @@ export class Daemon {
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
     if (isStackSeat(binding.seat_id)) {
-      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_decommissioned', payload: {}, provenance: prov, occurred_at });
+      inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_abandoned', payload: {}, provenance: prov, occurred_at });
     }
+    inputs.push(...this.commDeliveryFailures(
+      await this.store.readAll(), binding.agent_id, 'delivery_target_closed', occurred_at, prov,
+    ));
     await this.store.appendAll(inputs);
+    this.wakeCommDeliveryFailures(inputs);
     await this.publishRetirements([binding], 'close', occurred_at, signalUnregistered);
     // The seat is now cleared, and if it is one the estate keeps staffed the
     // vacancy is announced rather than filled: registrationd mints the next
@@ -2643,7 +2964,7 @@ export class Daemon {
       }
 
       // Fresh stop for a live, bound agent → record it (turn → awaiting_input).
-      await this.store.append({
+      const stopEvent = await this.store.append({
         entity_type: 'agent',
         entity_id: req.agent_id,
         event_type: 'act.stop_reported',
@@ -2651,6 +2972,52 @@ export class Daemon {
         provenance: this.prov('hook', transportReceipt),
         occurred_at: this.now(),
       });
+
+      // The turn-stop delivery join. A mid-turn comm frame produces NO
+      // UserPromptSubmit — the engine queues it into the running turn (live
+      // specimens 994854e0, b9c1ca52, 2a243960) — so the hook join above can
+      // never speak for it. The full evidence chain substitutes: the frame was
+      // staged into an engine observed WORKING at send (target_turn), this
+      // fresh stop attests that turn completed, and one composer-at-rest
+      // capture proves the exact frame no longer sits in the visible composer
+      // — it left it into the queue the finished turn consumed. The capture
+      // happens HERE, at the stop, because the engine is at rest: a capture at
+      // send time races the busy engine's repaint and proves nothing
+      // (specimen e5757301). Any partial chain stays undelivered — a frame an
+      // interrupted turn left painted refuses as frame_present, an invisible
+      // composer refuses as unobservable, and a later fresh stop retries with
+      // fresh evidence. A deduped or refused stop never reaches this join.
+      const events = await this.store.readAll();
+      for (const receipt of events) {
+        if (receipt.event_type !== 'act.comm_bytes_sent'
+          || receipt.payload.target_agent_id !== req.agent_id
+          || receipt.payload.submit_verdict !== 'staged'
+          || receipt.payload.target_turn !== 'working') continue;
+        const messageId = receipt.entity_id;
+        const accepted = events.find((event) => event.entity_id === messageId && event.event_type === 'reg.comm_accepted');
+        if (!accepted) continue;
+        const assertionId = `${messageId}:${req.agent_id}`;
+        if (events.some((event) => event.entity_id === assertionId && event.event_type === 'act.comm_delivery_asserted')) continue;
+        const observation = await this.tmux.observeFrameAbsence(
+          String(receipt.payload.seat_id),
+          String(receipt.payload.rendered_frame),
+        );
+        if (observation !== 'frame_absent') continue;
+        await this.store.append({
+          entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+          payload: {
+            message_id: messageId,
+            target_agent_id: req.agent_id,
+            source_agent_id: accepted.payload.source_agent_id,
+            attestation: 'turn_stop',
+            stop_event_seq: stopEvent.seq,
+            transport_receipt_seq: receipt.seq,
+            frame_observation: observation,
+          },
+          provenance: this.prov('hook', transportReceipt), occurred_at: this.now(),
+        });
+        this.wakeDelivery(messageId);
+      }
 
       return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, turn: 'awaiting_input' };
     });
@@ -2755,7 +3122,7 @@ export class Daemon {
         }
       }
       // Phantom seat: the ledger still projects a pane tmux does not report at
-      // all. `paneBySeat` is only ever removed from by reg.seat_decommissioned —
+      // all. `paneBySeat` is only ever removed from by reg.seat_abandoned —
       // reg.seat_cleared clears the binding and leaves the pane axis untouched
       // by design, and reg.process_reaped has no pane effect — so a seat that
       // was reaped and cleared, or quietly dropped from the estate declaration,
@@ -2772,7 +3139,7 @@ export class Daemon {
         await flag(
           row.seat_id,
           'pane_absent',
-          'seat_decommissioned',
+          'seat_abandoned',
           `seat is projected (pane=${row.pane}, unbound) but tmux reports no pane for it — every estate read counts a seat that does not exist`,
         );
       }
@@ -2831,7 +3198,7 @@ export class Daemon {
         const contradiction = proj.openContradictions.find((candidate) =>
           candidate.entity_id === seat
           && candidate.kind === 'pane_absent'
-          && candidate.missing_attestation === 'seat_decommissioned');
+          && candidate.missing_attestation === 'seat_abandoned');
         if (!contradiction) return refused(`seat_not_flagged_absent: ${seat}`);
       }
       const occurred_at = this.now();
@@ -2839,7 +3206,7 @@ export class Daemon {
       await this.store.appendAll(req.seats.map((seat) => ({
         entity_type: 'seat' as const,
         entity_id: seat,
-        event_type: 'reg.seat_decommissioned',
+        event_type: 'reg.seat_abandoned',
         payload: { contradiction: 'pane_absent' },
         provenance,
         occurred_at,
@@ -2916,6 +3283,76 @@ export class Daemon {
           seat_id: seatId,
           engine,
         }));
+      }
+    });
+  }
+
+  /**
+   * Assert who is seated. The sweep above says which declared seats the estate
+   * wants filled; this says who is actually in them, and it is the same kind of
+   * statement: txd owns where an agent sits, so it says so, and consumers fold
+   * it like any other journal fact.
+   *
+   * The assertion is COMPLETE over this machine — these and only these agents
+   * are seated on it — because completeness is the only thing that reaches an
+   * agent nobody will ever publish another event about. `agent.retired` is
+   * published after the close is already committed and a refusal is never
+   * revisited; a consumer that missed one is not waiting for anything. Neither
+   * is a seat-keyed reconciliation enough: a seat from an estate generation
+   * this machine no longer declares can never be reassigned, so nothing will
+   * ever displace the agent recorded in it. A roster of the living can.
+   *
+   * It is taken once, at boot fold completion, from binding truth just folded.
+   * Not a timer, not a repeating sweep: the estate changes at close, launch,
+   * and reset, and each of those already publishes its own fact. This is the
+   * assertion of present truth that lets a consumer that missed one recover.
+   *
+   * A payload the contract refuses publishes NOTHING. A roster missing an
+   * occupant it could not represent, asserted as complete, would tell a
+   * consumer to release a live agent — the leak pointed the other way, and
+   * silent. Fail dark and leave the trace.
+   */
+  async assertOccupancyCensus(): Promise<void> {
+    if (!this.physicalRegistration) return;
+    return this.locked(async () => {
+      const machine = this.physicalRegistration!.machine;
+      const takenAt = this.now();
+      const occupied = (await this.projections()).currentBindings
+        .filter((binding) => binding.agent_id !== null)
+        .map((binding) => ({
+          seat_id: binding.seat_id,
+          agent_id: binding.agent_id,
+          birth_generation: binding.birth_generation,
+          pane_generation: binding.pane_generation,
+          registered: binding.registered,
+        }))
+        .sort((left, right) => left.seat_id.localeCompare(right.seat_id));
+      const census = EstateOccupancyCensusSchema.safeParse({
+        schema_version: AGENT_SCHEMA_VERSION,
+        machine,
+        configuration: this.physicalRegistration!.configuration,
+        occupied,
+        taken_at: takenAt,
+      });
+      const subject = { entity_type: 'estate' as const, entity_id: machine, seat_id: null };
+      if (!census.success) {
+        await this.recordDroppedPublication(
+          'agent.estate_occupancy_census',
+          subject,
+          'contract_refused',
+          census.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+        );
+        return;
+      }
+      try {
+        await this.physicalRegistration!.publish('agent.estate_occupancy_census', census.data);
+      } catch (error) {
+        await this.recordDroppedPublication(
+          'agent.estate_occupancy_census',
+          subject,
+          'transport_refused',
+          String(error),
+        );
       }
     });
   }
@@ -3029,8 +3466,9 @@ export class Daemon {
       // The pane processes are replaced: any shell run staged in them lost
       // the shell that would signal its completion. Fail those runs loud now.
       for (const seat of seats) this.abortPaneRuns(seat);
+      const resetEvents = await this.store.readAll();
       const inputs = bindings.flatMap((binding) =>
-        this.resetBindingInputs(binding, transportReceipt, completedAt),
+        this.resetBindingInputs(binding, transportReceipt, completedAt, resetEvents),
       );
       inputs.push({
         entity_type: 'estate',
@@ -3041,6 +3479,7 @@ export class Daemon {
         occurred_at: completedAt,
       });
       await this.store.appendAll(inputs);
+      this.wakeCommDeliveryFailures(inputs);
       await this.publishRetirements(bindings, 'estate_reset', completedAt);
     return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
   }
@@ -3074,6 +3513,12 @@ export class Daemon {
       let reconstructed = false;
       let reason: string | null = null;
       let faultedPages = 0;
+      const retiredStackSeats = await this.reconcileDeadStackSeatsUnlocked(transportReceipt, new Set(pages));
+      if (retiredStackSeats.length > 0) {
+        reset_seats.push(...retiredStackSeats);
+        reconstructed = true;
+        faultedPages += new Set(retiredStackSeats.map((seat) => seat.split(':', 1)[0])).size;
+      }
       for (const target of pages) {
         const expected = [...TXD_WINDOWS[target]];
         const pageObserved = observed.filter((seat) => seat.seat_id.startsWith(`${target}:`));
@@ -3136,17 +3581,111 @@ export class Daemon {
     return result;
   }
 
+  /**
+   * The refusal every staged-but-unattested comm to this agent is owed, written
+   * in the same transaction that ends the agent's binding. The binding ending
+   * IS the moment delivery became impossible — the composer holding those bytes
+   * is gone — so this is an observed effect, not a deadline expiring and not an
+   * inference from a missing assertion.
+   *
+   * Without it a dropped comm and a pending one read identically forever:
+   * `delivered: false` with nothing else to distinguish them. The sibling of
+   * `abortPaneRuns`, which fails a reset seat's staged shell runs loud for the
+   * same reason.
+   */
+  private commDeliveryFailures(
+    events: EventRecord[],
+    agentId: string | null,
+    reason: 'delivery_target_closed' | 'delivery_target_reset',
+    occurred_at: string,
+    prov: EventInput['provenance'],
+  ): EventInput[] {
+    if (!agentId) return [];
+    const inputs: EventInput[] = [];
+    for (const receipt of events) {
+      if (receipt.event_type !== 'act.comm_bytes_sent'
+        || receipt.payload.target_agent_id !== agentId
+        || receipt.payload.submit_verdict !== 'staged') continue;
+      const messageId = receipt.entity_id;
+      const assertionId = `${messageId}:${agentId}`;
+      if (events.some((event) => event.entity_id === assertionId
+        && event.event_type === 'act.comm_delivery_asserted')) continue;
+      const failureId = `comm-delivery-failure:${messageId}:${agentId}`;
+      if (events.some((event) => event.entity_id === failureId
+        && event.event_type === 'act.comm_delivery_failed')) continue;
+      if (inputs.some((input) => input.entity_id === failureId)) continue;
+      const accepted = events.find((event) => event.entity_id === messageId
+        && event.event_type === 'reg.comm_accepted');
+      if (!accepted) continue;
+      inputs.push({
+        entity_type: 'assertion', entity_id: failureId, event_type: 'act.comm_delivery_failed',
+        payload: {
+          message_id: messageId,
+          target_agent_id: agentId,
+          source_agent_id: accepted.payload.source_agent_id,
+          seat_id: receipt.payload.seat_id,
+          transport_receipt_seq: receipt.seq,
+          reason,
+        },
+        provenance: prov, occurred_at,
+      });
+    }
+    return inputs;
+  }
+
   private resetBindingInputs(
     binding: CurrentBinding,
     transportReceipt: string | null,
     occurred_at: string,
+    events: EventRecord[],
   ): EventInput[] {
     const prov = this.prov('observer', transportReceipt);
     const inputs: EventInput[] = [];
     if (binding.agent_id) inputs.push({ entity_type: 'agent', entity_id: binding.agent_id, event_type: 'reg.retired', payload: {}, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.process_reaped', payload: { agent_id: binding.agent_id }, provenance: prov, occurred_at });
     inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_cleared', payload: {}, provenance: prov, occurred_at });
+    inputs.push(...this.commDeliveryFailures(events, binding.agent_id, 'delivery_target_reset', occurred_at, prov));
     return inputs;
+  }
+
+  private async reconcileDeadStackSeatsUnlocked(
+    transportReceipt: string | null,
+    pages: ReadonlySet<TxdPage> | null = null,
+  ): Promise<string[]> {
+    const observed = await this.tmux.listSeats();
+    const paneBySeat = new Map(observed.map((seat) => [seat.seat_id, seat.pane]));
+    const proj = await this.projections();
+    const candidates = new Set<string>();
+    for (const seat of observed) {
+      const page = seat.seat_id.split(':', 1)[0] as TxdPage;
+      if (seat.pane === 'dead' && isStackSeat(seat.seat_id) && !TXD_ESTATE.includes(seat.seat_id)
+        && (pages === null || pages.has(page))) candidates.add(seat.seat_id);
+    }
+    for (const binding of proj.currentBindings) {
+      const page = binding.seat_id.split(':', 1)[0] as TxdPage;
+      if (isStackSeat(binding.seat_id) && !TXD_ESTATE.includes(binding.seat_id)
+        && paneBySeat.get(binding.seat_id) !== 'live' && (pages === null || pages.has(page))) {
+        candidates.add(binding.seat_id);
+      }
+    }
+    const retired: string[] = [];
+    for (const seat of candidates) {
+      const binding = proj.currentBindings.find((candidate) => candidate.seat_id === seat);
+      if (binding) {
+        if (!(await this.executeClose(binding, transportReceipt))) continue;
+      } else {
+        await this.tmux.killSeat(seat);
+        if ((await this.tmux.listSeats()).some((row) => row.seat_id === seat)) {
+          throw new Error(`txd could not verify dynamic stack seat cleanup for ${seat}`);
+        }
+        await this.store.append({
+          entity_type: 'seat', entity_id: seat, event_type: 'reg.seat_abandoned', payload: {},
+          provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+        });
+      }
+      retired.push(seat);
+    }
+    return retired;
   }
 
   async executeEstateRotation(): Promise<void> {
@@ -3187,7 +3726,8 @@ export class Daemon {
     return {
       ok: open === 0
         && tmux_reachable
-        && (activation_pending || tints.every((tint) => tint.state === 'ready')),
+        && estate_generation === 'canonical'
+        && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
       version: build.version,

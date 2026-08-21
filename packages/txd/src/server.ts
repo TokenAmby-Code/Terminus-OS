@@ -34,7 +34,6 @@ import {
   CommHookSchema,
   CommReceiptWaitRequestSchema,
   AgentInjectRequestSchema,
-  CommRedriveRequestSchema,
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
   EstateAbandonRequestSchema,
@@ -46,11 +45,13 @@ import {
   WrapperStartHookSchema,
   LcdServiceDeliverySchema,
   type EstateReadResponse,
+  type HookDiagnostic,
 } from '@terminus-os/contracts';
+import { commFrameTokens } from './comm-frame.ts';
 import type { Daemon } from './core.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
-import { commFrameTokens } from './comm-frame.ts';
+import { readHookDiagnostics } from './diagnostics.ts';
 
 export type BuildInfo = { version: string; git_sha: string; bun: string };
 
@@ -241,7 +242,12 @@ function clipboardFailure(error: unknown, direction: 'pull' | 'push' | 'selectio
 
 // Ordered route table — the ordering is data so committed route tests can
 // assert it.
-export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): Route[] {
+export function buildRoutes(
+  daemon: Daemon,
+  build: BuildInfo,
+  machine: string,
+  hookDiagnostics: (limit: number) => Promise<HookDiagnostic[]> = readHookDiagnostics,
+): Route[] {
   const routes: Route[] = [
     // ── /ctl/* — daemon ops ─────────────────────────────────────────────────
     {
@@ -313,21 +319,6 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
         const parsed = await parseMutation(req, CommReceiptWaitRequestSchema, 'invalid_comm_receipt_request');
         if (parsed instanceof Response) return parsed;
         return deferredJson(daemon.waitCommReceipt(parsed));
-      },
-    },
-    {
-      method: 'POST',
-      match: exact('/agents/comm/redrive'),
-      label: 'POST /agents/comm/redrive',
-      handler: async (req) => {
-        const parsed = await parseMutation(req, CommRedriveRequestSchema, 'invalid_comm_redrive_request');
-        if (parsed instanceof Response) return parsed;
-        try {
-          return json(await daemon.commRedrive(parsed, receipt(req)));
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          return json({ ok: false, error: 'comm_redrive_refused', detail }, 422);
-        }
       },
     },
     {
@@ -560,6 +551,24 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
     // ── /tmux/read/* — the only public read surface ─────────────────────────
     {
       method: 'GET',
+      match: exact('/tmux/read/diagnostics/hooks'),
+      label: 'GET /tmux/read/diagnostics/hooks',
+      handler: async (req) => {
+        const raw = new URL(req.url).searchParams.get('limit') ?? '100';
+        if (!/^[0-9]+$/.test(raw) || Number(raw) < 1 || Number(raw) > 1000) {
+          return json({ ok: false, error: 'invalid_limit' }, 422);
+        }
+        return json({
+          ok: true,
+          schema_version: SCHEMA_VERSION,
+          source: 'systemd-journal',
+          identifier: 'txd-tmux-hook',
+          diagnostics: await hookDiagnostics(Number(raw)),
+        });
+      },
+    },
+    {
+      method: 'GET',
       match: exact('/tmux/read/estate'),
       label: 'GET /tmux/read/estate',
       handler: async () => {
@@ -610,8 +619,15 @@ export function buildRoutes(daemon: Daemon, build: BuildInfo, machine: string): 
   return routes;
 }
 
-export function makeServer(opts: { bind: string; port: number; daemon: Daemon; build: BuildInfo; machine: string }): ReturnType<typeof Bun.serve> {
-  const routes = buildRoutes(opts.daemon, opts.build, opts.machine);
+export function makeServer(opts: {
+  bind: string;
+  port: number;
+  daemon: Daemon;
+  build: BuildInfo;
+  machine: string;
+  hookDiagnostics?: (limit: number) => Promise<HookDiagnostic[]>;
+}): ReturnType<typeof Bun.serve> {
+  const routes = buildRoutes(opts.daemon, opts.build, opts.machine, opts.hookDiagnostics);
   return Bun.serve({
     hostname: opts.bind,
     port: opts.port,

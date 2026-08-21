@@ -44,11 +44,11 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
     expect(await runCli(['comm', 'palace:N', 'skill=openai-docs', '--', 'models'], deps)).toBe(0);
     expect(calls.filter((call) => (call as { path: string }).path === '/agents/comm')).toEqual([
       { method: 'POST', path: '/agents/comm', body: {
-        schema_version: 11, source_agent_id: 'source', target: 'council:custodes',
+        schema_version: 12, source_agent_id: 'source', target: 'council:custodes',
         intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
       } },
       { method: 'POST', path: '/agents/comm', body: {
-        schema_version: 11, source_agent_id: 'source', target: 'palace:N',
+        schema_version: 12, source_agent_id: 'source', target: 'palace:N',
         intent: { kind: 'skill', name: 'openai-docs', args: ['models'] }, ask: false, reply: false,
       } },
     ]);
@@ -88,7 +88,7 @@ test('tier 1: an on-time delivery attestation is the sole comm return value', as
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
     expect(calls.map((call) => call.path)).toEqual(['/agents/comm', '/agents/comm/receipt']);
-    expect(calls[1]?.body).toEqual({ schema_version: 11, message_id: 'message-1', source_agent_id: 'source' });
+    expect(calls[1]?.body).toEqual({ schema_version: 12, message_id: 'message-1', source_agent_id: 'source' });
     expect(stdout).toHaveLength(1);
     expect(JSON.parse(stdout[0]!).phase).toBe('delivery_confirmed');
   } finally {
@@ -130,7 +130,7 @@ test('behavioral pin: a typed comm transport refusal is printed and exits non-ze
           source_agent_id: 'source',
           targets: [{ agent_id: 'target', seat_id: 'palace:W', persona: null }],
           bytes_sent: 0,
-          submit_verdict: 'composer_draft_present',
+          submit_verdict: 'transport_failed',
           event_ids: [99],
         },
     stdout: (line) => stdout.push(line),
@@ -141,8 +141,46 @@ test('behavioral pin: a typed comm transport refusal is printed and exits non-ze
     expect(JSON.parse(stdout[0]!)).toMatchObject({
       ok: false,
       phase: 'transport_refused',
-      submit_verdict: 'composer_draft_present',
+      submit_verdict: 'transport_failed',
     });
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('behavioral pin: comm admission refusal exits non-zero without requesting a receipt', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const stdout: string[] = [];
+  const calls: string[] = [];
+  const deps: CliDependencies = {
+    request: async (_method, path) => {
+      calls.push(path);
+      return { ok: false, error: 'Unable to connect', bytes_sent: 0 };
+    },
+    stdout: (line) => stdout.push(line),
+    stderr: () => {},
+  };
+  try {
+    expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(1);
+    expect(calls).toEqual(['/agents/comm']);
+    expect(JSON.parse(stdout[0]!)).toEqual({ ok: false, error: 'Unable to connect', bytes_sent: 0 });
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('behavioral pin: an unreachable txd makes comm exit non-zero', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const errors: string[] = [];
+  try {
+    expect(await runCli(['comm', 'target', 'hello'], {
+      request: async () => { throw new Error('Unable to connect'); },
+      stdout: () => {},
+      stderr: (line) => errors.push(line),
+    })).toBe(1);
+    expect(errors).toEqual(['tx: Unable to connect']);
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }

@@ -6,10 +6,12 @@
 [Unit]
 Description=Terminus-OS persistent tmux estate server
 Before=txd.service
-# While the supervised server is live, keep the control plane live. If the
-# server exits, txd's BindsTo stops the old generation; after systemd restarts
-# this unit, Upholds starts txd and its boot constructor rebuilds the estate.
-Upholds=txd.service
+# Estate activation is the event that starts the control plane. If the server
+# exits, txd's BindsTo stops the old generation; when systemd starts a fresh
+# estate owner, this Wants edge starts txd and its boot constructor rebuilds
+# from event truth. Upholds is deliberately absent: it periodically reasserts
+# a deterministically failed txd even after StartLimit has made the fault loud.
+Wants=txd.service
 
 [Service]
 Type=simple

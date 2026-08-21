@@ -141,7 +141,6 @@ test('a claude run enters bash mode with a literal ! keystroke, pastes, verifies
   };
   const tmux = new RealTmux('scratch', {
     run,
-    observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
   });
 
   const outcome = await tmux.runInAgentComposer('council:custodes', RUN_ID, command, 'claude');
@@ -155,7 +154,7 @@ test('a claude run enters bash mode with a literal ! keystroke, pastes, verifies
   expect(pasteIndex).toBeGreaterThan(calls.findIndex((args) => args.at(-1) === '!'));
 });
 
-test('a claude run refuses a painted composer before any key is sent', async () => {
+test('a claude run is not blocked by visible composer paint', async () => {
   const calls: string[][] = [];
   const run: Runner = async (_socket, args) => {
     calls.push(args);
@@ -165,11 +164,11 @@ test('a claude run refuses a painted composer before any key is sent', async () 
   };
   const tmux = new RealTmux('scratch', {
     run,
-    observePaneOutput: async () => { throw new Error('dirty composer must refuse before arming'); },
   });
   const outcome = await tmux.runInAgentComposer('council:custodes', RUN_ID, 'echo x', 'claude');
-  expect(outcome).toEqual({ bytes: 0, verdict: 'composer_draft_present' });
-  expect(calls.filter((args) => ['send-keys', 'load-buffer', 'paste-buffer'].includes(args[0]!))).toHaveLength(0);
+  expect(outcome).toEqual({ bytes: 6, verdict: 'staged' });
+  expect(calls.some((args) => args[0] === 'paste-buffer')).toBe(true);
+  expect(calls.some((args) => args[0] === 'send-keys' && args.at(-1) === 'Enter')).toBe(true);
 });
 
 test('a codex run rides the verified send path with the whole !-prefixed line', async () => {
@@ -196,7 +195,6 @@ test('a codex run rides the verified send path with the whole !-prefixed line', 
   };
   const tmux = new RealTmux('scratch', {
     run,
-    observePaneOutput: async () => ({ next: async () => undefined, close: () => undefined }),
   });
 
   const outcome = await tmux.runInAgentComposer('palace:N', RUN_ID, command, 'codex');
@@ -219,3 +217,52 @@ for (const [paint, verdict] of [
     expect(RealTmux.shellComposerVerdict(paint, 'echo proof')).toBe(verdict);
   });
 }
+
+// ── Pane-input serialization across the run and send transactions ──────────
+
+test('a concurrent verified send cannot interleave bytes into a claude shell run', async () => {
+  const command = 'echo run-proof';
+  const commText = 'comm bytes for the composer';
+  const calls: string[][] = [];
+  const payloads: string[] = [];
+  let releaseRunPaste!: () => void;
+  const runPasteHeld = new Promise<void>((resolve) => { releaseRunPaste = resolve; });
+  let runPasteReached!: () => void;
+  const runPasteStarted = new Promise<void>((resolve) => { runPasteReached = resolve; });
+  const run: Runner = async (_socket, args, stdin) => {
+    if (args[0] === 'load-buffer') {
+      const payload = new TextDecoder().decode(stdin);
+      if (payload === command) {
+        // The run transaction is mid-flight: the bang keystroke landed,
+        // the command's paste has not. Hold it here so a concurrent send
+        // gets every chance to interleave.
+        runPasteReached();
+        await runPasteHeld;
+      }
+      calls.push(args);
+      payloads.push(payload);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    calls.push(args);
+    if (args[0] === 'list-panes') return { code: 0, stdout: '%7\tcouncil:custodes\n', stderr: '' };
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const tmux = new RealTmux('scratch', { run });
+
+  const running = tmux.runInAgentComposer('council:custodes', RUN_ID, command, 'claude');
+  await runPasteStarted;
+  const sending = tmux.sendVerifiedToSeat('council:custodes', RUN_ID, commText);
+  // Real turns for the send to misbehave in while the run is held open.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  releaseRunPaste();
+  expect(await running).toEqual({ bytes: Buffer.byteLength(command), verdict: 'staged' });
+  expect(await sending).toEqual({ bytes: Buffer.byteLength(commText), verdict: 'staged' });
+
+  // The pane saw the run transaction whole — ! → paste → Enter — before a
+  // single byte of the send entered.
+  expect(payloads).toEqual([command, commText]);
+  const paneInputs = calls
+    .filter((args) => args[0] === 'send-keys' || args[0] === 'paste-buffer')
+    .map((args) => (args[0] === 'paste-buffer' ? 'paste' : String(args.at(-1))));
+  expect(paneInputs).toEqual(['!', 'paste', 'Enter', 'paste', 'Enter']);
+});

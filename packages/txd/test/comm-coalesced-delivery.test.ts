@@ -1,4 +1,4 @@
-// A coalesced flush carries every comm the composer queued, and every one of
+// A coalesced prompt submission may carry several comm ids, and every one of
 // them was delivered.
 //
 // The shapes below are production payloads. On 2026-08-03, `hook.user_prompt_submit`
@@ -126,7 +126,7 @@ test('a busy sender leaves no parked confirmation and hook replay retries the ve
   tmux.sendVerifiedToSeat = async (seatId, correlationId, text, tabAfterPrefix) => {
     if (seatId === 'council:custodes') {
       confirmationAttempts += 1;
-      if (!senderInteractive) return { bytes: 0, verdict: 'frame_absent' as const };
+      if (!senderInteractive) return { bytes: 0, verdict: 'transport_failed' as const };
     }
     return verified(seatId, correlationId, text, tabAfterPrefix);
   };
@@ -152,13 +152,13 @@ test('a busy sender leaves no parked confirmation and hook replay retries the ve
   now += 30_000;
 
   await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([messageId]) }))
-    .rejects.toThrow('delivery_confirmation_not_staged:frame_absent');
+    .rejects.toThrow('delivery_confirmation_not_staged:transport_failed');
 
   let events = await store.readAll();
   expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
   expect(events.find((event) => event.event_type === 'act.agent_input_injected'
     && event.payload.input_class === 'delivery_confirmation')?.payload).toMatchObject({
-    submit_verdict: 'frame_absent', target_agent_id: 'sender', message_ids: [messageId],
+    submit_verdict: 'transport_failed', target_agent_id: 'sender', message_ids: [messageId],
   });
   expect(fakeTmux.sends('council:custodes')).toEqual([]);
 
@@ -170,7 +170,7 @@ test('a busy sender leaves no parked confirmation and hook replay retries the ve
   expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
   expect(events.filter((event) => event.event_type === 'act.agent_input_injected'
     && event.payload.input_class === 'delivery_confirmation').map((event) => event.payload.submit_verdict))
-    .toEqual(['frame_absent', 'staged']);
+    .toEqual(['transport_failed', 'staged']);
   expect(confirmationAttempts).toBe(2);
   expect(fakeTmux.sends('council:custodes')).toEqual([
     `[tx comm delivery confirmed ${messageId} target worker]`,

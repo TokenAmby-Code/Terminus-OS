@@ -23,7 +23,9 @@ const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
 
-function setup() {
+// Boot stands the estate and asserts its occupancy census; every assertion
+// below is about what a DISPATCH publishes, so the log starts after that.
+async function setup() {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
@@ -40,7 +42,10 @@ function setup() {
       published.push({ type, payload });
     },
   };
-  return { store, tmux, published, d: new Daemon(store, tmux, undefined, undefined, runtime) };
+  const d = new Daemon(store, tmux, undefined, undefined, runtime);
+  await d.constructEstate();
+  published.length = 0;
+  return { store, tmux, published, d };
 }
 
 function request(target: DispatchTarget): DispatchRequested {
@@ -73,8 +78,7 @@ async function bindSeat(d: Daemon, tmux: FakeTmux, seatId: string): Promise<void
 }
 
 test('a page target autofills the first free seat in declared order', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await d.dispatch(request({ kind: 'page', page: 'palace' }));
   expect(published).toHaveLength(1);
   expect(published[0]).toMatchObject({
@@ -91,8 +95,7 @@ test('a page target autofills the first free seat in declared order', async () =
 });
 
 test('a composed birth owns its freelist seat before the wrapper becomes observable', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await d.dispatch(request({ kind: 'page', page: 'palace' }));
 
   // The wrapper has not become observable yet: tmux still reports the bare
@@ -114,8 +117,7 @@ test('a composed birth owns its freelist seat before the wrapper becomes observa
 });
 
 test('a named seat with a composed birth refuses loud while registration is pending', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W' }));
   tmux.setCommand('palace:W', 'bash');
   published.length = 0;
@@ -141,12 +143,11 @@ test('a named seat with a composed birth refuses loud while registration is pend
 });
 
 test('a scoped reset releases an unbound composed birth for redispatch', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W' }));
 
   expect((await d.resetEstateScope({
-    schema_version: 11,
+    schema_version: 12,
     force: true,
     scope: 'pane',
     pane: 'palace:W',
@@ -166,8 +167,7 @@ test('a scoped reset releases an unbound composed birth for redispatch', async (
 });
 
 test('the mechanicus pool mints a fresh stack pane directly', async () => {
-  const { store, tmux, published, d } = setup();
-  await d.constructEstate();
+  const { store, tmux, published, d } = await setup();
   await d.dispatch(request({ kind: 'page', page: 'mechanicus' }));
   expect(published).toHaveLength(1);
   expect(published[0]).toMatchObject({ type: 'agent.dispatch_attested' });
@@ -180,7 +180,7 @@ test('the mechanicus pool mints a fresh stack pane directly', async () => {
   ]);
 });
 
-test('a minted stack pane is decommissioned when its engine cannot start', async () => {
+test('a minted stack pane is abandoned when its engine cannot start', async () => {
   class FailingStackTmux extends FakeTmux {
     override async startSeatEngine(launch: Parameters<FakeTmux['startSeatEngine']>[0]): Promise<boolean> {
       if (launch.seatId.startsWith('mechanicus:')) return false;
@@ -202,19 +202,20 @@ test('a minted stack pane is decommissioned when its engine cannot start', async
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => { published.push({ type, payload }); },
   });
   await d.constructEstate();
+  published.length = 0;
 
   await d.dispatch(request({ kind: 'page', page: 'mechanicus' }));
 
   expect(published).toMatchObject([{ type: 'agent.dispatch_refused', payload: { reason: 'seat_start_failed' } }]);
   const dynamic = (await store.readAll()).filter((event) => event.entity_id.startsWith('mechanicus:')
     && event.entity_id !== 'mechanicus:new');
-  expect(dynamic.map((event) => event.event_type)).toEqual(['reg.pane_created', 'reg.seat_decommissioned']);
-  expect((await tmux.listSeats()).find((seat) => seat.seat_id === dynamic[0]!.entity_id)?.pane).toBe('dead');
+  expect(dynamic.map((event) => event.event_type)).toEqual(['reg.pane_created', 'reg.seat_abandoned']);
+  expect((await tmux.listSeats()).some((seat) => seat.seat_id === dynamic[0]!.entity_id)).toBe(false);
+  expect(tmux.estateShape().windows.mechanicus).not.toContain(dynamic[0]!.entity_id);
 });
 
 test('autofill skips a pane held by a foreign process and takes the next idle seat', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   tmux.setCommand('palace:W', 'sudo');
   await d.dispatch(request({ kind: 'page', page: 'palace' }));
   expect(published).toHaveLength(1);
@@ -225,8 +226,7 @@ test('autofill skips a pane held by a foreign process and takes the next idle se
 });
 
 test('an exhausted palace falls through and mints a registered-identity stack pane', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await bindSeat(d, tmux, 'palace:W');
   tmux.setCommand('palace:N', 'sudo');
   for (const seat of ['palace:S', 'palace:E']) {
@@ -255,8 +255,7 @@ test('an exhausted palace falls through and mints a registered-identity stack pa
 });
 
 test('a named palace seat falls through only when every declared palace seat is full', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await bindSeat(d, tmux, 'palace:W');
   for (const seat of ['palace:N', 'palace:S', 'palace:E']) tmux.setCommand(seat, 'sudo');
   published.length = 0;
@@ -271,8 +270,7 @@ test('a named palace seat falls through only when every declared palace seat is 
 });
 
 test('somnium overflow reuses the remote wrapper placement per pane', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   for (const seat of ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE']) {
     tmux.setCommand(seat, 'ssh');
   }
@@ -282,8 +280,7 @@ test('somnium overflow reuses the remote wrapper placement per pane', async () =
 });
 
 test('a seat target lands on exactly the named seat', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:N' }));
   expect(published).toHaveLength(1);
   expect(published[0]).toMatchObject({
@@ -295,8 +292,7 @@ test('a seat target lands on exactly the named seat', async () => {
 });
 
 test('a seat target replaces a foreign foreground process — naming the seat is the authorization', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   tmux.setCommand('palace:N', 'sudo');
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:N' }));
   expect(published).toHaveLength(1);
@@ -307,8 +303,7 @@ test('a seat target replaces a foreign foreground process — naming the seat is
 });
 
 test('a seat target bound to a live agent refuses with the binding named', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   await bindSeat(d, tmux, 'palace:N');
   published.length = 0;
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:N' }));
@@ -327,8 +322,7 @@ test('a seat target bound to a live agent refuses with the binding named', async
 });
 
 test('a seat target outside the declared estate is refused, not guessed', async () => {
-  const { published, d } = setup();
-  await d.constructEstate();
+  const { published, d } = await setup();
   await d.dispatch(request({ kind: 'seat', seat_id: 'mechanicus:W' }));
   expect(published).toEqual([{
     type: 'agent.dispatch_refused',
@@ -345,8 +339,7 @@ test('a seat target outside the declared estate is refused, not guessed', async 
 });
 
 test('a seat target whose engine start fails refuses seat_start_failed', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   tmux.failSeatEngineStart('palace:N');
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:N' }));
   expect(published).toMatchObject([{
@@ -356,8 +349,7 @@ test('a seat target whose engine start fails refuses seat_start_failed', async (
 });
 
 test('the orders a dispatch carries reach the launch composition verbatim', async () => {
-  const { tmux, published, d } = setup();
-  await d.constructEstate();
+  const { tmux, published, d } = await setup();
   // Backticks, a blank line and a `$` — the shapes a real brief is made of,
   // and the ones a second quoting scheme would eat.
   const orders = 'Worker E.\n\nRun `rg dispatch` and read $PANE_ID.\n';
@@ -367,8 +359,7 @@ test('the orders a dispatch carries reach the launch composition verbatim', asyn
 });
 
 test('a bodiless dispatch composes a launch with no orders at all', async () => {
-  const { tmux, d } = setup();
-  await d.constructEstate();
+  const { tmux, d } = await setup();
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:N' }));
   expect(tmux.seatEngine('palace:N')!.prompt).toBeUndefined();
 });

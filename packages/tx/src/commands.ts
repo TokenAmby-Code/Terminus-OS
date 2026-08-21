@@ -6,6 +6,7 @@ import {
   MAX_CLIPBOARD_BASE64_CHARS,
   MAX_CLIPBOARD_BYTES,
   COMM_WAIT_TIMEOUT_MS,
+  HookDiagnosticsResponseSchema,
   SCHEMA_VERSION,
   type ClipboardPushResponse,
 } from '@terminus-os/contracts';
@@ -78,7 +79,11 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
     schema_version: SCHEMA_VERSION, source_agent_id: agentSource('comm'),
     ...(intent ? { intent } : { message: positional.at(-1)! }), ask, reply,
     ...(page ? { page } : {}), ...(!page && !reply ? { target: positional[0] } : {}),
-  }) as { message_id: string; ask_id: string | null };
+  }) as { ok?: boolean; message_id?: string; ask_id?: string | null };
+  if (accepted.ok === false || !accepted.message_id) {
+    write(accepted);
+    return 1;
+  }
   const receipt = await request('POST', '/agents/comm/receipt', {
     schema_version: SCHEMA_VERSION,
     message_id: accepted.message_id,
@@ -109,6 +114,26 @@ function decodedPush(response: ClipboardPushResponse): string {
 /** The single extension point: subcommands add one declarative entry here. */
 export const COMMANDS: readonly Command[] = [
   { path: ['comm'], summary: '<identity> command=<name>|skill=<name> [-- args]; caller supplies no /, $, or engine flag', run: comm },
+  {
+    path: ['inspect', 'hooks'],
+    summary: 'Read bounded txd-owned tmux hook diagnostics from the system journal',
+    run: async ({ args, request, write }) => {
+      let limit = 100;
+      if (args.length > 0) {
+        if (args.length !== 2 || args[0] !== '--limit' || !/^[0-9]+$/.test(args[1]!)) {
+          throw new Error('usage: tx inspect hooks [--limit <1-1000>]');
+        }
+        limit = Number(args[1]);
+      }
+      if (limit < 1 || limit > 1000) throw new Error('usage: tx inspect hooks [--limit <1-1000>]');
+      const parsed = HookDiagnosticsResponseSchema.safeParse(
+        await request('GET', `/tmux/read/diagnostics/hooks?limit=${limit}`),
+      );
+      if (!parsed.success) throw new Error('txd returned invalid hook diagnostics');
+      write(parsed.data);
+      return 0;
+    },
+  },
   {
     // The second phase of a comm, asked for rather than waited on. `tx comm`
     // still quick-releases; this redeems the message_id it returned for the
@@ -291,7 +316,7 @@ export const COMMANDS: readonly Command[] = [
   },
   {
     path: ['estate', 'abandon'],
-    summary: 'Attest already-flagged absent, unbound noncanonical seats decommissioned',
+    summary: 'Attest already-flagged absent, unbound noncanonical seats abandoned',
     run: async ({ args, request, write }) => {
       if (args.length === 0 || args.some((arg) => arg.startsWith('-'))) {
         throw new Error('usage: tx estate abandon <seat> [<seat> ...]');

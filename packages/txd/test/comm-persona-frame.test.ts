@@ -59,6 +59,49 @@ test('the comm frame resolves the sender persona and exact seat while exposing o
   expect(commFrameTokens(rendered)).toEqual([token]);
 });
 
+test('the accepted fact records the sender as persona AND canonical seat, never persona alone', async () => {
+  const { d, store } = await fixture();
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender-id',
+    target: 'worker-id',
+    message: 'record me',
+    ask: false,
+    reply: false,
+  });
+
+  const event = (await store.readAll()).find((e) =>
+    e.entity_id === accepted.message_id && e.event_type === 'reg.comm_accepted')!;
+  expect(event.payload.source).toEqual({ persona: 'custodes', seat_id: 'council:custodes' });
+  expect(event.payload.source_agent_id).toBe('sender-id');
+});
+
+test('a source whose seat carries no persona refuses before any transport effect', async () => {
+  const { d, store, tmux } = await fixture();
+  const launched = await d.launch({
+    seat_id: 'palace:E', schema_version: SCHEMA_VERSION,
+    identity: 'bare-id', persona: 'placeholder', rank: 'astartes', tint: '#111111',
+  });
+  if (!launched.ok) throw new Error(`fixture launch failed: ${launched.reason}`);
+  // Registration that resolves no persona: the projection folds '' to null.
+  await store.append({
+    entity_type: 'agent', entity_id: 'bare-id', event_type: 'reg.agent_registered',
+    payload: { persona: '', rank: 'astartes', commander: null },
+    provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+    occurred_at: '2026-08-18T00:00:00.000Z',
+  });
+
+  await expect(d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'bare-id',
+    target: 'worker-id',
+    message: 'must refuse',
+    ask: false,
+    reply: false,
+  })).rejects.toThrow('source_persona_unresolved');
+  expect(tmux.sends('palace:W')).toEqual([]);
+});
+
 test('a duplicated persona remains ambiguous and produces no transport effect', async () => {
   const { d, store, tmux } = await fixture();
   await registered(d, store, 'palace:E', 'worker-two', 'white-scars');

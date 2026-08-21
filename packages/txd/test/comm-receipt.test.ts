@@ -2,9 +2,9 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { Daemon, type CommReceiptRuntime } from '../src/core.ts';
-import { MemoryEventStore } from '../src/store.ts';
-import { FakeTmux, type TmuxControlPlane } from '../src/tmux.ts';
 import { commTokenForMessageId } from '../src/comm-frame.ts';
+import { MemoryEventStore } from '../src/store.ts';
+import { FakeTmux } from '../src/tmux.ts';
 
 async function rig() {
   let now = Date.parse('2026-08-15T17:00:00.000Z');
@@ -64,32 +64,4 @@ test('tier 2 returns bytes sent at the bound, then a late attestation emits a re
   expect((await store.readAll()).filter((event) => event.payload.input_class === 'delivery_confirmation')).toEqual([
     expect.objectContaining({ payload: expect.objectContaining({ message_ids: [accepted.message_id], submit_verdict: 'staged' }) }),
   ]);
-});
-
-test('behavioral pin: a draft-present zero-byte send is an immediate honest transport refusal', async () => {
-  const { daemon, tmux, scheduledMs } = await rig();
-  const control: TmuxControlPlane = tmux;
-  control.sendVerifiedToSeat = async () => ({ bytes: 0, verdict: 'composer_draft_present' as const });
-  const accepted = await daemon.comm({
-    schema_version: SCHEMA_VERSION,
-    source_agent_id: 'sender',
-    target: 'target',
-    message: 'must fail loud',
-    ask: false,
-    reply: false,
-  });
-
-  const receipt = await daemon.waitCommReceipt({
-    schema_version: SCHEMA_VERSION,
-    message_id: accepted.message_id,
-    source_agent_id: 'sender',
-  });
-
-  expect(receipt).toMatchObject({
-    ok: false,
-    phase: 'transport_refused',
-    bytes_sent: 0,
-    submit_verdict: 'composer_draft_present',
-  });
-  expect(scheduledMs()).toBeUndefined();
 });

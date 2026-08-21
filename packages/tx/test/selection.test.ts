@@ -27,7 +27,7 @@ test('selection commit is a sensitive typed txd request with no content output',
   expect(calls).toEqual([{
     method: 'POST',
     path: '/ctl/clipboard/selection',
-    body: { schema_version: 11, client_tty: '/dev/pts/7', content },
+    body: { schema_version: 12, client_tty: '/dev/pts/7', content },
     options: { sensitive: true, maxResponseBytes: 4096 },
   }]);
   expect(stdout.join('\n')).not.toContain(content);

@@ -1,3 +1,11 @@
+// The ONE comm frame template and its parser. comm() stages the frame and the
+// prompt hook reads it back; a second copy of either string would let the two
+// silently diverge and lose deliveries.
+//
+// The frame names its sender as persona AND canonical seat id. A persona alone
+// is not a key — several seats may wear one — so the seat id is the part a
+// reader can join back to the estate, and the compact token is the part txd
+// joins back to its own accepted message.
 export type CommFrameSource = {
   persona: string;
   seat_id: string;
@@ -23,8 +31,14 @@ export function commFrame(
   return `[tx comm from ${source.persona} at ${source.seat_id} #${commTokenForMessageId(messageId)}]\n${message}`;
 }
 
-// A single engine submission may flush several queued comms. Preserve their
-// order and collapse only exact repeats from the same submitted prompt.
+// Every comm frame the flush carried, not just the one that happened to land
+// first. A frame always begins its own line, so the line anchor still refuses
+// a token quoted mid-sentence; `m` lets it find the second and third frame of
+// a coalesced submission instead of stopping at character zero.
+//
+// Matching only the first frame cost real deliveries: on 2026-08-03, fourteen
+// comms across eight stamped workers arrived in a coalesced flush, were read by
+// their target, and were recorded by txd as never delivered.
 export function commFrameTokens(prompt: string | undefined): string[] {
   if (!prompt) return [];
   const seen = new Set<string>();
