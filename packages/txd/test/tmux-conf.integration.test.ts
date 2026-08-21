@@ -1,6 +1,7 @@
 // Loaded tmux selection configuration — behavioral-pin integration lane.
 
 import { afterAll, beforeAll, expect, test } from 'bun:test';
+import { RealTmux } from '../src/tmux.ts';
 
 const socket = `tx-conf-test-${process.pid}`;
 const conf = new URL('../tmux/tx.conf', import.meta.url).pathname;
@@ -45,6 +46,13 @@ test('the active table is exact, current-viewport, and release-persistent', () =
   tmux('send-keys', '-t', 'main:0.0', '-X', 'cancel');
 });
 
+test('prefix e is an idempotent focus action, not an inverted zoom toggle', () => {
+  const binding = new TextDecoder().decode(tmux('list-keys', '-T', 'prefix', 'e').stdout);
+  expect(binding).toContain('window_zoomed_flag');
+  expect(binding).toContain('resize-pane -Z');
+  expect(binding).toContain('==:#{window_zoomed_flag},0');
+});
+
 // The estate hooks only parse under the k12 socket guard, and a server boot
 // tolerates config errors that `source-file` refuses — so sourcing the conf
 // under the guard is the one load that proves every hook name is one the real
@@ -72,8 +80,30 @@ test.skipIf(!estateCapable)('the k12 estate branch loads through source-file wit
     const hooks = new TextDecoder().decode(estateTmux('show-hooks', '-g').stdout);
     expect(hooks).toMatch(/after-kill-pane\[\d+\][^\n]*pane-killed/);
     expect(hooks).toMatch(/window-unlinked\[\d+\][^\n]*pane-killed/);
+    // Command hooks are globally inspectable here; pane-died/pane-exited are
+    // separately pinned from the sourced file because tmux omits them from
+    // this show-hooks projection on supported 3.6 builds.
+    expect(hooks.match(/systemd-cat --identifier=txd-tmux-hook/g)).toHaveLength(2);
   } finally {
     estateTmux('kill-server');
+  }
+});
+
+test.skipIf(!estateCapable)('txd boot reinstalls lifecycle hooks on a persistent server that lost them', async () => {
+  const staleSocket = `tx-conf-stale-${process.pid}`;
+  const environment = { ...process.env };
+  delete environment.TMUX;
+  const staleTmux = (...args: string[]) => Bun.spawnSync(['tmux', '-L', staleSocket, ...args], { env: environment });
+  const started = staleTmux('-f', '/dev/null', 'new-session', '-d', '-s', 'main', '-x', '80', '-y', '12', 'sleep', '60');
+  if (started.exitCode !== 0) throw new Error(new TextDecoder().decode(started.stderr));
+  try {
+    await new RealTmux(staleSocket).ensureLifecycleHooks();
+    const paneDied = new TextDecoder().decode(staleTmux('show-hooks', '-g', 'pane-died').stdout);
+    const paneExited = new TextDecoder().decode(staleTmux('show-hooks', '-g', 'pane-exited').stdout);
+    expect(paneDied).toMatch(/pane-died\[\d+\][^\n]*tx estate event pane-died/);
+    expect(paneExited).toMatch(/pane-exited\[\d+\][^\n]*tx estate event pane-exited/);
+  } finally {
+    staleTmux('kill-server');
   }
 });
 

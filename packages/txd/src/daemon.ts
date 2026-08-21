@@ -5,7 +5,7 @@ import { describeEndpoint } from '@terminus-os/db';
 import { loadConfig } from './config.ts';
 import { PostgresEventStore } from './store.ts';
 import { RealTmux } from './tmux.ts';
-import { Daemon, type CommWatchArmInput } from './core.ts';
+import { CommGateTransportFailure, Daemon, type CommWatchArmInput } from './core.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
 import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
@@ -46,7 +46,7 @@ async function postLifecycledGate(
     const reason = error instanceof Error && error.name === 'TimeoutError'
       ? 'transport_ceiling_exceeded'
       : 'transport_failed';
-    throw new Error(`${refusalPrefix}_${reason}`);
+    throw new CommGateTransportFailure(`${refusalPrefix}_${reason}`);
   }
   if (response.ok) return;
   const refusal = await response.json().catch(() => null) as { error?: unknown } | null;
@@ -92,6 +92,7 @@ const physicalRegistration = cfg.physicalRegistration
       },
       agentWrapper: cfg.agentWrapper,
       perpetual: cfg.physicalRegistration.perpetual,
+      sshSeatTargets: cfg.sshSeatTargets,
       publish: makeJournalPublisher(journalConnection.sql, cfg.machine),
     }
   : null;

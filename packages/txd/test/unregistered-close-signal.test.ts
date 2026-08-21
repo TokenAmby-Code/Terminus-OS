@@ -33,6 +33,7 @@ function setup(options: { failPublish?: boolean } = {}) {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       if (options.failPublish && type === 'agent.unregistered_closed') {
         throw new Error('bus_publish_refused:503');

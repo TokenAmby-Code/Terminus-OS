@@ -6,8 +6,10 @@ import {
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import { resolveSshSeatTargets } from '../src/config.ts';
 import { EnvelopeInventoryError } from '../src/envelopes.ts';
 import { buildRoutes, deferredJson, makeServer } from '../src/server.ts';
+import { commFrame } from '../src/comm-frame.ts';
 
 function daemon() {
   return new Daemon(new MemoryEventStore(), new FakeTmux());
@@ -16,7 +18,7 @@ const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
 test('GET /tmux/read/estate serves the estate view including who is bound', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 11, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 12, identity: 'i1', persona: 'salamander', tint: '#302800' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`);
@@ -45,13 +47,48 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
   }
 });
 
+test('GET /tmux/read/diagnostics/hooks serves a bounded typed journal view', async () => {
+  const limits: number[] = [];
+  const srv = makeServer({
+    bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test',
+    hookDiagnostics: async (limit) => {
+      limits.push(limit);
+      return [{ recorded_at: '2026-08-17T17:00:00.000Z', priority: 3, message: 'Unable to connect' }];
+    },
+  });
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/diagnostics/hooks?limit=7`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      schema_version: SCHEMA_VERSION,
+      source: 'systemd-journal',
+      identifier: 'txd-tmux-hook',
+      diagnostics: [{ recorded_at: '2026-08-17T17:00:00.000Z', priority: 3, message: 'Unable to connect' }],
+    });
+    expect(limits).toEqual([7]);
+
+    expect((await fetch(`http://127.0.0.1:${srv.port}/tmux/read/diagnostics/hooks?limit=0`)).status).toBe(422);
+    expect(limits).toEqual([7]);
+  } finally {
+    srv.stop(true);
+  }
+});
+
 test('GET /tmux/read/zombies translates envelope inventory failures', async () => {
   const d = new Daemon(
     new MemoryEventStore(),
     new FakeTmux(),
     undefined,
     undefined,
-    null,
+    {
+      machine: 'k12-personal',
+      configuration: { generation: 'test', digest: 'c'.repeat(64) },
+      agentWrapper: '/fleet/agent-wrapper',
+      perpetual: {},
+      sshSeatTargets: resolveSshSeatTargets({ pages: { somnium: 'k12-work' }, seats: {} }),
+      publish: async () => {},
+    },
     async () => { throw new EnvelopeInventoryError('k12-work', 'ssh failed'); },
   );
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
@@ -323,7 +360,7 @@ test('POST /ctl/estate/rotate resets a page in-process instead of killing the es
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/rotate`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema_version: 11, force: true, scope: 'page', page: 'somnium' }),
+      body: JSON.stringify({ schema_version: 12, force: true, scope: 'page', page: 'somnium' }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ accepted: true, scope: 'page', seats: ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE'] });
@@ -372,7 +409,7 @@ test('POST /ingress/tmux repairs the lost canonical seat after a pane exits', as
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema_version: 11, event: 'pane-exited', page: 'palace' }),
+      body: JSON.stringify({ schema_version: 12, event: 'pane-exited', page: 'palace' }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, reconstructed: true, page: 'palace', reset_seats: ['palace:E'] });
@@ -389,7 +426,7 @@ test('POST /ingress/tmux accepts the page-less kill-time event and sweeps the es
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ schema_version: 11, event: 'pane-killed' }),
+      body: JSON.stringify({ schema_version: 12, event: 'pane-killed' }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ ok: true, page: null, reconstructed: true, reset_seats: ['somnium:SE'] });
@@ -419,13 +456,13 @@ const LEGACY = [
 
 test('adversarial: every legacy route is dead (404) — no shim, no alias', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 11, identity: 'i1', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: 12, identity: 'i1', persona: 'p', tint: '#1' });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
     for (const [method, path] of LEGACY) {
       const res = await fetch(`http://127.0.0.1:${srv.port}${encodeURI(path)}`, {
         method,
-        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 11 }) } : {}),
+        ...(method === 'POST' ? { body: JSON.stringify({ schema_version: 12 }) } : {}),
       });
       expect(res.status).toBe(404);
     }
@@ -438,8 +475,8 @@ test('UserPromptSubmit enters txd directly and asserts the correlated comm deliv
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux, undefined, undefined, null, null, async () => {});
-  await d.launch({ seat_id: 'council:custodes', schema_version: 11, identity: 'sender', persona: 'p', tint: '#1' });
-  await d.launch({ seat_id: 'palace:W', schema_version: 11, identity: 'target', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'council:custodes', schema_version: 12, identity: 'sender', persona: 'p', tint: '#1' });
+  await d.launch({ seat_id: 'palace:W', schema_version: 12, identity: 'target', persona: 'p', tint: '#1' });
   for (const identity of ['sender', 'target']) await store.append({
     entity_type: 'agent', entity_id: identity, event_type: 'reg.agent_registered',
     payload: { persona: 'p', rank: 'astartes', commander: null },
@@ -451,7 +488,7 @@ test('UserPromptSubmit enters txd directly and asserts the correlated comm deliv
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/user_prompt_submit`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-edge-proxy': 'hook-receipt-1' },
-      body: JSON.stringify({ agent_id: 'target', prompt: `[tx comm ${accepted.message_id} from sender]\nreceipt me` }),
+      body: JSON.stringify({ agent_id: 'target', prompt: commFrame(accepted.message_id, { persona: 'p', seat_id: 'council:custodes' }, 'receipt me') }),
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: true, asserted: [accepted.message_id] });

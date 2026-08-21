@@ -65,11 +65,16 @@ async function constructAt(width: number, height: number): Promise<Record<'palac
   const socket = `txd-geometry-${process.pid}-${width}x${height}`;
   sockets.push(socket);
   await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
-  await new RealTmux(socket).ensureEstate();
+  const control = new RealTmux(socket);
+  await control.ensureEstate();
 
   const result = {} as Record<'palace' | 'somnium' | 'council', Pane[]>;
   for (const window of ['palace', 'somnium', 'council'] as const) {
     await tmux(socket, 'resize-window', '-t', `main:${window}`, '-x', String(width), '-y', String(height));
+    // Rebuild Council at the projected terminal dimensions. tmux layout trees
+    // retain absolute split sizes across a detached resize; txd's owned
+    // default is the geometry it constructs at the real attached window size.
+    if (window === 'council') await control.rebuildPage(window);
     const rows = await tmux(
       socket, 'list-panes', '-t', `main:${window}`, '-F', '#{@canonical_id}\t#{pane_width}\t#{pane_height}\t#{pane_left}\t#{pane_top}',
     );
@@ -97,6 +102,20 @@ describe('disposable canonical estate geometry', () => {
       '4:palace_fleet',
       '5:somnium_fleet',
     ]);
+  });
+
+  test('council rebuild accepts its own construction at the live cockpit size', async () => {
+    // 106x79 is the size the k12-personal cockpit actually runs. At height 79
+    // the 67% column split resolves to 53/25, and an acceptance tolerance that
+    // does not share the constructor's arithmetic rejects the page txd itself
+    // just built — which on a boot recovery is a crash loop, not a red check.
+    const socket = `txd-council-cockpit-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '106', '-y', '79');
+    expect(await control.rebuildPage('council')).toBe(true);
   });
 
   test('every canonical pane owns its placement environment and txd restamps it on respawn', async () => {
@@ -138,7 +157,10 @@ describe('disposable canonical estate geometry', () => {
 
       for (const panes of Object.values(geometry)) {
         expect(Math.min(...panes.map(({ width: paneWidth }) => paneWidth))).toBeGreaterThanOrEqual(16);
-        expect(Math.min(...panes.map(({ height: paneHeight }) => paneHeight))).toBeGreaterThanOrEqual(9);
+        for (const pane of panes) {
+          const minimum = pane.seat === 'council:fabricator-general' || pane.seat === 'council:orchestrator' ? 6 : 9;
+          expect(pane.height).toBeGreaterThanOrEqual(minimum);
+        }
       }
 
       const palace = Object.fromEntries(geometry.palace.map((pane) => [pane.seat, pane]));
@@ -167,8 +189,11 @@ describe('disposable canonical estate geometry', () => {
       expect(council['council:orchestrator']!.top).toBeGreaterThan(0);
       for (const pane of geometry.council) {
         expectRatio(pane.width, width, 0.45, 0.52);
-        expectRatio(pane.height, height, 0.42, 0.52);
       }
+      expectRatio(council['council:custodes']!.height, height, 0.60, 0.70);
+      expectRatio(council['council:pax']!.height, height, 0.60, 0.70);
+      expectRatio(council['council:fabricator-general']!.height, height, 0.25, 0.36);
+      expectRatio(council['council:orchestrator']!.height, height, 0.25, 0.36);
     });
   }
 
@@ -219,33 +244,6 @@ describe('disposable canonical estate geometry', () => {
     for (const seat of Object.values(TXD_WINDOWS).flat().filter((seat) => !seat.startsWith('council:'))) {
       expect(after.get(seat)).toBe(before.get(seat));
     }
-  });
-
-  // A zoomed pane is the right process in the right place wearing the wrong
-  // geometry. Enforcement escalates: display-only drift is corrected in place,
-  // so an operator zoom can never cost the Council its running agents.
-  test('a zoomed Council is un-zoomed in place without replacing a single pane process', async () => {
-    const socket = `txd-geometry-zoom-drift-${process.pid}`;
-    sockets.push(socket);
-    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
-    const adapter = new RealTmux(socket);
-    await adapter.ensureEstate();
-    const before = new Map((await tmux(
-      socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
-    )).split('\n').map((row) => row.split('\t') as [string, string]));
-
-    await tmux(socket, 'resize-pane', '-Z', '-t', 'main:council.0');
-    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('1');
-    expect(await adapter.estateGeneration()).toBe('recoverable');
-
-    expect(await adapter.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
-    expect(await adapter.estateGeneration()).toBe('canonical');
-    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('0');
-
-    const after = new Map((await tmux(
-      socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
-    )).split('\n').map((row) => row.split('\t') as [string, string]));
-    for (const [seat, pid] of before) expect(after.get(seat)).toBe(pid);
   });
 
   // Enforcement that provably cannot converge still fails — once, and loud, and
@@ -390,10 +388,78 @@ describe('disposable canonical estate geometry', () => {
     );
     const panes = rows.split('\n').map((row) => row.split('\t'));
     expect(panes.map(([seat]) => seat).sort()).toEqual([...TXD_WINDOWS.council].sort());
-    for (const [, width, height] of panes) {
+    for (const [, width] of panes) {
       expectRatio(Number(width), 160, 0.45, 0.55);
-      expectRatio(Number(height), 48, 0.45, 0.55);
     }
+    const bySeat = new Map(panes.map(([seat, , height]) => [seat!, Number(height)]));
+    expectRatio(bySeat.get('council:custodes')!, 48, 0.60, 0.70);
+    expectRatio(bySeat.get('council:pax')!, 48, 0.60, 0.70);
+    expectRatio(bySeat.get('council:fabricator-general')!, 48, 0.25, 0.36);
+    expectRatio(bySeat.get('council:orchestrator')!, 48, 0.25, 0.36);
+  });
+
+  test('estate work leaves the operator zoom exactly where the operator put it', async () => {
+    // Expansion is the operator's, and the same invariant focus already holds
+    // (`focus-preservation.integration.test.ts`) applies to it: txd moves it on
+    // an explicit request and never as a side effect of tidying the estate.
+    //
+    // tmux reports a zoomed pane at the full window size and leaves its
+    // siblings on their real coordinates, so a page read through `pane_left`
+    // looks like a page whose panes disagree about their own window. Reading
+    // the estate that way made an operator's zoom indistinguishable from an
+    // estate coming apart, which is what drove the zoom-destroying repairs
+    // this pin now forbids.
+    const socket = `txd-zoom-canonical-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    const store = new (await import('../src/store.ts')).MemoryEventStore();
+    const daemon = new (await import('../src/core.ts')).Daemon(store, control);
+    await daemon.constructEstate();
+    expect(await control.estateGeneration()).toBe('canonical');
+
+    const zoomed = async (): Promise<string> =>
+      tmux(socket, 'display', '-p', '-t', 'main:=council', '#{window_zoomed_flag}');
+    const pids = async (): Promise<string> =>
+      tmux(socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}');
+
+    for (const seat of TXD_WINDOWS.council) {
+      await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, seat));
+      expect(await zoomed()).toBe('1');
+      const before = await pids();
+
+      // Neither the estate ensure that runs at every boot nor an explicit
+      // reconcile is a request to change what the operator is looking at.
+      expect(await control.estateGeneration()).toBe('canonical');
+      expect(await control.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
+      expect(await zoomed()).toBe('1');
+
+      await daemon.reconcile();
+      expect(await zoomed()).toBe('1');
+      expect(await control.estateGeneration()).toBe('canonical');
+      expect((await daemon.health('test', { version: 'test', git_sha: 'test', bun: Bun.version })).ok).toBe(true);
+      expect(await pids()).toBe(before);
+
+      await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, seat));
+    }
+    expect(await zoomed()).toBe('0');
+    expect(await control.estateGeneration()).toBe('canonical');
+  });
+
+  test('a genuinely diverged page is still refused while a page is zoomed', async () => {
+    // The zoom-independent read must not become blanket forgiveness: with a
+    // council pane zoomed, a seat killed out of another page is still the
+    // estate diverging and still has to be seen.
+    const socket = `txd-zoom-divergence-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+
+    await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, 'council:pax'));
+    await tmux(socket, 'kill-pane', '-t', await paneId(socket, 'palace:E'));
+
+    expect(await control.estateGeneration()).toBe('recoverable');
   });
 
   test('seat repair refuses when the page window itself is gone', async () => {

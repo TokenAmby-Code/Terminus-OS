@@ -20,7 +20,8 @@ import {
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
-import { SSH_SEAT_TARGETS, sshSeatTarget, TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
+import { TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
+import { resolveSshSeatTargets } from '../src/config.ts';
 import { envelopeSessionName } from '../src/envelopes.ts';
 
 const DISPATCH_ID = '9f1b1f6a-5d4e-4a0f-9a2b-6c3d4e5f6071';
@@ -30,12 +31,22 @@ const HOOK_REQUEST_ID = '5b7cf9a4-93b1-4c7f-9d9e-2f1a6b3c4d5e';
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
 const SSH_SEAT = 'somnium:W';
 const LOCAL_SEAT = 'palace:W';
+const SSH_SEAT_TARGETS = resolveSshSeatTargets({
+  pages: { somnium: 'k12-work', somnium_fleet: 'k12-work' },
+  seats: {
+    'council:pax': 'k12-work',
+    'council:orchestrator': 'k12-work',
+    'palace:S': 'wsl',
+  },
+});
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function setup(remoteSessions: Record<string, string[]> = {}) {
+// Boot stands the estate and asserts its occupancy census; every assertion
+// below is about what a PLACEMENT publishes, so the log starts after that.
+async function setup(remoteSessions: Record<string, string[]> = {}) {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
@@ -44,12 +55,15 @@ function setup(remoteSessions: Record<string, string[]> = {}) {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: SSH_SEAT_TARGETS,
     publish: async (type: string, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
   };
   const listEnvelopes = async (target: string): Promise<string[]> => remoteSessions[target] ?? [];
   const d = new Daemon(store, tmux, undefined, undefined, runtime as never, listEnvelopes);
+  await d.constructEstate();
+  published.length = 0;
   return { store, tmux, published, d };
 }
 
@@ -121,7 +135,7 @@ function declaration(seatId: string, paneGeneration: string, wrapperPid: number)
 
 // ── The estate declaration ───────────────────────────────────────────────────
 
-test('somnium and k12-work council seats are ssh seats targeting k12-work; every other seat is local', () => {
+test('config selects k12-work pages and council seats plus one exact WSL attended seat', () => {
   const remoteSeats: readonly string[] = [
     ...TXD_WINDOWS.somnium,
     ...TXD_WINDOWS.somnium_fleet,
@@ -129,20 +143,20 @@ test('somnium and k12-work council seats are ssh seats targeting k12-work; every
     'council:orchestrator',
   ];
   for (const seat of remoteSeats) {
-    expect(sshSeatTarget(seat)).toBe('k12-work');
+    expect(SSH_SEAT_TARGETS.targetFor(seat)).toBe('k12-work');
   }
   for (const seat of TXD_ESTATE) {
-    if (remoteSeats.includes(seat)) continue;
-    expect(sshSeatTarget(seat)).toBeUndefined();
+    if (remoteSeats.includes(seat) || seat === 'palace:S') continue;
+    expect(SSH_SEAT_TARGETS.targetFor(seat)).toBeUndefined();
   }
-  expect(Object.keys(SSH_SEAT_TARGETS).sort()).toEqual([...remoteSeats].sort());
+  expect(SSH_SEAT_TARGETS.targetFor('palace:S')).toBe('wsl');
+  expect(SSH_SEAT_TARGETS.targets).toEqual(['k12-work', 'wsl']);
 });
 
 // ── Launch composition ───────────────────────────────────────────────────────
 
 test('dispatch to an ssh seat composes identity, nonce, and target into the launch', async () => {
-  const { tmux, d, store } = setup();
-  await d.constructEstate();
+  const { tmux, d, store } = await setup();
   await d.dispatch(request({ kind: 'seat', seat_id: SSH_SEAT }));
   const launch = tmux.seatEngine(SSH_SEAT);
   expect(launch).toMatchObject({
@@ -165,8 +179,7 @@ test('dispatch to an ssh seat composes identity, nonce, and target into the laun
 });
 
 test('dispatch to a local seat composes identity and nonce with no ssh target', async () => {
-  const { tmux, d } = setup();
-  await d.constructEstate();
+  const { tmux, d } = await setup();
   await d.dispatch(request({ kind: 'seat', seat_id: LOCAL_SEAT }));
   const launch = tmux.seatEngine(LOCAL_SEAT);
   expect(launch!.agentId).toBe(AGENT_ID);
@@ -174,11 +187,25 @@ test('dispatch to a local seat composes identity and nonce with no ssh target', 
   expect(launch!.sshTarget).toBeUndefined();
 });
 
+test('dispatch to the configured attended WSL seat composes the shared wrapper with target wsl', async () => {
+  const { tmux, d, store } = await setup();
+  await d.dispatch(request({ kind: 'seat', seat_id: 'palace:S' }));
+
+  expect(tmux.seatEngine('palace:S')).toMatchObject({
+    seatId: 'palace:S',
+    engine: 'claude',
+    wrapper: '/fleet/agent-wrapper',
+    agentId: AGENT_ID,
+    sshTarget: 'wsl',
+  });
+  expect((await store.readAll()).find((event) => event.event_type === 'reg.launch_composed')?.payload)
+    .toMatchObject({ seat_id: 'palace:S', target_machine: 'wsl' });
+});
+
 // ── The placement adapter: pane attestation ─────────────────────────────────
 
 test('wrapper_start on a dispatched ssh seat attests kind ssh with the composed identity', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const { launchNonce } = await dispatchTo(d, tmux, SSH_SEAT);
   published.length = 0;
   const result = await wrapperStart(d, tmux, SSH_SEAT, 4101, sshHints(launchNonce));
@@ -190,8 +217,7 @@ test('wrapper_start on a dispatched ssh seat attests kind ssh with the composed 
 });
 
 test('wrapper_start on a dispatched local seat attests kind local with the composed identity', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   await dispatchTo(d, tmux, LOCAL_SEAT);
   published.length = 0;
   const result = await wrapperStart(d, tmux, LOCAL_SEAT, 4101, { kind: 'local' });
@@ -203,8 +229,7 @@ test('wrapper_start on a dispatched local seat attests kind local with the compo
 });
 
 test('wrapper_start with no launch composition attests a null identity', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const result = await wrapperStart(d, tmux, LOCAL_SEAT, 4101, { kind: 'local' });
   expect(result.attested).toBe(true);
   expect(published[0]).toMatchObject({
@@ -232,8 +257,7 @@ async function sshBirth(
 }
 
 test('Door 1 attests an ssh placement with transport witnesses', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const { facts, declare } = await sshBirth(d, tmux);
   published.length = 0;
   await declare();
@@ -252,8 +276,7 @@ test('Door 1 attests an ssh placement with transport witnesses', async () => {
 });
 
 test('Door 1 refuses a nonce that does not match the composed launch', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const { declare } = await sshBirth(d, tmux, { launch_nonce: crypto.randomUUID() });
   published.length = 0;
   await expect(declare()).rejects.toThrow('launch_nonce_contradicted');
@@ -264,8 +287,7 @@ test('Door 1 refuses a nonce that does not match the composed launch', async () 
 });
 
 test('Door 1 refuses a transport claim naming the wrong machine', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const { declare } = await sshBirth(d, tmux, { target_machine: 'wsl' });
   published.length = 0;
   await expect(declare()).rejects.toThrow('placement_machine_incoherent');
@@ -275,8 +297,7 @@ test('Door 1 refuses a transport claim naming the wrong machine', async () => {
 });
 
 test('Door 1 refuses a local claim on an ssh seat', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const { declare } = await sshBirth(d, tmux, null);
   published.length = 0;
   await expect(declare()).rejects.toThrow('placement_kind_incoherent');
@@ -286,8 +307,7 @@ test('Door 1 refuses a local claim on an ssh seat', async () => {
 });
 
 test('Door 1 refuses an ssh claim on a local seat', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const facts = await dispatchTo(d, tmux, LOCAL_SEAT);
   await wrapperStart(d, tmux, LOCAL_SEAT, 4101, sshHints(facts.launchNonce));
   published.length = 0;
@@ -297,8 +317,7 @@ test('Door 1 refuses an ssh claim on a local seat', async () => {
 });
 
 test('a local birth with a local claim still attests kind local end to end', async () => {
-  const { tmux, d, published } = setup();
-  await d.constructEstate();
+  const { tmux, d, published } = await setup();
   const facts = await dispatchTo(d, tmux, LOCAL_SEAT);
   await wrapperStart(d, tmux, LOCAL_SEAT, 4101, { kind: 'local' });
   published.length = 0;
@@ -348,8 +367,7 @@ function registeredAgent(
 }
 
 test('a registered ssh agent carrying the seat target machine activates', async () => {
-  const { tmux, d, store } = setup();
-  await d.constructEstate();
+  const { tmux, d, store } = await setup();
   const { facts, declare } = await sshBirth(d, tmux);
   await declare();
   await d.activateRegisteredAgent(registeredAgent(SSH_SEAT, facts.paneGeneration, { kind: 'ssh', machine: 'k12-work' }));
@@ -358,8 +376,7 @@ test('a registered ssh agent carrying the seat target machine activates', async 
 });
 
 test('a registered agent claiming kind local on an ssh seat is a physical conflict', async () => {
-  const { tmux, d } = setup();
-  await d.constructEstate();
+  const { tmux, d } = await setup();
   const { facts, declare } = await sshBirth(d, tmux);
   await declare();
   await expect(
@@ -368,8 +385,7 @@ test('a registered agent claiming kind local on an ssh seat is a physical confli
 });
 
 test('a registered agent claiming kind ssh on a local seat is a physical conflict', async () => {
-  const { tmux, d } = setup();
-  await d.constructEstate();
+  const { tmux, d } = await setup();
   const facts = await dispatchTo(d, tmux, LOCAL_SEAT);
   await wrapperStart(d, tmux, LOCAL_SEAT, 4101, { kind: 'local' });
   await d.recordPhysicalDeclaration(declaration(LOCAL_SEAT, facts.paneGeneration, 4101));
@@ -388,10 +404,18 @@ test('the zombie report lists remote envelopes with no live binding and ignores 
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: SSH_SEAT_TARGETS,
     publish: async () => {},
   };
   let remote: string[] = [];
-  const d = new Daemon(store, tmux, undefined, undefined, runtime as never, async () => remote);
+  const d = new Daemon(
+    store,
+    tmux,
+    undefined,
+    undefined,
+    runtime as never,
+    async (target) => target === 'k12-work' ? remote : [],
+  );
   await d.constructEstate();
   const facts = await dispatchTo(d, tmux, SSH_SEAT);
   await wrapperStart(d, tmux, SSH_SEAT, 4101, sshHints(facts.launchNonce));

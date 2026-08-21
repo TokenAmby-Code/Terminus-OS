@@ -22,8 +22,9 @@ contracts source, and the public route shape.
   tmux session (`main`) at boot: flat `mechanicus`, compass `palace`
   (W/N/S/E), remote compass `somnium` (W/N/S/NE/SE), one four-pane `council`
   window, and flat overflow pages `palace_fleet` and `somnium_fleet`. Council is an
-  explicit 2×2 grid: Custodes NW, Fabricator-General SW, Pax NE, and
-  Orchestrator SE. Every pane is resolved only through `@canonical_id`.
+  explicit weighted 2×2 grid: Custodes NW and Pax NE receive roughly two thirds
+  of the vertical room; Fabricator-General SW and Orchestrator SE share the
+  remaining third. Every pane is resolved only through `@canonical_id`.
   Construction is idempotent. Mitosis worker panes retain flexible native
   tiled geometry; arbitrary or foreign pages are refused before mutation.
   txd is the constructor; tx never constructs.
@@ -70,13 +71,14 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat executes in its idle pane shell and returns captured stdout/stderr + exit code |
 | POST   | `/ingress/lifecycle`    | lifecycled typed lifecycle-fact door: consumes `wrapper_started`; 422 only for envelope skew, acks everything else so the lane never wedges |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
+| GET    | `/tmux/read/diagnostics/hooks` | Bounded typed view of tmux-hook records captured in journald |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
 - `tx estate abandon <seat>...` is the repair leg for a reconcile-proven
   phantom. The batch is atomic and overseer-gated; every target must be
   noncanonical, projected unbound, absent from tmux, and carry an open
-  `pane_absent` contradiction naming `seat_decommissioned`. Canonical seats
+  `pane_absent` contradiction naming `seat_abandoned`. Canonical seats
   remain reconstruction work and a live or merely unobserved target refuses.
 - After `/agents/comm` stages the bytes, `tx comm` waits on
   `act.comm_delivery_asserted` for at most 30 seconds. An on-time receiving
@@ -97,10 +99,10 @@ each route is the ruled daemon behavior, unchanged.
 - `tx run <target> <command>` branches on txd's event-sourced agent-presence
   truth, never a process sniff. A target resolving to a REGISTERED binding is
   an agent pane: txd stages the engine's shell escape (Claude enters bash mode
-  with a literal `!` keystroke on a verified-empty composer, then pastes and
-  verifies the command; Codex takes the whole `!<command>` line through the
-  verified send path), so the command's output lands in that agent's
-  conversation, and the injection is recorded as `act.agent_input_injected`
+  with a literal `!` keystroke, then pastes the command and drives Enter;
+  Codex takes the whole `!<command>` line through the verified send path), so
+  the command's output lands in that agent's conversation, and the injection
+  is recorded as `act.agent_input_injected`
   (`input_class: harness_shell`). A bare declared seat executes the command in
   its idle pane shell: the command bytes live in a script file, the one staged
   line carries only fixed paths, and completion is the pane's own
@@ -110,20 +112,31 @@ each route is the ruled daemon behavior, unchanged.
   truncation reported). Refusals are loud and typed: `identity_absent`,
   `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
   `seat_binding_pending`, `scoped_reset_pending`, `pane_dead`,
-  `seat_decommissioned`, `engine_unattested`, `stage_failed`,
+  `seat_abandoned`, `engine_unattested`, `stage_failed`,
   `run_not_staged`, and a mid-run pane replacement fails the run with
   `pane_lost_mid_run` instead of hanging on a dead signal.
 - Ordinary comm payloads are opaque and have no caller-visible length mode or
   size ceiling. Txd loads every verified text segment into a private,
-  one-use tmux buffer over stdin and injects it as one bracketed paste before
-  exact composer verification and Enter. Callers never split, spill, encode,
-  or select a transport; a buffer/paste failure refuses loudly without
-  submitting a prefix. Pre-input readiness has three observed states: an
-  `empty_ready` composer may be staged, `draft_present` refuses with
-  `composer_draft_present`, and an indeterminate paint refuses with
-  `composer_unreadable`. `composer_corrupted` is reserved for an observed
-  mismatch after staging or exact redrive verification; a parse failure alone
-  never mints corruption.
+  one-use tmux buffer over stdin. An ordinary message injects as one bracketed
+  paste followed by Enter; a command or skill send is a sequence — paste the
+  prefix, send Tab, paste the suffix, then Enter — so a submission is not
+  always a single paste. Existing visible paint never gates a comm. Callers
+  never split, spill, encode, or select a transport. A failed transport or
+  submit records its possible-effect byte count but remains permanently
+  undelivered.
+- Delivery requires the exact target's `staged` transport fact joined with an
+  engine attestation. An idle engine attests through its exact
+  `UserPromptSubmit` message id. A WORKING engine queues a mid-turn frame into
+  the running turn and fires no `UserPromptSubmit` for it; there the target's
+  own fresh turn stop is the attestation, joined with one composer-at-rest
+  capture taken at that stop proving the exact frame no longer sits in the
+  visible composer — it left it into the queue the finished turn consumed.
+  The capture happens at the stop because the engine is at rest there; a
+  send-time capture races the busy engine's repaint and proves nothing. A
+  still-painted frame, an invisible composer, a stop alone, or a frame staged
+  without observed working turn state never asserts; a later fresh stop
+  retries with fresh evidence. Bytes, process success, and an `ok: true`
+  envelope are never delivery assertions.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an
@@ -176,6 +189,7 @@ Env/config-driven — no hardcoded machine values. A JSON file pointed at by
 | `db`                  | `TXD_DB_SOCKET_DIR` / `TXD_DB_DATABASE` | socket `/var/run/postgresql`, db `terminus`|
 | `tmuxSocket`          | `TXD_TMUX_SOCKET`                  | `k12`                                      |
 | `agentWrapper`        | `TXD_AGENT_WRAPPER`                | **none — fail loud**                       |
+| `sshSeatTargets`      | `TXD_SSH_SEAT_TARGETS`             | current k12-work page/overseer placement   |
 | `personaWorkspaceRoot`| `TXD_PERSONA_WORKSPACE_ROOT`       | **none — fail loud**                       |
 
 `machine` has **no default**: a daemon that guesses its own box identity is a
@@ -184,6 +198,13 @@ bug, so config load fails loud when it is unset.
 `db` is a `@terminus-os/db` endpoint object (strict-validated — unknown fields
 refuse loud). On fleet boxes it is the sanctioned shape: the native PostgreSQL
 18 cluster's peer-auth unix socket — no password field exists.
+
+`sshSeatTargets` has disjoint `pages` and `seats` maps. A page selector covers
+every canonical seat on that page, including later dynamic stack seats; a seat
+selector names one existing static estate seat. Unknown selectors, exact stack
+selectors, and page/seat overlap refuse at config load. The selected value is
+the SSH machine alias stamped into the shared agent wrapper as
+`TXD_SSH_TARGET`; no target gets a second wrapper implementation.
 
 ## Persistence — PostgreSQL 18
 
@@ -234,7 +255,18 @@ cat > ~/secrets/txd/txd.json <<'EOF'
     "database": "terminus",
     "application_name": "txd"
   },
-  "tmuxSocket": "k12"
+  "tmuxSocket": "k12",
+  "sshSeatTargets": {
+    "pages": {
+      "somnium": "k12-work",
+      "somnium_fleet": "k12-work"
+    },
+    "seats": {
+      "council:pax": "k12-work",
+      "council:orchestrator": "k12-work",
+      "palace:S": "wsl"
+    }
+  }
 }
 EOF
 systemctl --user restart txd

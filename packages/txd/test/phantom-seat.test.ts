@@ -13,7 +13,7 @@ import { bindOverseerSource, closeRequest, OVERSEER_SOURCE } from './close-fixtu
 // facts whose panes are gone.
 //
 // The mechanism is that `paneBySeat` is only ever removed from by
-// `reg.seat_decommissioned`. `reg.seat_cleared` clears the binding and leaves
+// `reg.seat_abandoned`. `reg.seat_cleared` clears the binding and leaves
 // the pane axis untouched by design, and `reg.process_reaped` deliberately has
 // no pane effect at all — so a seat that was reaped and cleared, or that was
 // simply dropped from the TXD_ESTATE declaration, stays 'live' in the fold
@@ -29,7 +29,7 @@ import { bindOverseerSource, closeRequest, OVERSEER_SOURCE } from './close-fixtu
 //
 // Refusing rather than merely reporting is deliberate. An estate read inflated
 // with seats that do not exist is not a healthy estate, and the contradiction
-// is closable: `reg.seat_decommissioned` both closes the flag and removes the
+// is closable: `reg.seat_abandoned` both closes the flag and removes the
 // row, so the flag names an action the operator can actually take.
 
 function setup() {
@@ -43,7 +43,7 @@ function setup() {
 test('a cleared seat whose pane is gone is flagged as a phantom', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 11, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 12, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -57,18 +57,18 @@ test('a cleared seat whose pane is gone is flagged as a phantom', async () => {
   expect(flagged).toBeDefined();
   expect(flagged!.kind).toBe('pane_absent');
   // Names the attestation that would actually resolve it.
-  expect(flagged!.missing_attestation).toBe('seat_decommissioned');
+  expect(flagged!.missing_attestation).toBe('seat_abandoned');
 
   // A flag is written; no lifecycle event is synthesized on the seat's behalf.
   const types = (await store.readByEntity('proof:bus')).map((e) => e.event_type);
   expect(types).toContain('reg.contradiction_flagged');
-  expect(types).not.toContain('reg.seat_decommissioned');
+  expect(types).not.toContain('reg.seat_abandoned');
   expect(types).not.toContain('reg.teardown_started');
 });
 
 // The palace:civic / palace:token-os shape: a seat the estate
-// declaration once stood and later dropped, with no decommission ever written.
-test('a seat dropped from the declaration without a decommission is flagged', async () => {
+// declaration once stood and later dropped, with no abandon ever written.
+test('a seat dropped from the declaration without a abandon is flagged', async () => {
   const { store, d } = setup();
   await store.append({
     entity_type: 'seat',
@@ -95,7 +95,7 @@ test('a seat dropped from the declaration without a decommission is flagged', as
 test('a phantom is exactly a row with no tint-readiness counterpart', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 11, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 12, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -132,7 +132,7 @@ test('a fully-attested estate flags no phantom', async () => {
 test('an observable dead pane is not reported as absent', async () => {
   const { tmux, d } = setup();
   await d.launch({
-    seat_id: 'palace:W', schema_version: 11, identity: 'i-1', persona: 'salamander', tint: '#302800',
+    seat_id: 'palace:W', schema_version: 12, identity: 'i-1', persona: 'salamander', tint: '#302800',
   });
   tmux.killOutOfBand('palace:W');
 
@@ -147,7 +147,7 @@ test('an observable dead pane is not reported as absent', async () => {
 test('a phantom is not double-flagged across reconcile passes', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 11, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 12, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -161,10 +161,10 @@ test('a phantom is not double-flagged across reconcile passes', async () => {
   expect(second.p0).toBe(true);
 });
 
-test('an overseer can attest exact flagged phantoms decommissioned and restore honest health', async () => {
+test('an overseer can attest exact flagged phantoms abandoned and restore honest health', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 11, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 12, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -172,7 +172,7 @@ test('an overseer can attest exact flagged phantoms decommissioned and restore h
   expect((await d.reconcile()).p0).toBe(true);
 
   const result = await d.abandonSeats({
-    schema_version: 11,
+    schema_version: 12,
     source_agent_id: OVERSEER_SOURCE,
     seats: ['proof:bus'],
   });
@@ -180,17 +180,17 @@ test('an overseer can attest exact flagged phantoms decommissioned and restore h
   expect(result).toEqual({ ok: true, abandoned: ['proof:bus'], reason: null });
   expect((await d.reconcile()).p0).toBe(false);
   expect((await d.estateRows()).some((row) => row.seat_id === 'proof:bus')).toBe(false);
-  expect((await store.readByEntity('proof:bus')).filter((event) => event.event_type === 'reg.seat_decommissioned'))
+  expect((await store.readByEntity('proof:bus')).filter((event) => event.event_type === 'reg.seat_abandoned'))
     .toHaveLength(1);
 });
 
 test('phantom abandonment is atomic and refuses a seat without exact absence evidence', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:gone', schema_version: 11, identity: 'gone', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:gone', schema_version: 12, identity: 'gone', persona: 'astartes', tint: '#101010',
   });
   await d.launch({
-    seat_id: 'proof:present', schema_version: 11, identity: 'present', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:present', schema_version: 12, identity: 'present', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:gone', 'proof:present']));
@@ -198,27 +198,27 @@ test('phantom abandonment is atomic and refuses a seat without exact absence evi
   await d.reconcile();
 
   const result = await d.abandonSeats({
-    schema_version: 11,
+    schema_version: 12,
     source_agent_id: OVERSEER_SOURCE,
     seats: ['proof:gone', 'proof:present'],
   });
 
   expect(result).toEqual({ ok: false, abandoned: [], reason: 'seat_still_observed: proof:present' });
-  expect((await store.readByEntity('proof:gone')).some((event) => event.event_type === 'reg.seat_decommissioned'))
+  expect((await store.readByEntity('proof:gone')).some((event) => event.event_type === 'reg.seat_abandoned'))
     .toBe(false);
 });
 
 test('phantom abandonment refuses a registered non-overseer without changing the seat', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:gone', schema_version: 11, identity: 'gone', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:gone', schema_version: 12, identity: 'gone', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:gone']));
   tmux.deleteOutOfBand('proof:gone');
   await d.reconcile();
   await d.launch({
-    seat_id: 'palace:W', schema_version: 11, identity: 'worker-source', persona: 'astartes', rank: 'astartes', tint: '#202020',
+    seat_id: 'palace:W', schema_version: 12, identity: 'worker-source', persona: 'astartes', rank: 'astartes', tint: '#202020',
   });
   await store.append({
     entity_type: 'agent', entity_id: 'worker-source', event_type: 'reg.agent_registered',
@@ -228,7 +228,7 @@ test('phantom abandonment refuses a registered non-overseer without changing the
   });
 
   const result = await d.abandonSeats({
-    schema_version: 11,
+    schema_version: 12,
     source_agent_id: 'worker-source',
     seats: ['proof:gone'],
   });
@@ -236,6 +236,6 @@ test('phantom abandonment refuses a registered non-overseer without changing the
   expect(result).toEqual({
     ok: false, abandoned: [], reason: 'not_authorized: estate abandon requires rank overseer',
   });
-  expect((await store.readByEntity('proof:gone')).some((event) => event.event_type === 'reg.seat_decommissioned'))
+  expect((await store.readByEntity('proof:gone')).some((event) => event.event_type === 'reg.seat_abandoned'))
     .toBe(false);
 });

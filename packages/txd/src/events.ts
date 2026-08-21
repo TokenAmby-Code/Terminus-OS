@@ -10,6 +10,7 @@ export type TxdPublishedEventType =
   | 'agent.placement_attested'
   | 'agent.placement_refused'
   | 'agent.perpetual_seat_vacant'
+  | 'agent.estate_occupancy_census'
   | 'agent.retired'
   | 'agent.unregistered_closed'
   | 'agent.composer_interactive';
@@ -22,6 +23,9 @@ function eventIdentity(eventType: TxdPublishedEventType, payload: Record<string,
     ?? payload.observed_at
     ?? payload.retired_at
     ?? payload.closed_at
+    // The census is the estate speaking at one instant; the instant is the
+    // occurrence, so re-asserting the same fold is the same event.
+    ?? payload.taken_at
     // A vacancy is an observation that may recur after a later occupant leaves;
     // it has no producer-owned occurrence id, so each observation is distinct.
     ?? randomUUID();
@@ -41,7 +45,7 @@ function eventId(key: string): string {
 }
 
 function occurredAt(payload: Record<string, unknown>): string {
-  for (const field of ['observed_at', 'retired_at', 'closed_at']) {
+  for (const field of ['observed_at', 'retired_at', 'closed_at', 'taken_at']) {
     if (typeof payload[field] === 'string') return payload[field];
   }
   return new Date().toISOString();
