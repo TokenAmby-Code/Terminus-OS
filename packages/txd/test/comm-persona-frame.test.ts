@@ -152,6 +152,37 @@ test('the receiving join redeems a token only for its exact snapshotted receiver
   })).resolves.toMatchObject({ asserted: [accepted.message_id] });
 });
 
+test('a receiver the target snapshot does not carry redeems nothing, even when the accepted fact names it', async () => {
+  const { d, store } = await fixture();
+  const messageId = crypto.randomUUID();
+  const provenance = { source: 'observer' as const, transport_receipt: null, emitter_version: SCHEMA_VERSION };
+  await store.append({
+    entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted',
+    payload: {
+      source_agent_id: 'sender-id', source: { persona: 'custodes', seat_id: 'council:custodes' },
+      target_agent_ids: ['worker-id'],
+      targets: [{ agent_id: 'worker-id', seat_id: 'palace:W', persona: 'white-scars' }],
+      ask_id: null, reply_to_ask_id: null, kind: 'message', name: null, rendered_frame: null,
+      message: 'contract disagreement',
+    }, provenance, occurred_at: '2026-08-21T00:00:00.000Z',
+  });
+  await store.append({
+    entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_target_snapshotted',
+    payload: { message_id: messageId, targets: [] }, provenance, occurred_at: '2026-08-21T00:00:00.000Z',
+  });
+  await store.append({
+    entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
+    payload: { target_agent_id: 'worker-id', seat_id: 'palace:W', bytes: 1, submit_verdict: 'staged', target_turn: 'awaiting_input', kind: 'message', name: null, rendered_frame: 'x' }, provenance, occurred_at: '2026-08-21T00:00:00.000Z',
+  });
+
+  await expect(d.promptSubmitted({
+    schema_version: SCHEMA_VERSION,
+    agent_id: 'worker-id',
+    comm_tokens: [commTokenForMessageId(messageId)],
+  })).rejects.toThrow('message_target_mismatch');
+  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted')).toEqual([]);
+});
+
 test('concurrent comms receive distinct tokens and one coalesced hook asserts both exactly once', async () => {
   const { d } = await fixture();
   const results = await Promise.all(['one', 'two'].map((message) => d.comm({
