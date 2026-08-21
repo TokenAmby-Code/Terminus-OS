@@ -1769,6 +1769,19 @@ export class RealTmux implements TmuxControlPlane {
       return Number(collapsedPaste[1]) === [...expectedFrame].length ? 'intact' : 'corrupted';
     }
 
+    // Claude collapses a bracketed multiline paste to a numbered native
+    // receipt. The ordinal identifies Claude's paste attachment, while the
+    // `+N lines` count is the exact number of newlines accepted from the
+    // already-attested tmux buffer. Accept only the whole, otherwise-empty
+    // composer receipt with the expected line shape. A receipt embedded in a
+    // draft, or one for a differently shaped paste, is corruption.
+    const claudeCollapsedPaste = visibleRegion
+      .match(/^\[Pastedtext#\d+\+(\d+)lines\]$/);
+    if (claudeCollapsedPaste) {
+      const expectedNewlines = expectedFrame.match(/\n/g)?.length ?? 0;
+      return Number(claudeCollapsedPaste[1]) === expectedNewlines ? 'intact' : 'corrupted';
+    }
+
     if (visibleRegion === expected) return 'intact';
     const minimumProofLength = 32;
     if (visibleRegion.length >= minimumProofLength && expected.endsWith(visibleRegion)) return 'intact';
