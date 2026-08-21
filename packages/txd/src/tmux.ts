@@ -931,7 +931,12 @@ export class RealTmux implements TmuxControlPlane {
         && se.left === ne.left && se.top === ne.top + ne.height + 1
         && nw.width === sw.width && ne.width === se.width
         && nw.height === ne.height && sw.height === se.height
-        && Math.abs(nw.height - (2 * sw.height)) <= 2
+        // The column splits at the fraction REPAIR_SPLITS declares for the top
+        // seat (67%). tmux resolves that percentage of the whole column height
+        // (both panes plus their shared border) to an integer pane height, and
+        // rounding direction is tmux's, not ours — so acceptance recomputes the
+        // same fraction of the same column and allows the one row of rounding.
+        && Math.abs(nw.height - 0.67 * (nw.height + sw.height + 1)) <= 1
         && ne.left + ne.width === nw.windowWidth
         && sw.top + sw.height === nw.windowHeight
         && se.top + se.height === nw.windowHeight;
