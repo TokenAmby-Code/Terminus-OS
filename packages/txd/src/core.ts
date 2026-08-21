@@ -93,6 +93,7 @@ import {
   type TxdPage,
   type TxdStackPage,
 } from './estate.ts';
+import { acceptCommIdentity } from './comm-identity.ts';
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
@@ -1366,7 +1367,12 @@ export class Daemon {
       if (!proj.currentBindings.some((b) =>
         b.registered && b.agent_id === req.source_agent_id)) throw new Error('source_not_registered');
       const events = await this.store.readAll();
-      let targetIdentity = req.target === '--self' ? req.source_agent_id : req.target;
+      // The funnel mouth. A caller-supplied identity is softened to its
+      // canonical form exactly once, here; `--self` and `--reply` name an
+      // agent id txd itself recorded, which is canonical already.
+      let targetIdentity = req.target === '--self'
+        ? req.source_agent_id
+        : req.target === undefined ? undefined : acceptCommIdentity(req.target);
       let replyingToAsk: string | null = null;
       if (req.reply) {
         const inbound = [...events].reverse().find((e) => e.event_type === 'reg.comm_accepted'
