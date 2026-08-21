@@ -14,7 +14,8 @@
 //   RestartSec (Defect B). The guard path must match the TXD_CONFIG env line.
 // - tx-estate.service supervises the foreground server outside txd's
 //   NoNewPrivileges sandbox. A lost server deactivates txd; the recovered
-//   owner upholds txd so its boot constructor rebuilds from event truth.
+//   owner activation starts txd so its boot constructor rebuilds from event
+//   truth, without periodically reasserting an unchanged deterministic fault.
 // - No PrivateTmp: documented pin (txd-extraction-spec §3.3) — tmux children
 //   and test fixtures deliberately share the real /tmp namespace.
 
@@ -106,7 +107,8 @@ describe('systemd/tx-estate.service boundary', () => {
     expect(tmuxLines).toContain('ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server');
     expect(tmuxLines).toContain('Restart=always');
     expect(tmuxLines).toContain('RestartSec=2');
-    expect(tmuxLines).toContain('Upholds=txd.service');
+    expect(tmuxLines).toContain('Wants=txd.service');
+    expect(tmuxLines).not.toContain('Upholds=txd.service');
     expect(tmuxLines).not.toContain('RemainAfterExit=yes');
   });
 

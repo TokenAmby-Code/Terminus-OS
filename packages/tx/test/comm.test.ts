@@ -147,3 +147,41 @@ test('behavioral pin: a typed comm transport refusal is printed and exits non-ze
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }
 });
+
+test('behavioral pin: comm admission refusal exits non-zero without requesting a receipt', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const stdout: string[] = [];
+  const calls: string[] = [];
+  const deps: CliDependencies = {
+    request: async (_method, path) => {
+      calls.push(path);
+      return { ok: false, error: 'Unable to connect', bytes_sent: 0 };
+    },
+    stdout: (line) => stdout.push(line),
+    stderr: () => {},
+  };
+  try {
+    expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(1);
+    expect(calls).toEqual(['/agents/comm']);
+    expect(JSON.parse(stdout[0]!)).toEqual({ ok: false, error: 'Unable to connect', bytes_sent: 0 });
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('behavioral pin: an unreachable txd makes comm exit non-zero', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const errors: string[] = [];
+  try {
+    expect(await runCli(['comm', 'target', 'hello'], {
+      request: async () => { throw new Error('Unable to connect'); },
+      stdout: () => {},
+      stderr: (line) => errors.push(line),
+    })).toBe(1);
+    expect(errors).toEqual(['tx: Unable to connect']);
+  } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});

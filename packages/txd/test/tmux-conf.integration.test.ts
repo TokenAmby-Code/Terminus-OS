@@ -46,6 +46,13 @@ test('the active table is exact, current-viewport, and release-persistent', () =
   tmux('send-keys', '-t', 'main:0.0', '-X', 'cancel');
 });
 
+test('prefix e is an idempotent focus action, not an inverted zoom toggle', () => {
+  const binding = new TextDecoder().decode(tmux('list-keys', '-T', 'prefix', 'e').stdout);
+  expect(binding).toContain('window_zoomed_flag');
+  expect(binding).toContain('resize-pane -Z');
+  expect(binding).toContain('==:#{window_zoomed_flag},0');
+});
+
 // The estate hooks only parse under the k12 socket guard, and a server boot
 // tolerates config errors that `source-file` refuses — so sourcing the conf
 // under the guard is the one load that proves every hook name is one the real
@@ -73,6 +80,10 @@ test.skipIf(!estateCapable)('the k12 estate branch loads through source-file wit
     const hooks = new TextDecoder().decode(estateTmux('show-hooks', '-g').stdout);
     expect(hooks).toMatch(/after-kill-pane\[\d+\][^\n]*pane-killed/);
     expect(hooks).toMatch(/window-unlinked\[\d+\][^\n]*pane-killed/);
+    // Command hooks are globally inspectable here; pane-died/pane-exited are
+    // separately pinned from the sourced file because tmux omits them from
+    // this show-hooks projection on supported 3.6 builds.
+    expect(hooks.match(/systemd-cat --identifier=txd-tmux-hook/g)).toHaveLength(2);
   } finally {
     estateTmux('kill-server');
   }

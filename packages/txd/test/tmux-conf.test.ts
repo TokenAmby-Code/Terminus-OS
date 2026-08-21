@@ -16,10 +16,11 @@ describe('tmux/tx.conf', () => {
     expect(conf).toContain('bind r source-file ~/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf');
   });
 
-  test('contains native pane navigation and expansion', () => {
+  test('contains idempotent pane focus and native pane navigation', () => {
     const paneUx = conf.slice(conf.indexOf('# Pane navigation and expansion.'), conf.indexOf('bind -r H'));
 
-    expect(paneUx).toContain('bind e resize-pane -Z');
+    expect(paneUx).toContain("bind e if -F '#{==:#{window_zoomed_flag},0}' 'resize-pane -Z'");
+    expect(paneUx).not.toContain('bind e resize-pane -Z');
     for (const [key, direction] of [['h', 'L'], ['j', 'D'], ['k', 'U'], ['l', 'R']]) {
       expect(paneUx).toContain(`bind ${key} {`);
       expect(paneUx).toContain(`select-pane -${direction}`);
@@ -128,6 +129,15 @@ describe('tmux/tx.conf', () => {
     expect(conf).toContain('set-hook -g pane-exited');
     expect(conf).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page');
     expect(conf).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page');
+    const lifecycleHooks = conf.split('\n').filter((line) =>
+      line.startsWith('set-hook -g ') && line.includes('tx estate event'),
+    );
+    expect(lifecycleHooks).toHaveLength(4);
+    for (const hook of lifecycleHooks) {
+      expect(hook).toContain('systemd-cat --identifier=txd-tmux-hook');
+      expect(hook).toContain('2>&1');
+      expect(hook).toMatch(/\| systemd-cat .* \|\| true"'$/);
+    }
   });
 
   test('observes kill commands the pane hooks never see and forwards them page-less', () => {

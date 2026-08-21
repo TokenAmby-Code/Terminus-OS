@@ -667,6 +667,20 @@ export const TmuxLifecycleEventResponseSchema = z.object({
 });
 export type TmuxLifecycleEventResponse = z.infer<typeof TmuxLifecycleEventResponseSchema>;
 
+export const HookDiagnosticSchema = z.object({
+  recorded_at: z.string(),
+  priority: z.number().int().min(0).max(7),
+  message: z.string(),
+});
+export const HookDiagnosticsResponseSchema = z.object({
+  ok: z.literal(true),
+  schema_version: z.number().int(),
+  source: z.literal('systemd-journal'),
+  identifier: z.literal('txd-tmux-hook'),
+  diagnostics: z.array(HookDiagnosticSchema),
+});
+export type HookDiagnostic = z.infer<typeof HookDiagnosticSchema>;
+
 // Communications are admitted as one atomic request. A caller either supplies
 // opaque message bytes OR one engine-neutral surface intent. Syntax rendering
 // belongs to txd after it resolves the target binding's engine.

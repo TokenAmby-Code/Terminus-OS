@@ -22,8 +22,9 @@ contracts source, and the public route shape.
   tmux session (`main`) at boot: flat `mechanicus`, compass `palace`
   (W/N/S/E), remote compass `somnium` (W/N/S/NE/SE), one four-pane `council`
   window, and flat overflow pages `palace_fleet` and `somnium_fleet`. Council is an
-  explicit 2×2 grid: Custodes NW, Fabricator-General SW, Pax NE, and
-  Orchestrator SE. Every pane is resolved only through `@canonical_id`.
+  explicit weighted 2×2 grid: Custodes NW and Pax NE receive roughly two thirds
+  of the vertical room; Fabricator-General SW and Orchestrator SE share the
+  remaining third. Every pane is resolved only through `@canonical_id`.
   Construction is idempotent. Mitosis worker panes retain flexible native
   tiled geometry; arbitrary or foreign pages are refused before mutation.
   txd is the constructor; tx never constructs.
@@ -70,6 +71,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat executes in its idle pane shell and returns captured stdout/stderr + exit code |
 | POST   | `/ingress/lifecycle`    | lifecycled typed lifecycle-fact door: consumes `wrapper_started`; 422 only for envelope skew, acks everything else so the lane never wedges |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
+| GET    | `/tmux/read/diagnostics/hooks` | Bounded typed view of tmux-hook records captured in journald |
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
