@@ -94,6 +94,7 @@ import {
   type TxdStackPage,
 } from './estate.ts';
 import { acceptCommIdentity, sameIdentity } from './comm-identity.ts';
+import { commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
@@ -146,11 +147,6 @@ const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
     return () => clearTimeout(timer);
   },
 };
-
-// The one comm frame template.
-function commFrame(messageId: string, sourceAgentId: string, askId: string | null, message: string): string {
-  return `[tx comm ${messageId} from ${sourceAgentId}${askId ? ` ask ${askId}` : ''}]\n${message}`;
-}
 
 function renderCommIntent(intent: CommIntent, engine: 'claude' | 'codex'): { frame: string; tabAfter: string } {
   const prefix = intent.kind === 'command' || engine === 'claude' ? '/' : '$';
@@ -1369,8 +1365,17 @@ export class Daemon {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
-      if (!proj.currentBindings.some((b) =>
-        b.registered && b.agent_id === req.source_agent_id)) throw new Error('source_not_registered');
+      const sourceBindings = proj.currentBindings.filter((b) =>
+        b.registered && b.agent_id === req.source_agent_id);
+      if (sourceBindings.length === 0) throw new Error('source_not_registered');
+      // The frame names its sender as persona AND seat. A persona alone is not
+      // a key — several seats may wear one — so a source whose identity cannot
+      // be pinned to exactly one seat, or whose seat carries no persona,
+      // refuses here rather than stage a frame that misattributes itself.
+      if (sourceBindings.length !== 1) throw new Error('source_identity_ambiguous');
+      const sourceBinding = sourceBindings[0]!;
+      if (!sourceBinding.persona) throw new Error('source_persona_unresolved');
+      const source: CommFrameSource = { persona: sourceBinding.persona, seat_id: sourceBinding.seat_id };
       const events = await this.store.readAll();
       // The funnel mouth. A caller-supplied identity is softened to its
       // canonical form exactly once, here; `--self` and `--reply` name an
@@ -1410,7 +1415,7 @@ export class Daemon {
       const askId = req.ask ? crypto.randomUUID() : null;
       const occurred_at = this.now();
       const accepted = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted', payload: {
-        source_agent_id: req.source_agent_id, target_agent_ids: targets.map((t) => t.agent_id), targets,
+        source_agent_id: req.source_agent_id, source, target_agent_ids: targets.map((t) => t.agent_id), targets,
         ask_id: askId, reply_to_ask_id: replyingToAsk,
         kind: req.intent?.kind ?? 'message',
         name: req.intent?.name ?? null,
@@ -1420,7 +1425,7 @@ export class Daemon {
       }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
       const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
-      return { messageId, askId, replyingToAsk, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
+      return { messageId, askId, replyingToAsk, source, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
     });
 
     await Promise.all(prepared.targets.map((target) => {
@@ -1441,7 +1446,7 @@ export class Daemon {
         const binding = proj.currentBindings.find((row) => row.registered
           && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
         const frame = prepared.renderedIntent?.frame
-          ?? commFrame(prepared.messageId, req.source_agent_id, prepared.askId, req.message!);
+          ?? commFrame(prepared.messageId, prepared.source, req.message!);
         // The target's turn state at send, stamped on the receipt: a frame
         // staged into a WORKING engine is queued into that turn, and only that
         // stamp lets the turn-stop join later read the receipt as consumable.
@@ -1549,7 +1554,7 @@ export class Daemon {
             && candidate.payload.agent_id === plan.target.agent_id
             && ((Array.isArray(candidate.payload.message_ids)
                 && candidate.payload.message_ids.includes(prepared.messageId))
-              || (plan.frame.includes(prepared.messageId)
+              || (plan.frame.includes(commTokenForMessageId(prepared.messageId))
                 && typeof candidate.payload.content === 'string'
                 && candidate.payload.content.includes(plan.frame))
               || (frameNamesThisMessage && candidate.payload.content === intentFrame)));
@@ -1891,7 +1896,7 @@ export class Daemon {
    * A quoted frame cannot forge this. The evidence is the receipt, not the
    * prompt: there must be a `staged` transport fact naming this agent.
    *
-   * Only a SELF-NAMING frame qualifies — one carrying its own message id, which
+   * Only a SELF-NAMING frame qualifies — one carrying its own comm token, which
    * is every `message` comm and no `command`/`skill` intent. An intent frame
    * renders the surface call and nothing else, so two identical intents to one
    * target wear one frame byte for byte and containment could not tell them
@@ -1906,7 +1911,11 @@ export class Daemon {
         || receipt.payload.target_agent_id !== agentId
         || receipt.payload.submit_verdict !== 'staged') continue;
       const frame = receipt.payload.rendered_frame;
-      if (typeof frame !== 'string' || !frame.includes(receipt.entity_id)) continue;
+      if (typeof frame !== 'string') continue;
+      let token: string;
+      try { token = commTokenForMessageId(receipt.entity_id); }
+      catch { continue; } // Non-UUID entities never staged a self-naming frame.
+      if (!frame.includes(token)) continue;
       if (content.includes(frame)) named.add(receipt.entity_id);
     }
     return [...named];
@@ -1930,11 +1939,27 @@ export class Daemon {
   // fails deterministically instead of wedging the lane.
   promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[]; dead_lettered: string[] }> {
     return this.locked(async () => {
+      // The hook names frames by their compact comm tokens — the only identity
+      // the frame carries. The event stream records canonical ids, so each
+      // token resolves to its accepted message here, at the ingress, and an
+      // unresolvable token simply names no correspondence of ours.
+      const preEvents = await this.store.readAll();
+      const acceptedByToken = new Map<string, string>();
+      for (const event of preEvents) {
+        if (event.event_type !== 'reg.comm_accepted') continue;
+        try { acceptedByToken.set(commTokenForMessageId(event.entity_id), event.entity_id); }
+        catch { /* Non-UUID fixtures and unrelated historical entities are not comm frames. */ }
+      }
+      const framedMessageIds = hook.comm_tokens.flatMap((token) => {
+        const messageId = acceptedByToken.get(token);
+        return messageId ? [messageId] : [];
+      });
       await this.store.append({
         entity_type: 'agent', entity_id: hook.agent_id, event_type: 'act.prompt_submitted',
         payload: {
           agent_id: hook.agent_id,
-          message_ids: hook.message_ids,
+          comm_tokens: hook.comm_tokens,
+          message_ids: framedMessageIds,
           content: hook.content ?? null,
           session_id: hook.session_id ?? null,
         },
@@ -1960,7 +1985,7 @@ export class Daemon {
         && event.payload.target_agent_ids.includes(hook.agent_id));
       const intentMessage = intentCandidates.length === 1 ? intentCandidates[0] : undefined;
       const messageIds = [...new Set([
-        ...hook.message_ids,
+        ...framedMessageIds,
         ...(intentMessage ? [intentMessage.entity_id] : []),
         ...this.stagedFrameDeliveries(events, hook.agent_id, hook.content),
       ])];

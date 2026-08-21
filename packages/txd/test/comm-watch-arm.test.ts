@@ -12,6 +12,7 @@ import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { MemoryEventStore, type EventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon, type CommWatchArmInput } from '../src/core.ts';
+import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 
 async function registered(d: Daemon, store: EventStore, seat: string, identity: string): Promise<void> {
   const launched = await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity, persona: 'p', rank: 'astartes', tint: '#111111' });
@@ -245,7 +246,7 @@ test('behavioral pin: every new ordinary message receipt is typed while historic
   const events = await store.readAll();
   expect(events.find((event) => event.event_type === 'act.comm_bytes_sent')?.payload).toMatchObject({
     kind: 'message', name: null,
-    rendered_frame: `[tx comm ${accepted.message_id} from sender]\ntyped receipt`,
+    rendered_frame: commFrame(accepted.message_id, { persona: 'p', seat_id: 'council:custodes' }, 'typed receipt'),
   });
   // Journal payloads are open dumb facts: old immutable rows with no new
   // typing fields remain readable instead of being rewritten or rejected.
@@ -271,7 +272,7 @@ test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on it
     reply: false,
   });
 
-  const expectedFrame = `[tx comm ${accepted.message_id} from sender]\n${message}`;
+  const expectedFrame = commFrame(accepted.message_id, { persona: 'p', seat_id: 'council:custodes' }, message);
   expect(tmux.sends('palace:W')).toEqual([expectedFrame]);
   expect((await store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
     .toMatchObject({
@@ -284,7 +285,7 @@ test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on it
   await d.promptSubmitted({
     schema_version: SCHEMA_VERSION,
     agent_id: 'worker',
-    message_ids: [accepted.message_id],
+    comm_tokens: [commTokenForMessageId(accepted.message_id)],
     content: expectedFrame,
   });
 
@@ -303,7 +304,7 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
     const result = await d.promptSubmitted({
       schema_version: SCHEMA_VERSION,
       agent_id: 'worker',
-      message_ids: [messageId],
+      comm_tokens: [commTokenForMessageId(messageId)],
       content: frame,
     });
     hookReturned = true;
@@ -445,7 +446,7 @@ for (const profile of [
     // prompt_submitted hook must still correlate the rendered frame and create
     // one terminal assertion without a comm envelope message id.
     await d.promptSubmitted({
-      schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: profile.rendered,
+      schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [], content: profile.rendered,
     });
     const delivery = await d.commDelivery(accepted.message_id);
     expect(delivery.complete).toBe(true);
@@ -456,7 +457,7 @@ for (const profile of [
 // Enter is driven outside the journal mutex, so the engine's UserPromptSubmit
 // can reach txd before `act.comm_bytes_sent` exists. A command surface submits
 // with no comm envelope in the prompt, so that hook carries an empty
-// `message_ids` list and only the rendered frame identifies it. Correlating the
+// `comm_tokens` list and only the rendered frame identifies it. Correlating the
 // send path by message id alone loses the delivery permanently: the hook finds
 // no staged transport yet and declines to assert, and the staged receipt then
 // finds no id to match. Both facts exist and the delivery still reads undelivered.
@@ -469,7 +470,7 @@ test('behavioral pin: a hook that beats the staged receipt still asserts the int
   };
   instrumented.sendVerifiedToSeat = async (_seat, _id, text) => {
     await d.promptSubmitted({
-      schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+      schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [], content: rendered,
     });
     return { bytes: Buffer.byteLength(text), verdict: 'staged' };
   };
@@ -486,7 +487,7 @@ test('behavioral pin: a hook that beats the staged receipt still asserts the int
 
 // The rendered frame names an intent only while one intent carries it. Two
 // identical sends to one target share a frame byte for byte, so a hook with an
-// empty `message_ids` list cannot say which of them the engine submitted.
+// empty `comm_tokens` list cannot say which of them the engine submitted.
 // Attributing it to whichever was found first would assert delivery for a
 // message that was never submitted — the exact `UserPromptSubmit` join has to
 // stay one-to-one. An ambiguous hook is non-delivery evidence: it asserts
@@ -508,7 +509,7 @@ test('behavioral pin: identical intent frames to one target assert neither witho
   const second = await send();
 
   await expect(d.promptSubmitted({
-    schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+    schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [], content: rendered,
   })).rejects.toThrow('message_target_mismatch');
 
   expect((await d.commDelivery(first)).complete).toBe(false);
@@ -534,7 +535,7 @@ test('behavioral pin: a spent intent hook does not assert the next identical int
     if (hookPending) {
       hookPending = false;
       await d.promptSubmitted({
-        schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+        schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [], content: rendered,
       });
     }
     return { bytes: Buffer.byteLength(text), verdict: 'staged' };

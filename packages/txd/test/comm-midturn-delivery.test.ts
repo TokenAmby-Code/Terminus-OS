@@ -10,6 +10,7 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { Daemon } from '../src/core.ts';
+import { commTokenForMessageId } from '../src/comm-frame.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 
@@ -35,7 +36,7 @@ async function rig() {
 async function targetWorking(store: MemoryEventStore) {
   await store.append({
     entity_type: 'agent', entity_id: 'target', event_type: 'act.prompt_submitted',
-    payload: { agent_id: 'target', message_ids: [], content: 'own work', session_id: null },
+    payload: { agent_id: 'target', comm_tokens: [], content: 'own work', session_id: null },
     provenance: { source: 'hook', transport_receipt: null, emitter_version: SCHEMA_VERSION },
     occurred_at: '2026-08-19T00:00:01.000Z',
   });
@@ -142,7 +143,7 @@ test('behavioral pin: the idle-target UserPromptSubmit hook join is unchanged', 
   const hook = await daemon.promptSubmitted({
     schema_version: SCHEMA_VERSION,
     agent_id: 'target',
-    message_ids: [accepted.message_id],
+    comm_tokens: [commTokenForMessageId(accepted.message_id)],
   });
 
   expect(hook.asserted).toEqual([accepted.message_id]);
@@ -164,7 +165,7 @@ test('behavioral pin: a hook-asserted delivery is not re-asserted by the later s
   await daemon.promptSubmitted({
     schema_version: SCHEMA_VERSION,
     agent_id: 'target',
-    message_ids: [accepted.message_id],
+    comm_tokens: [commTokenForMessageId(accepted.message_id)],
   });
   tmux.setPaneText('palace:W', IDLE_COMPOSER);
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });

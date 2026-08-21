@@ -13,6 +13,7 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { Daemon, type CommReceiptRuntime } from '../src/core.ts';
+import { commTokenForMessageId } from '../src/comm-frame.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 
@@ -20,7 +21,7 @@ const IDLE_COMPOSER = 'transcript\n\n › \n\nchrome\n';
 
 /** The exact painted state the Emperor witnessed: frame intact, un-submitted. */
 function paintedFrame(messageId: string, message: string): string {
-  return `transcript\n\n › [tx comm ${messageId} from sender]\n${message}\n\nchrome\n`;
+  return `transcript\n\n › [tx comm from p at council:custodes #${commTokenForMessageId(messageId)}]\n${message}\n\nchrome\n`;
 }
 
 async function rig() {
@@ -45,7 +46,7 @@ async function rig() {
   // The target is at rest: one completed turn, exactly like FG at seq 56405.
   await store.append({
     entity_type: 'agent', entity_id: 'target', event_type: 'act.prompt_submitted',
-    payload: { agent_id: 'target', message_ids: [], content: 'own work', session_id: null },
+    payload: { agent_id: 'target', comm_tokens: [], content: 'own work', session_id: null },
     provenance: { source: 'hook', transport_receipt: null, emitter_version: SCHEMA_VERSION },
     occurred_at: new Date(now - 30_000).toISOString(),
   });
@@ -98,7 +99,7 @@ test('behavioral pin: a staged idle-target frame still intact at the receipt dea
   // The driven Enter is transport, not delivery: still undelivered until the
   // engine's own UserPromptSubmit attests it.
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'target', message_ids: [accepted.message_id] });
+  await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'target', comm_tokens: [commTokenForMessageId(accepted.message_id)] });
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 });
 
@@ -108,7 +109,7 @@ test('behavioral pin: a frame the engine consumed before the deadline drives not
     schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'target',
     message: 'consumed normally', ask: false, reply: false,
   });
-  await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'target', message_ids: [accepted.message_id] });
+  await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'target', comm_tokens: [commTokenForMessageId(accepted.message_id)] });
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 
   tmux.setPaneText('palace:W', IDLE_COMPOSER);

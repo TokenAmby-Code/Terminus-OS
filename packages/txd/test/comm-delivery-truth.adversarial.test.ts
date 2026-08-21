@@ -5,6 +5,7 @@ import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Daemon } from '../src/core.ts';
+import { commTokenForMessageId } from '../src/comm-frame.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 
@@ -84,7 +85,7 @@ for (const specimen of [
     const hook = await daemon.promptSubmitted({
       schema_version: SCHEMA_VERSION,
       agent_id: 'target',
-      message_ids: [accepted.message_id],
+      comm_tokens: [commTokenForMessageId(accepted.message_id)],
     });
 
     expect(hook.asserted).toEqual([]);

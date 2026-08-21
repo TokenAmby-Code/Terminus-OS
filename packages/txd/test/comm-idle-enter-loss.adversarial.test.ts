@@ -7,13 +7,14 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { Daemon, type CommReceiptRuntime } from '../src/core.ts';
+import { commTokenForMessageId } from '../src/comm-frame.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 
 const IDLE_COMPOSER = 'transcript\n\n › \n\nchrome\n';
 
 function paintedFrame(messageId: string, message: string): string {
-  return `transcript\n\n › [tx comm ${messageId} from sender]\n${message}\n\nchrome\n`;
+  return `transcript\n\n › [tx comm from p at council:custodes #${commTokenForMessageId(messageId)}]\n${message}\n\nchrome\n`;
 }
 
 async function rig(opts: { targetAtRest?: boolean } = {}) {

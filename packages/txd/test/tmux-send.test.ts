@@ -2,6 +2,7 @@
 
 import { expect, test } from 'bun:test';
 import { RealTmux, type TmuxCommandResult } from '../src/tmux.ts';
+import { commTokenForMessageId } from '../src/comm-frame.ts';
 
 function transport(pane = 'palace:S') {
   const calls: string[][] = [];
@@ -18,7 +19,7 @@ function transport(pane = 'palace:S') {
 }
 
 test('behavioral pin: a visible draft and prompt suggestion never block a comm transport', async () => {
-  const frame = '[tx comm 11111111-1111-4111-8111-111111111111 from sender]\nurgent repair';
+  const frame = '[tx comm from custodes at council:custodes #EREREURGBERERERERERERQ]\nurgent repair';
   const { calls, pasted, run } = transport();
   const tmux = new RealTmux('scratch', { run });
 
@@ -37,7 +38,7 @@ test('behavioral pin: a visible draft and prompt suggestion never block a comm t
 test('behavioral pin: concurrent comm frames remain whole serialized transactions', async () => {
   const { pasted, run } = transport();
   const tmux = new RealTmux('scratch', { run });
-  const frames = ['one', 'two', 'three'].map((message) => `[tx comm ${crypto.randomUUID()} from sender]\n${message}`);
+  const frames = ['one', 'two', 'three'].map((message) => `[tx comm from custodes at council:custodes #${commTokenForMessageId(crypto.randomUUID())}]\n${message}`);
 
   const outcomes = await Promise.all(frames.map((frame) => tmux.sendVerifiedToSeat('palace:S', crypto.randomUUID(), frame)));
 
@@ -103,7 +104,7 @@ function restTransport(stdout: string | null) {
   return { calls, run };
 }
 
-const REST_FRAME = '[tx comm 66666666-6666-4666-8666-666666666666 from sender]\nmid-turn frame';
+const REST_FRAME = '[tx comm from custodes at council:custodes #ZmZmZmZmRmaGZmZmZmZmZg]\nmid-turn frame';
 
 test('behavioral pin: a visible composer without the frame observes frame_absent', async () => {
   const { run } = restTransport('transcript\n\n › \n\nchrome\n');

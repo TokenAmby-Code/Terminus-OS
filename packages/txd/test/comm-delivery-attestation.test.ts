@@ -6,12 +6,12 @@
 //    draft's line. The engine submits the whole composer and the comm IS
 //    delivered — the hook's own content carries the frame byte for byte — but
 //    the line-anchored frame parser hands `promptSubmitted` an empty
-//    `message_ids`, and the delivery is recorded as never made. Live specimen
+//    `comm_tokens`, and the delivery is recorded as never made. Live specimen
 //    (2026-08-19, worker -> council:custodes): message
 //    9dc15225-9eb1-4de5-8de7-4a5315c6089b staged at event 56994 21:55:54.768Z,
 //    submitted at event 56995 21:55:55.014Z with content
 //    `im going to wait until home from the gym to do the [tx comm 9dc15225…]`
-//    and `message_ids: []`. Seven of the twenty comms left unattested that
+//    and no parsed frame identity. Seven of the twenty comms left unattested that
 //    night are this exact shape; five of the seven were addressed to Custodes.
 //    The staged frame found intact inside the submitted prompt is the observed
 //    effect, and it is what the join must read.
@@ -27,6 +27,7 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { Daemon } from '../src/core.ts';
+import { commTokenForMessageId } from '../src/comm-frame.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 
@@ -75,7 +76,7 @@ test('a staged frame the engine submitted behind an operator draft asserts deliv
   // The engine's own UserPromptSubmit, shaped exactly as event 56995 was: the
   // draft runs straight into the frame, so the frame parser names nothing.
   const submitted = await daemon.promptSubmitted({
-    schema_version: SCHEMA_VERSION, agent_id: 'custodes', message_ids: [],
+    schema_version: SCHEMA_VERSION, agent_id: 'custodes', comm_tokens: [],
     content: `${OPERATOR_DRAFT}${await stagedFrame(store, accepted.message_id)}`,
   });
   expect(submitted.asserted).toEqual([accepted.message_id]);
@@ -94,7 +95,7 @@ test('a staged frame quoted by an agent it was never staged to asserts nothing',
   // A bystander pastes the same frame into its own prompt. The frame proves
   // delivery only to the composer txd staged it into.
   await expect(daemon.promptSubmitted({
-    schema_version: SCHEMA_VERSION, agent_id: 'bystander', message_ids: [],
+    schema_version: SCHEMA_VERSION, agent_id: 'bystander', comm_tokens: [],
     content: `look at this: ${await stagedFrame(store, accepted.message_id)}`,
   })).rejects.toThrow('message_target_mismatch');
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
@@ -131,7 +132,7 @@ test('a delivered comm is never refused by the target closing afterwards', async
     schema_version: SCHEMA_VERSION, source_agent_id: 'custodes', target: 'worker',
     message: 'delivered before close', ask: false, reply: false,
   });
-  await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [accepted.message_id] });
+  await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [commTokenForMessageId(accepted.message_id)] });
   await daemon.close({ schema_version: SCHEMA_VERSION, source_agent_id: 'custodes', targets: ['worker'] });
 
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_failed')).toEqual([]);
