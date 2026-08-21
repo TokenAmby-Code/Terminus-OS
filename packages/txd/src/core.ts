@@ -93,7 +93,7 @@ import {
   type TxdPage,
   type TxdStackPage,
 } from './estate.ts';
-import { acceptCommIdentity } from './comm-identity.ts';
+import { acceptCommIdentity, sameIdentity } from './comm-identity.ts';
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
@@ -1225,10 +1225,15 @@ export class Daemon {
     });
   }
 
+  // Casing is folded here, at the comparison, and nowhere else: the target a
+  // caller names is matched case-insensitively, and the identity that comes
+  // back is the binding's own — canonical by construction.
   private commTargets(identity: string, proj: Projections): CommTarget[] {
     const matches = proj.currentBindings.filter((b) =>
       b.registered
-      && (b.agent_id === identity || b.persona === identity || b.seat_id === identity),
+      && ((b.agent_id !== null && sameIdentity(b.agent_id, identity))
+        || (b.persona !== null && sameIdentity(b.persona, identity))
+        || sameIdentity(b.seat_id, identity)),
     );
     return matches.map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
   }

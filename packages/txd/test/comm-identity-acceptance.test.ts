@@ -78,7 +78,7 @@ test('acceptance softness never reaches the event stream: recorded targets stay 
 
 test('a bare name naming nobody keeps the loud typed absence refusal', async () => {
   const { daemon } = await rig();
-  await expect(send(daemon, 'Ghost-Target')).rejects.toThrow('identity_absent: ghost-target');
+  await expect(send(daemon, 'Ghost-Target')).rejects.toThrow('identity_absent: Ghost-Target');
 });
 
 // A page name is not an identity. Nothing about it names one seat, so it must
@@ -95,10 +95,34 @@ test('a bare exclusive or fleet page name is not softened into a seat', async ()
 test('the funnel mouth resolves bare names against the council roster it is given', () => {
   expect(acceptCommIdentity('Lord-Inquisitor', ['council:lord-inquisitor'])).toBe('council:lord-inquisitor');
   expect(acceptCommIdentity('custodes', ['council:lord-inquisitor'])).toBe('custodes');
+  expect(acceptCommIdentity('somnium:NE', ['council:lord-inquisitor'])).toBe('somnium:NE');
 });
 
 test('a bare name matching more than one council seat refuses loudly, naming the candidates', () => {
   const roster = ['council:pax', 'palace:pax'];
-  expect(() => acceptCommIdentity('Pax', roster)).toThrow('identity_ambiguous: pax');
+  expect(() => acceptCommIdentity('Pax', roster)).toThrow('identity_ambiguous: Pax');
   expect(() => acceptCommIdentity('Pax', roster)).toThrow('council:pax, palace:pax');
+});
+
+// Nine declared seat ids carry uppercase — palace:W/N/S/E and
+// somnium:W/N/S/NE/SE. Softening acceptance must widen what reaches a seat, so
+// a seat's OWN canonical id is the one spelling that can never stop working.
+test('an uppercase canonical seat id still addresses its seat', async () => {
+  const { daemon } = await rig();
+  const accepted = await send(daemon, 'palace:W');
+  expect(accepted.targets).toEqual([{ agent_id: 'sender', seat_id: 'palace:W', persona: 'space-wolves' }]);
+});
+
+test('an uppercase canonical seat id is addressable in any casing', async () => {
+  const { daemon } = await rig();
+  for (const spelling of ['palace:w', 'PALACE:W', 'Palace:W']) {
+    const accepted = await send(daemon, spelling);
+    expect(accepted.targets).toEqual([{ agent_id: 'sender', seat_id: 'palace:W', persona: 'space-wolves' }]);
+  }
+});
+
+test('a persona is addressable in any casing, and answers with its canonical spelling', async () => {
+  const { daemon } = await rig();
+  const accepted = await send(daemon, 'Space-Wolves');
+  expect(accepted.targets).toEqual([{ agent_id: 'sender', seat_id: 'palace:W', persona: 'space-wolves' }]);
 });
