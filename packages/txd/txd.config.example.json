@@ -8,5 +8,16 @@
     "database": "terminus",
     "application_name": "txd"
   },
-  "tmuxSocket": "k12"
+  "tmuxSocket": "k12",
+  "sshSeatTargets": {
+    "pages": {
+      "somnium": "k12-work",
+      "somnium_fleet": "k12-work"
+    },
+    "seats": {
+      "council:pax": "k12-work",
+      "council:orchestrator": "k12-work",
+      "palace:S": "wsl"
+    }
+  }
 }

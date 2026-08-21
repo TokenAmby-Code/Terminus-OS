@@ -24,10 +24,12 @@ async function registered(d: Daemon, store: EventStore, seat: string, identity: 
   });
 }
 
-async function bindEngine(store: EventStore, seat: string, identity: string, engine: 'claude' | 'codex'): Promise<void> {
+async function bindEngine(store: EventStore, tmux: FakeTmux, seat: string, identity: string, engine: 'claude' | 'codex'): Promise<void> {
+  const paneGeneration = await tmux.seatGeneration(seat);
+  if (!paneGeneration) throw new Error(`fixture pane absent: ${seat}`);
   await store.append({
     entity_type: 'seat', entity_id: seat, event_type: 'reg.bound',
-    payload: { agent_id: identity, persona: 'p', rank: 'astartes', commander: null, tint: '#111111', pane_generation: 'fake-generation', engine },
+    payload: { agent_id: identity, persona: 'p', rank: 'astartes', commander: null, tint: '#111111', pane_generation: paneGeneration, engine },
     provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
     occurred_at: '2026-08-01T00:00:00.000Z',
   });
@@ -59,6 +61,7 @@ test('behavioral pin: a painted newborn backfills durable composer interactivity
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: string, payload: Record<string, unknown>) => {
       order.push(`publish:${type}`);
       published.push({ type, payload });
@@ -116,6 +119,7 @@ test('behavioral pin: concurrent comms publish one composer observation per pane
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: string, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
@@ -151,6 +155,7 @@ test('behavioral pin: a pane rebind after observation cannot publish stale compo
     configuration: { generation: 'g', digest: 'd' },
     agentWrapper: '/wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: string, payload: Record<string, unknown>) => {
       published.push({ type, payload });
     },
@@ -302,7 +307,7 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
       content: frame,
     });
     hookReturned = true;
-    expect(result.asserted).toEqual([messageId]);
+    expect(result.asserted).toEqual([]);
     return { bytes: Buffer.byteLength(frame), verdict: 'staged' as const };
   };
 
@@ -321,10 +326,53 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
     .toHaveLength(1);
 }, 500);
 
-test('behavioral pin: the five-minute lifecycle gate cannot become a composer wait', async () => {
-  const source = await Bun.file(new URL('../src/daemon.ts', import.meta.url)).text();
-  expect(source).not.toContain('composerObserveTimeoutMs: cfg.commWatchTimeoutMs');
+test('behavioral pin: a replaced pane generation refuses before comm bytes cross the transport boundary', async () => {
+  let tmux!: FakeTmux;
+  const f = await fixture(async () => {
+    tmux.forceSeatGeneration('palace:W', 'replacement-generation');
+  });
+  tmux = f.tmux;
+
+  const accepted = await f.d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'must stay on the bound pane generation',
+    ask: false,
+    reply: false,
+  });
+
+  expect(accepted.staged).toBe(false);
+  expect(tmux.sends('palace:W')).toEqual([]);
+  expect((await f.store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
+    .toMatchObject({ bytes: 0, submit_verdict: 'seat_unresolved' });
 });
+
+for (const [journalEvent, claimedBytes] of [
+  [49482, 93],
+  [49776, 564],
+  [50898, 1219],
+  [53046, 1465],
+  [53084, 903],
+] as const) {
+  test(`behavioral pin: event ${journalEvent} unresolved adapter bytes can never become journal truth`, async () => {
+    const { store, tmux, d } = await fixture(async () => undefined);
+    tmux.sendVerifiedToSeat = async () => ({ bytes: claimedBytes, verdict: 'seat_unresolved' as const });
+
+    const accepted = await d.comm({
+      schema_version: SCHEMA_VERSION,
+      source_agent_id: 'sender',
+      target: 'worker',
+      message: `event ${journalEvent} recurrence`,
+      ask: false,
+      reply: false,
+    });
+
+    expect(accepted.staged).toBe(false);
+    expect((await store.readAll()).find((event) => event.event_type === 'act.comm_bytes_sent')?.payload)
+      .toMatchObject({ bytes: 0, submit_verdict: 'seat_unresolved' });
+  });
+}
 
 test('machine-feed injection shares the composer gate and carries no comm envelope', async () => {
   const { store, tmux } = await fixture(null);
@@ -346,24 +394,24 @@ test('machine-feed injection shares the composer gate and carries no comm envelo
   expect(order).toEqual(['gate:worker', 'inject:palace:W']);
 });
 
-test('machine-feed injection refuses a non-staged composer verdict so the bus event is redelivered', async () => {
+test('machine-feed injection refuses a non-staged transport so the bus event is redelivered', async () => {
   const { store, tmux } = await fixture(null);
   const d = new Daemon(store, tmux, undefined, undefined, null, null, null, async () => undefined);
   const refusingTmux = tmux as unknown as {
-    sendVerifiedToSeat(seat: string, id: string, text: string): Promise<{ bytes: number; verdict: 'composer_corrupted' }>;
+    sendVerifiedToSeat(seat: string, id: string, text: string): Promise<{ bytes: number; verdict: 'transport_failed' }>;
   };
   refusingTmux.sendVerifiedToSeat = async (_seat, _id, text) => ({
     bytes: Buffer.byteLength(text, 'utf8'),
-    verdict: 'composer_corrupted',
+    verdict: 'transport_failed',
   });
 
   await expect(d.inject({ schema_version: SCHEMA_VERSION, target_agent_id: 'worker', text: 'durable machine fact' }))
-    .rejects.toThrow('machine_feed_not_staged: composer_corrupted');
+    .rejects.toThrow('machine_feed_not_staged: transport_failed');
 
   const events = await store.readAll();
   expect(events.filter((event) => event.event_type === 'act.agent_input_injected')).toHaveLength(1);
   expect(events.find((event) => event.event_type === 'act.agent_input_injected')?.payload.submit_verdict)
-    .toBe('composer_corrupted');
+    .toBe('transport_failed');
   expect(events.some((event) => event.event_type.startsWith('reg.comm_'))).toBe(false);
 });
 
@@ -373,7 +421,7 @@ for (const profile of [
 ] as const) {
   test(`behavioral pin: ${profile.engine} intent renders in txd, types Tab, and writes a typed receipt`, async () => {
     const { store, tmux, d } = await fixture(async () => undefined);
-    await bindEngine(store, 'palace:W', 'worker', profile.engine);
+    await bindEngine(store, tmux, 'palace:W', 'worker', profile.engine);
     const observed: unknown[] = [];
     const instrumented = tmux as unknown as {
       sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
@@ -404,3 +452,154 @@ for (const profile of [
     expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
   });
 }
+
+// Enter is driven outside the journal mutex, so the engine's UserPromptSubmit
+// can reach txd before `act.comm_bytes_sent` exists. A command surface submits
+// with no comm envelope in the prompt, so that hook carries an empty
+// `message_ids` list and only the rendered frame identifies it. Correlating the
+// send path by message id alone loses the delivery permanently: the hook finds
+// no staged transport yet and declines to assert, and the staged receipt then
+// finds no id to match. Both facts exist and the delivery still reads undelivered.
+test('behavioral pin: a hook that beats the staged receipt still asserts the intent delivery', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
+  const rendered = '/compact hard';
+  const instrumented = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
+  };
+  instrumented.sendVerifiedToSeat = async (_seat, _id, text) => {
+    await d.promptSubmitted({
+      schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+    });
+    return { bytes: Buffer.byteLength(text), verdict: 'staged' };
+  };
+
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
+  } as never);
+
+  const delivery = await d.commDelivery(accepted.message_id);
+  expect(delivery.complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+});
+
+// The rendered frame names an intent only while one intent carries it. Two
+// identical sends to one target share a frame byte for byte, so a hook with an
+// empty `message_ids` list cannot say which of them the engine submitted.
+// Attributing it to whichever was found first would assert delivery for a
+// message that was never submitted — the exact `UserPromptSubmit` join has to
+// stay one-to-one. An ambiguous hook is non-delivery evidence: it asserts
+// nothing and consumes nothing.
+test('behavioral pin: identical intent frames to one target assert neither without a unique witness', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
+  const rendered = '/compact hard';
+  const instrumented = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
+  };
+  instrumented.sendVerifiedToSeat = async (_seat, _id, text) => ({ bytes: Buffer.byteLength(text), verdict: 'staged' });
+  const send = async () => (await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
+  } as never)).message_id;
+
+  const first = await send();
+  const second = await send();
+
+  await expect(d.promptSubmitted({
+    schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+  })).rejects.toThrow('message_target_mismatch');
+
+  expect((await d.commDelivery(first)).complete).toBe(false);
+  expect((await d.commDelivery(second)).complete).toBe(false);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(0);
+});
+
+// Uniqueness has to be a stable property of the accepted intents, not of the
+// ones still awaiting assertion. If delivered messages drop out of the
+// candidate set, that set shrinks as deliveries land: the first of two
+// identical intents asserts, the second becomes the only survivor, and the
+// spent hook that named the first then reads as a unique witness for a message
+// the engine never submitted. A hook is spent once it has asserted.
+test('behavioral pin: a spent intent hook does not assert the next identical intent', async () => {
+  const { store, tmux, d } = await fixture(async () => undefined);
+  await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
+  const rendered = '/compact hard';
+  const instrumented = tmux as unknown as {
+    sendVerifiedToSeat(seat: string, id: string, text: string, tabAfter?: string): Promise<{ bytes: number; verdict: 'staged' }>;
+  };
+  let hookPending = true;
+  instrumented.sendVerifiedToSeat = async (_seat, _id, text) => {
+    if (hookPending) {
+      hookPending = false;
+      await d.promptSubmitted({
+        schema_version: SCHEMA_VERSION, agent_id: 'worker', message_ids: [], content: rendered,
+      });
+    }
+    return { bytes: Buffer.byteLength(text), verdict: 'staged' };
+  };
+  const send = async () => (await d.comm({
+    schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker',
+    intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
+  } as never)).message_id;
+
+  const first = await send();
+  expect((await d.commDelivery(first)).complete).toBe(true);
+
+  const second = await send();
+
+  expect((await d.commDelivery(second)).complete).toBe(false);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+});
+
+// ── Delivery attempts first: a gate TRANSPORT failure is not a verdict ──────
+//
+// The comm doctrine (2026-08-19): delivery attempts come first and the effect
+// is post-validated; an unasserted delivery remains ok:false. A slow or
+// unreachable lifecycled is a transport fact about lifecycled, not a truth
+// about the target composer — when txd's own observation already proved the
+// composer interactive, refusing the delivery on gate transport is a
+// preflight false negative. The unpainted newborn keeps its hard stop: there
+// the dead-zone race is real and txd has no interactivity proof of its own.
+
+test('a gate transport failure with an observed-interactive composer attempts delivery and attests the unarmed gap', async () => {
+  const { CommGateTransportFailure } = await import('../src/core.ts');
+  const physical = {
+    machine: 'test',
+    configuration: { generation: 'g', digest: 'd' },
+    agentWrapper: '/wrapper',
+    perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
+    publish: async () => undefined,
+  };
+  const { store, tmux, d } = await fixture(async () => {
+    throw new CommGateTransportFailure('lifecycled_comm_gate_transport_ceiling_exceeded');
+  }, physical);
+  tmux.setPaneText('palace:W', '› Write tests for @filename\n\n  gpt-5.6-sol medium');
+
+  const accepted = await d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'attempted first', ask: false, reply: false });
+
+  expect(tmux.sends('palace:W').length).toBe(1); // the bytes were attempted
+  // …and nothing is claimed that was not observed: no hook fact arrived, so
+  // the delivery remains unasserted.
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted')).toHaveLength(0);
+  const unarmed = (await store.readAll()).filter((e) => e.event_type === 'act.comm_watch_unarmed');
+  expect(unarmed.length).toBe(1);
+  expect(unarmed[0]!.payload.target_agent_id).toBe('worker');
+});
+
+test('a gate transport failure on an unpainted newborn still refuses before bytes', async () => {
+  const { CommGateTransportFailure } = await import('../src/core.ts');
+  const { store, tmux, d } = await fixture(async () => {
+    throw new CommGateTransportFailure('lifecycled_comm_gate_transport_failed');
+  });
+
+  await expect(d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'must not reach a newborn', ask: false, reply: false }))
+    .rejects.toThrow('lifecycled_comm_gate_transport_failed');
+
+  expect(tmux.sends('palace:W')).toEqual([]);
+  const unarmed = (await store.readAll()).filter((e) => e.event_type === 'act.comm_watch_unarmed');
+  expect(unarmed.length).toBe(1);
+});

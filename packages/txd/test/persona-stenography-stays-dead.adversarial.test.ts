@@ -21,6 +21,7 @@ function setup() {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
+    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (_type: TxdPublishedEventType, _payload: Record<string, unknown>) => {},
   };
   return { store, tmux, d: new Daemon(store, tmux, undefined, undefined, runtime) };
@@ -131,7 +132,7 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
   await bind('palace:N', second, 4102);
 
   await expect(d.transitionMode({
-    schema_version: 11,
+    schema_version: 12,
     target: 'black-shields',
     intent: 'enter_plan',
     trigger: 'preplan',

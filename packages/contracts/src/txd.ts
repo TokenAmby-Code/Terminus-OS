@@ -23,14 +23,15 @@ import { z } from 'zod';
 // replay under the vocabulary that wrote them via `provenance.emitter_version`.
 //
 // v6: additive — explicit estate rotation request/refusal/completion lifecycle.
-// v7: additive — Council topology migration and canonical seat decommissioning.
+// v7: additive — Council topology migration and canonical seat retirement.
 // v8: physical persona-tint apply/read-back, fail-dark reset, and readiness.
 // v9: typed, engine-aware plan-mode transition request/attestation lifecycle.
 // v10: registrationd-owned identity and generation-bound physical facts.
 // v11: breaking — lifecycle correlation moves to lifecycled; the txd-internal
 //      close-on-stop subscription vocabulary is gone, and plan approval gains
 //      its mechanical intent (approve_plan, dialog_accept).
-export const SCHEMA_VERSION = 11;
+// v12: breaking — absent dynamic seats use the estate's abandon vocabulary.
+export const SCHEMA_VERSION = 12;
 
 // A caller-supplied identifier: a canonical seat name (`somnium:NE`), an agent
 // id, or a page. Raw tmux ids — pane `%N`, window `@N`, session `$N` — live
@@ -196,11 +197,16 @@ export const REG_EVENT_NAMES = [
   'comm_target_snapshotted',
   'composer_observation_prepared',
   'contradiction_flagged',
+  // A fact txd owed the journal and could not put there. The close it belongs
+  // to is already committed, so the publication can never be un-owed; what it
+  // must never be is silent. The boot census is the recovery, this is the
+  // count.
+  'journal_publication_dropped',
   'teardown_started',
   'process_reaped',
   'retired',
   'seat_cleared',
-  'seat_decommissioned',
+  'seat_abandoned',
 ] as const;
 
 // act.* — agent behavior (feeds the `activity` axis) + comm activity.
@@ -212,8 +218,8 @@ export const ACT_EVENT_NAMES = [
   'agent_input_injected',
   'comm_delivery_asserted',
   'comm_delivery_confirmation_dead_lettered',
-  'comm_redrive_attempted',
   'comm_delivery_failed',
+  'comm_submit_driven',
   'comm_watch_unarmed',
   'composer_interactive_announced',
   'comm_callback_asserted',
@@ -249,11 +255,12 @@ export const EVENT_TYPES = [
   'reg.comm_target_snapshotted',
   'reg.composer_observation_prepared',
   'reg.contradiction_flagged',
+  'reg.journal_publication_dropped',
   'reg.teardown_started',
   'reg.process_reaped',
   'reg.retired',
   'reg.seat_cleared',
-  'reg.seat_decommissioned',
+  'reg.seat_abandoned',
   'act.prompt_submitted',
   'act.stop_reported',
   'act.receipt_deduped',
@@ -261,8 +268,8 @@ export const EVENT_TYPES = [
   'act.agent_input_injected',
   'act.comm_delivery_asserted',
   'act.comm_delivery_confirmation_dead_lettered',
-  'act.comm_redrive_attempted',
   'act.comm_delivery_failed',
+  'act.comm_submit_driven',
   'act.comm_watch_unarmed',
   'act.composer_interactive_announced',
   'act.comm_callback_asserted',
@@ -612,7 +619,7 @@ export type EstateRotateResponse = z.infer<typeof EstateRotateResponseSchema>;
 // Operator attestation for phantoms already proven by reconcile. This is not
 // a delete-by-name surface: txd admits only noncanonical seats which its fold
 // projects unbound, tmux proves absent, and an open pane_absent contradiction
-// names seat_decommissioned as the missing fact. The exact list is atomic.
+// names seat_abandoned as the missing fact. The exact list is atomic.
 export const EstateAbandonRequestSchema = z.object({
   schema_version: z.number().int(),
   source_agent_id: CanonicalIdSchema,
@@ -724,9 +731,8 @@ export const AgentInjectRequestSchema = z.object({
 
 export const CommTargetSchema = z.object({ agent_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
 export type CommTarget = z.infer<typeof CommTargetSchema>;
-// `staged` = the bytes are in the target pane and Enter was pressed. It is NOT
-// receipt: a busy composer queues input and submits it whenever its current
-// turn ends. Delivery is asserted later and separately by
+// `staged` = this message's bytes were handed to the target pane and Enter was
+// pressed. Delivery is asserted later and separately by
 // `act.comm_delivery_asserted`, correlated to `message_id` — which is why the
 // message id is the caller's correlation handle, not a bare receipt number.
 export const CommAcceptedSchema = z.object({
@@ -735,10 +741,8 @@ export const CommAcceptedSchema = z.object({
 });
 export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
 
-// One prompt submission can carry MANY comm frames. A composer that is mid-turn
-// queues every comm it receives and flushes them together when the turn ends, so
-// the engine reports one `user_prompt_submit` holding two, three, or four whole
-// messages. Each of them was delivered; each of them needs its own fact.
+// One prompt submission can carry many comm frames. Each named message still
+// needs its own staged transport fact before this hook may assert delivery.
 export const CommHookSchema = z.object({
   schema_version: z.number().int(), agent_id: z.string().min(1),
   message_ids: z.array(z.string().min(1)).default([]),
@@ -747,19 +751,33 @@ export const CommHookSchema = z.object({
 });
 export type CommHook = z.infer<typeof CommHookSchema>;
 
-// The durable delivery read model, derived from
-// `act.comm_delivery_asserted` and nothing else. Absence of a delivery here is
-// silence, never a verdict: a target whose turn has not ended has not refused
-// the message, and observed latency to this fact ranges from 64ms to nearly ten
-// hours. The CLI's bounded receipt wait below does not alter this durable truth.
+// The durable delivery read model. `delivered` derives from
+// `act.comm_delivery_asserted` and nothing else; `failed` derives from
+// `act.comm_delivery_failed` and nothing else. Neither is inferred from the
+// other, and a row carrying neither is silence rather than a verdict: a target
+// whose turn has not ended has not refused the message, and observed latency to
+// the assertion ranges from 64ms to nearly ten hours. The CLI's bounded receipt
+// wait below does not alter this durable truth.
+//
+// The refusal exists because silence alone left a sender unable to tell a
+// dropped comm from a pending one. A staged comm whose target binding ends can
+// never be delivered, and that moment is the fact — not a deadline, and not the
+// absence of an assertion.
 export const CommDeliverySchema = z.object({
   target: CommTargetSchema, delivered: z.boolean(),
   asserted_at: z.string().nullable(), assertion_event_id: z.number().int().nullable(),
+  failed: z.boolean(),
+  failed_at: z.string().nullable(), failure_event_id: z.number().int().nullable(),
+  failure_reason: z.string().nullable(),
 });
 export type CommDelivery = z.infer<typeof CommDeliverySchema>;
 export const CommDeliveryReadResponseSchema = z.object({
   schema_version: z.number().int(), message_id: z.string(), source_agent_id: z.string(),
   accepted_at: z.string(), deliveries: z.array(CommDeliverySchema), complete: z.boolean(),
+  // Every target has spoken: delivered or refused. `complete` stays the
+  // narrower question — did every target receive it — so a caller cannot read
+  // a refusal as a success.
+  resolved: z.boolean(),
 });
 export type CommDeliveryReadResponse = z.infer<typeof CommDeliveryReadResponseSchema>;
 
@@ -796,39 +814,33 @@ export const CommTransportRefusedReceiptSchema = z.object({
   source_agent_id: CanonicalIdSchema,
   targets: z.array(CommTargetSchema),
   bytes_sent: z.number().int().nonnegative(),
-  submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved', 'multiple']),
+  submit_verdict: z.enum(['submit_failed', 'transport_failed', 'seat_unresolved', 'multiple']),
   refusals: z.array(z.object({
     target: CommTargetSchema,
     bytes: z.number().int().nonnegative(),
-    submit_verdict: z.enum(['composer_draft_present', 'composer_unreadable', 'composer_corrupted', 'frame_absent', 'seat_unresolved']),
+    submit_verdict: z.enum(['submit_failed', 'transport_failed', 'seat_unresolved']),
     event_id: z.number().int(),
   })).min(1),
   event_ids: z.array(z.number().int()),
+});
+// Transport succeeded and delivery then became impossible — the target binding
+// ended with the frame still unattested. Distinct from `transport_refused`,
+// which never got the bytes into the composer at all.
+export const CommDeliveryFailedReceiptSchema = z.object({
+  ok: z.literal(false),
+  schema_version: z.number().int(),
+  phase: z.literal('delivery_failed'),
+  message_id: CanonicalIdSchema,
+  source_agent_id: CanonicalIdSchema,
+  deliveries: z.array(CommDeliverySchema),
 });
 export const CommReceiptSchema = z.discriminatedUnion('phase', [
   CommDeliveryConfirmedReceiptSchema,
   CommBytesSentReceiptSchema,
   CommTransportRefusedReceiptSchema,
+  CommDeliveryFailedReceiptSchema,
 ]);
 export type CommReceipt = z.infer<typeof CommReceiptSchema>;
-
-// The remedial half of the two-phase comm contract is a deliberate pane
-// action: lifecycled decides WHEN, txd is the only mechanism.
-// Redrive submits a parked frame with a single Enter — never by retyping —
-// and only after the visible composer text verifies byte-honest against the
-// payload that was staged; a corrupted composer is refused, not submitted.
-export const CommRedriveRequestSchema = z.object({
-  schema_version: z.number().int(),
-  message_id: z.string().min(1),
-  target_agent_id: z.string().min(1),
-});
-export type CommRedriveRequest = z.infer<typeof CommRedriveRequestSchema>;
-export const COMM_REDRIVE_OUTCOMES = ['enter_redriven', 'already_delivered', 'composer_corrupted', 'frame_absent', 'seat_unresolved'] as const;
-export const CommRedriveResponseSchema = z.object({
-  ok: z.literal(true), message_id: z.string(), target_agent_id: z.string(),
-  outcome: z.enum(COMM_REDRIVE_OUTCOMES),
-});
-export type CommRedriveResponse = z.infer<typeof CommRedriveResponseSchema>;
 
 export const CommWaitRequestSchema = z.object({
   schema_version: z.number().int(), ask_id: CanonicalIdSchema, subscriber_agent_id: CanonicalIdSchema,
