@@ -1992,6 +1992,13 @@ export class Daemon {
       for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
         if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
+        // The snapshot is the delivery target contract — `commDelivery` reads
+        // targets from it, so an assertion it cannot see must never be
+        // written. Redemption requires the receiver in BOTH records.
+        const snapshot = events.find((e) => e.event_type === 'reg.comm_target_snapshotted'
+          && e.payload.message_id === messageId);
+        const snapshotTargets = (snapshot?.payload.targets ?? []) as CommTarget[];
+        if (!snapshotTargets.some((target) => target.agent_id === hook.agent_id)) continue;
         matched = true;
         const staged = events.some((event) => event.entity_id === messageId
           && event.event_type === 'act.comm_bytes_sent'
