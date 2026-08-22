@@ -208,6 +208,55 @@ test('comm admission returns its durable message id before pane delivery finishe
   }
 });
 
+test('a pane transport exception after comm admission becomes a durable refusal receipt', async () => {
+  const store = new MemoryEventStore();
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux);
+  for (const [seat, identity] of [['council:custodes', 'sender'], ['palace:W', 'target']] as const) {
+    await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity, persona: 'p', rank: 'astartes', tint: '#111111' });
+    await store.append({
+      entity_type: 'agent', entity_id: identity, event_type: 'reg.agent_registered',
+      payload: { persona: 'p', rank: 'astartes', commander: null },
+      provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-22T12:00:00.000Z',
+    });
+  }
+  tmux.sendVerifiedToSeat = async () => { throw new Error('pane transport rejected'); };
+
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const admission = await (await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'sender',
+        target: 'target',
+        message: 'refusal receipt',
+        ask: false,
+        reply: false,
+      }),
+    })).json() as { message_id: string };
+    const receipt = fetch(`http://127.0.0.1:${srv.port}/agents/comm/receipt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'sender',
+        message_id: admission.message_id,
+      }),
+    }).then((response) => response.json());
+    expect(await Promise.race([receipt, Bun.sleep(100).then(() => 'still-waiting')])).toMatchObject({
+      ok: false,
+      phase: 'transport_refused',
+      message_id: admission.message_id,
+      submit_verdict: 'transport_failed',
+    });
+  } finally {
+    srv.stop(true);
+  }
+});
+
 test('comm ask stream emits legal JSON whitespace while awaiting its callback event', async () => {
   const pending = new Promise<unknown>(() => {});
   let emitKeepalive!: () => void;
