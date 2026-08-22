@@ -420,6 +420,12 @@ export const HealthSchema = z.object({
   // Honest-only: bring-up mode reports ok=false while any contradiction is open.
   open_contradictions: z.number().int(),
   tmux_reachable: z.boolean(),
+  // Own-function readiness: both tmux witnesses must be physically observed.
+  hooks: z.object({
+    state: z.enum(['ready', 'degraded']),
+    pane_died: z.boolean(),
+    pane_exited: z.boolean(),
+  }),
   estate_generation: z.enum(['empty', 'canonical', 'recoverable', 'foreign']),
   // A foreign shape can be a deliberately unrotated predecessor topology.
   // The daemon stays available without mutating it until the operator rotates.

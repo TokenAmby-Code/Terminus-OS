@@ -40,6 +40,11 @@ export type EstateEnsureResult = {
   rebuilt_pages: TxdPage[];
 };
 export type EstateGeneration = 'empty' | 'canonical' | 'recoverable' | 'foreign';
+export type LifecycleHookReadiness = {
+  state: 'ready' | 'degraded';
+  pane_died: boolean;
+  pane_exited: boolean;
+};
 export type SeatEngineLaunch = {
   seatId: string;
   engine: 'claude' | 'codex';
@@ -153,6 +158,10 @@ export type ShellRunStaged = { completion: Promise<ShellRunOutcome> };
 
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
+  /** Install the daemon's tmux lifecycle witnesses and verify their physical read-back. */
+  ensureLifecycleHooks(): Promise<void>;
+  /** Observe the currently installed witnesses; procedure completion is not health evidence. */
+  lifecycleHookReadiness(): Promise<LifecycleHookReadiness>;
   version(): Promise<string | null>;
   workloads(): Promise<SeatWorkload[]>;
   killServer(): Promise<boolean>;
@@ -1026,17 +1035,38 @@ export class RealTmux implements TmuxControlPlane {
     return recoverable ? 'recoverable' : 'foreign';
   }
 
-  async ensureLifecycleHooks(): Promise<void> {
-    const commands = {
+  private lifecycleHookCommands() {
+    return {
       'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name}"',
       'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page #{q:window_name}"',
     } as const;
-    for (const [hook, command] of Object.entries(commands)) {
+  }
+
+  async lifecycleHookReadiness(): Promise<LifecycleHookReadiness> {
+    const observed = await Promise.all(Object.keys(this.lifecycleHookCommands()).map(async (hook) => {
+      const result = await this.command('observe_lifecycle_hook', hook, ['show-hooks', '-g', hook]);
+      // tmux expands $HOME while storing the hook, so read-back cannot be a
+      // byte comparison with the submitted command. Pin every semantic part
+      // that makes this the daemon's witness rather than an arbitrary hook.
+      return result.code === 0
+        && result.stdout.includes(`${hook}[`)
+        && result.stdout.includes(`tx estate event ${hook} --page #{q:window_name}`);
+    }));
+    const [pane_died = false, pane_exited = false] = observed;
+    return {
+      state: pane_died && pane_exited ? 'ready' : 'degraded',
+      pane_died,
+      pane_exited,
+    };
+  }
+
+  async ensureLifecycleHooks(): Promise<void> {
+    for (const [hook, command] of Object.entries(this.lifecycleHookCommands())) {
       await this.checked(['set-hook', '-g', hook, command], `install ${hook} lifecycle witness`);
-      const observed = await this.checked(['show-hooks', '-g', hook], `attest ${hook} lifecycle witness`);
-      if (!observed.includes(`tx estate event ${hook}`)) {
-        throw new Error(`txd could not attest ${hook} lifecycle witness`);
-      }
+    }
+    const readiness = await this.lifecycleHookReadiness();
+    if (readiness.state !== 'ready') {
+      throw new Error('txd could not attest its lifecycle witnesses');
     }
   }
 
@@ -2195,9 +2225,20 @@ export class FakeTmux implements TmuxControlPlane {
   private attachedClients = new Set<string>();
   private deliveredSelections: string[] = [];
   private wrapperPlacements = new Map<number, string>();
+  private lifecycleHooks = { pane_died: false, pane_exited: false };
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
+  }
+  async ensureLifecycleHooks(): Promise<void> {
+    this.lifecycleHooks = { pane_died: true, pane_exited: true };
+  }
+  async lifecycleHookReadiness(): Promise<LifecycleHookReadiness> {
+    const { pane_died, pane_exited } = this.lifecycleHooks;
+    return { state: pane_died && pane_exited ? 'ready' : 'degraded', pane_died, pane_exited };
+  }
+  stripLifecycleHooks(): void {
+    this.lifecycleHooks = { pane_died: false, pane_exited: false };
   }
   async version(): Promise<string | null> {
     return 'tmux 3.5a (fake)';
@@ -2267,6 +2308,7 @@ export class FakeTmux implements TmuxControlPlane {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));
   }
   async ensureEstate(): Promise<EstateEnsureResult> {
+    await this.ensureLifecycleHooks();
     if (this.shape.sessions.length > 0) {
       const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && Object.entries(TXD_WINDOWS).every(([page, required]) => {

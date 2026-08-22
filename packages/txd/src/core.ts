@@ -3847,12 +3847,14 @@ export class Daemon {
     // responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
     const estate_generation = await this.tmux.estateGeneration();
+    const hooks = await this.tmux.lifecycleHookReadiness();
     const activation_pending = estate_generation === 'foreign';
     const open = proj.openContradictions.length;
     const tints = await this.tintReadiness();
     return {
       ok: open === 0
         && tmux_reachable
+        && hooks.state === 'ready'
         && estate_generation === 'canonical'
         && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
@@ -3864,6 +3866,7 @@ export class Daemon {
       events: await this.store.count(),
       open_contradictions: open,
       tmux_reachable,
+      hooks,
       estate_generation,
       activation_pending,
       tints,
