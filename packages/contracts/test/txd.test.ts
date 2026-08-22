@@ -236,6 +236,7 @@ describe("txd lifecycle vocabulary", () => {
       events: 0,
       open_contradictions: 0,
       tmux_reachable: true,
+      hooks: { state: "ready", pane_died: true, pane_exited: true },
       estate_generation: "canonical",
       activation_pending: false,
       tints: [],
