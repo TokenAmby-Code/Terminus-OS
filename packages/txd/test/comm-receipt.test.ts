@@ -65,3 +65,57 @@ test('tier 2 returns bytes sent at the bound, then a late attestation emits a re
     expect.objectContaining({ payload: expect.objectContaining({ message_ids: [accepted.message_id], submit_verdict: 'staged' }) }),
   ]);
 });
+
+test('a throwing admission observer cannot abort the already-committed transport', async () => {
+  const { daemon, tmux } = await rig();
+  const accepted = await daemon.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'target',
+    message: 'observer isolation',
+    ask: false,
+    reply: false,
+  }, null, () => { throw new Error('observer disconnected'); });
+  expect(accepted.staged).toBe(true);
+  expect(tmux.sends('palace:W')).toHaveLength(1);
+});
+
+test('a restarted daemon terminalizes an admitted transport that has no active operation or receipt rows', async () => {
+  const { daemon, store, tmux } = await rig();
+  let transportStarted!: () => void;
+  const started = new Promise<void>((resolve) => { transportStarted = resolve; });
+  let releaseTransport!: () => void;
+  const held = new Promise<void>((resolve) => { releaseTransport = resolve; });
+  tmux.sendVerifiedToSeat = async () => {
+    transportStarted();
+    await held;
+    throw new Error('old process ended');
+  };
+  let admission!: { message_id: string };
+  const oldProcess = daemon.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'target',
+    message: 'restart recovery',
+    ask: false,
+    reply: false,
+  }, null, (value) => { admission = value; });
+  await started;
+
+  const restarted = new Daemon(store, tmux);
+  try {
+    expect(await restarted.waitCommReceipt({
+      schema_version: SCHEMA_VERSION,
+      message_id: admission.message_id,
+      source_agent_id: 'sender',
+    })).toMatchObject({
+      ok: false,
+      phase: 'transport_refused',
+      message_id: admission.message_id,
+      submit_verdict: 'transport_failed',
+    });
+  } finally {
+    releaseTransport();
+    await oldProcess;
+  }
+});

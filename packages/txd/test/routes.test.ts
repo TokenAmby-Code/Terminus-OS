@@ -221,7 +221,15 @@ test('a pane transport exception after comm admission becomes a durable refusal 
       occurred_at: '2026-08-22T12:00:00.000Z',
     });
   }
-  tmux.sendVerifiedToSeat = async () => { throw new Error('pane transport rejected'); };
+  let transportStarted!: () => void;
+  const started = new Promise<void>((resolve) => { transportStarted = resolve; });
+  let releaseTransport!: () => void;
+  const held = new Promise<void>((resolve) => { releaseTransport = resolve; });
+  tmux.sendVerifiedToSeat = async () => {
+    transportStarted();
+    await held;
+    throw new Error('pane transport rejected');
+  };
 
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
   try {
@@ -237,6 +245,7 @@ test('a pane transport exception after comm admission becomes a durable refusal 
         reply: false,
       }),
     })).json() as { message_id: string };
+    await started;
     const receipt = fetch(`http://127.0.0.1:${srv.port}/agents/comm/receipt`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -246,13 +255,15 @@ test('a pane transport exception after comm admission becomes a durable refusal 
         message_id: admission.message_id,
       }),
     }).then((response) => response.json());
-    expect(await Promise.race([receipt, Bun.sleep(100).then(() => 'still-waiting')])).toMatchObject({
+    releaseTransport();
+    expect(await receipt).toMatchObject({
       ok: false,
       phase: 'transport_refused',
       message_id: admission.message_id,
       submit_verdict: 'transport_failed',
     });
   } finally {
+    releaseTransport();
     srv.stop(true);
   }
 });

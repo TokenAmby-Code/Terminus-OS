@@ -223,6 +223,7 @@ function committedTransportBytes(outcome: { bytes: number; verdict: string }): n
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
+  private commTransportsInFlight = new Set<string>();
   private commTransportWaiters = new Map<string, Set<() => void>>();
   private deliveryWaiters = new Map<string, Set<() => void>>();
   private composerObservationsInFlight = new Map<string, Promise<boolean>>();
@@ -1465,14 +1466,24 @@ export class Daemon {
     // Expose it before pane I/O: verified staging can legitimately outlive an
     // HTTP header ceiling, and withholding this already-committed id made a
     // successful delivery indistinguishable from a lost request.
-    onAccepted?.({
-      ok: true,
-      message_id: prepared.messageId,
-      ask_id: prepared.askId,
-      source_agent_id: req.source_agent_id,
-      targets: prepared.targets,
-      event_ids: prepared.eventIds,
-    });
+    this.commTransportsInFlight.add(prepared.messageId);
+    try {
+      onAccepted?.({
+        ok: true,
+        message_id: prepared.messageId,
+        ask_id: prepared.askId,
+        source_agent_id: req.source_agent_id,
+        targets: prepared.targets,
+        event_ids: prepared.eventIds,
+      });
+    } catch (error) {
+      // Admission is committed. A caller-side notification failure cannot
+      // cancel the transport transaction it was only observing.
+      console.error(JSON.stringify({
+        level: 'error', event: 'comm_admission_observer_failed',
+        message_id: prepared.messageId, error: String(error),
+      }));
+    }
 
     // Tmux repaint is an external wait. It must never hold the journal mutex:
     // UserPromptSubmit can arrive as soon as Enter is driven, and that hook is
@@ -1613,6 +1624,7 @@ export class Daemon {
       // A receipt waiter must observe either the persisted rows or the
       // persistence failure; no post-admission completion path may leave it
       // asleep forever.
+      this.commTransportsInFlight.delete(prepared.messageId);
       this.wakeCommTransport(prepared.messageId);
     }
     for (const arm of completionArms) {
@@ -1974,6 +1986,47 @@ export class Daemon {
     this.commTransportWaiters.delete(messageId);
   }
 
+  /**
+   * A committed admission with missing transport rows is terminal only when
+   * no transport operation for it exists in this daemon. That condition is
+   * what a restart proves: the former process cannot still complete pane I/O.
+   * Persist the per-target refusal so later receipt reads remain durable.
+   */
+  private terminalizeInactiveCommTransport(messageId: string): Promise<void> {
+    return this.locked(async () => {
+      if (this.commTransportsInFlight.has(messageId)) return;
+      const events = await this.store.readAll();
+      const accepted = events.find((event) => event.entity_id === messageId
+        && event.event_type === 'reg.comm_accepted');
+      if (!accepted) return;
+      const targets = (accepted.payload.targets ?? []) as CommTarget[];
+      const receipted = new Set(events.filter((event) => event.entity_id === messageId
+        && event.event_type === 'act.comm_bytes_sent')
+        .map((event) => String(event.payload.target_agent_id)));
+      for (const target of targets) {
+        if (receipted.has(target.agent_id)) continue;
+        const deadline = this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS;
+        await this.store.append({
+          entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
+          payload: {
+            target_agent_id: target.agent_id,
+            seat_id: target.seat_id,
+            bytes: 0,
+            submit_verdict: 'transport_failed',
+            target_turn: 'unobserved',
+            kind: accepted.payload.kind ?? 'message',
+            name: accepted.payload.name ?? null,
+            rendered_frame: accepted.payload.rendered_frame ?? null,
+            receipt_deadline_at: new Date(deadline).toISOString(),
+            failure_reason: 'transport_process_ended',
+          },
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+      }
+    });
+  }
+
   // One flush, every message it carried. A frame this agent was never a target
   // of belongs to someone else's correspondence and is skipped in silence; only
   // a flush that matched NOTHING is a refusal, so an ordinary prompt still
@@ -2204,6 +2257,11 @@ export class Daemon {
     try {
       let current = await state();
       const targets = (current.accepted.payload.targets ?? []) as CommTarget[];
+      if (current.sent.length < targets.length
+        && !this.commTransportsInFlight.has(req.message_id)) {
+        await this.terminalizeInactiveCommTransport(req.message_id);
+        current = await state();
+      }
       // Admission is returned before pane I/O. Join the daemon's one transport
       // completion event instead of polling or inventing a timeout for an
       // operation with no truthful elapsed-time ceiling.
