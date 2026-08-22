@@ -24,8 +24,8 @@ test('journal lane initialization reads the external head without a row lock', a
 
   await new PostgresJournalConsumerStore(sql, 'txd').initializeLane(lane);
 
-  expect(queries.find((query) => query.includes('journal.head'))).toBe(
-    'SELECT committed_seq FROM journal.head WHERE singleton',
-  );
+  const headQueries = queries.filter((query) => query.includes('journal.head'));
+  expect(headQueries).toContain('SELECT committed_seq FROM journal.head WHERE singleton');
+  expect(headQueries.every((query) => !/\bFOR UPDATE\b/i.test(query))).toBe(true);
   expect(queries.find((query) => query.includes('journal_cursors WHERE lane'))).toContain('FOR UPDATE');
 });
