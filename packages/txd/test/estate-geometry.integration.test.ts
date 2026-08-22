@@ -104,6 +104,20 @@ describe('disposable canonical estate geometry', () => {
     ]);
   });
 
+  test('council rebuild accepts its own construction at the live cockpit size', async () => {
+    // 106x79 is the size the k12-personal cockpit actually runs. At height 79
+    // the 67% column split resolves to 53/25, and an acceptance tolerance that
+    // does not share the constructor's arithmetic rejects the page txd itself
+    // just built — which on a boot recovery is a crash loop, not a red check.
+    const socket = `txd-council-cockpit-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '106', '-y', '79');
+    expect(await control.rebuildPage('council')).toBe(true);
+  });
+
   test('every canonical pane owns its placement environment and txd restamps it on respawn', async () => {
     const socket = `txd-pane-environment-${process.pid}`;
     sockets.push(socket);

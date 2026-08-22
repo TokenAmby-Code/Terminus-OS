@@ -40,6 +40,11 @@ export type EstateEnsureResult = {
   rebuilt_pages: TxdPage[];
 };
 export type EstateGeneration = 'empty' | 'canonical' | 'recoverable' | 'foreign';
+export type LifecycleHookReadiness = {
+  state: 'ready' | 'degraded';
+  pane_died: boolean;
+  pane_exited: boolean;
+};
 export type SeatEngineLaunch = {
   seatId: string;
   engine: 'claude' | 'codex';
@@ -153,6 +158,10 @@ export type ShellRunStaged = { completion: Promise<ShellRunOutcome> };
 
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
+  /** Install the daemon's tmux lifecycle witnesses and verify their physical read-back. */
+  ensureLifecycleHooks(): Promise<void>;
+  /** Observe the currently installed witnesses; procedure completion is not health evidence. */
+  lifecycleHookReadiness(): Promise<LifecycleHookReadiness>;
   version(): Promise<string | null>;
   workloads(): Promise<SeatWorkload[]>;
   killServer(): Promise<boolean>;
@@ -931,7 +940,12 @@ export class RealTmux implements TmuxControlPlane {
         && se.left === ne.left && se.top === ne.top + ne.height + 1
         && nw.width === sw.width && ne.width === se.width
         && nw.height === ne.height && sw.height === se.height
-        && Math.abs(nw.height - (2 * sw.height)) <= 2
+        // The column splits at the fraction REPAIR_SPLITS declares for the top
+        // seat (67%). tmux resolves that percentage of the whole column height
+        // (both panes plus their shared border) to an integer pane height, and
+        // rounding direction is tmux's, not ours — so acceptance recomputes the
+        // same fraction of the same column and allows the one row of rounding.
+        && Math.abs(nw.height - 0.67 * (nw.height + sw.height + 1)) <= 1
         && ne.left + ne.width === nw.windowWidth
         && sw.top + sw.height === nw.windowHeight
         && se.top + se.height === nw.windowHeight;
@@ -1021,17 +1035,38 @@ export class RealTmux implements TmuxControlPlane {
     return recoverable ? 'recoverable' : 'foreign';
   }
 
-  async ensureLifecycleHooks(): Promise<void> {
-    const commands = {
+  private lifecycleHookCommands() {
+    return {
       'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name}"',
       'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page #{q:window_name}"',
     } as const;
-    for (const [hook, command] of Object.entries(commands)) {
+  }
+
+  async lifecycleHookReadiness(): Promise<LifecycleHookReadiness> {
+    const observed = await Promise.all(Object.keys(this.lifecycleHookCommands()).map(async (hook) => {
+      const result = await this.command('observe_lifecycle_hook', hook, ['show-hooks', '-g', hook]);
+      // tmux expands $HOME while storing the hook, so read-back cannot be a
+      // byte comparison with the submitted command. Pin every semantic part
+      // that makes this the daemon's witness rather than an arbitrary hook.
+      return result.code === 0
+        && result.stdout.includes(`${hook}[`)
+        && result.stdout.includes(`tx estate event ${hook} --page #{q:window_name}`);
+    }));
+    const [pane_died = false, pane_exited = false] = observed;
+    return {
+      state: pane_died && pane_exited ? 'ready' : 'degraded',
+      pane_died,
+      pane_exited,
+    };
+  }
+
+  async ensureLifecycleHooks(): Promise<void> {
+    for (const [hook, command] of Object.entries(this.lifecycleHookCommands())) {
       await this.checked(['set-hook', '-g', hook, command], `install ${hook} lifecycle witness`);
-      const observed = await this.checked(['show-hooks', '-g', hook], `attest ${hook} lifecycle witness`);
-      if (!observed.includes(`tx estate event ${hook}`)) {
-        throw new Error(`txd could not attest ${hook} lifecycle witness`);
-      }
+    }
+    const readiness = await this.lifecycleHookReadiness();
+    if (readiness.state !== 'ready') {
+      throw new Error('txd could not attest its lifecycle witnesses');
     }
   }
 
@@ -1764,6 +1799,19 @@ export class RealTmux implements TmuxControlPlane {
       return Number(collapsedPaste[1]) === [...expectedFrame].length ? 'intact' : 'corrupted';
     }
 
+    // Claude collapses a bracketed multiline paste to a numbered native
+    // receipt. The ordinal identifies Claude's paste attachment, while the
+    // `+N lines` count is the exact number of newlines accepted from the
+    // already-attested tmux buffer. Accept only the whole, otherwise-empty
+    // composer receipt with the expected line shape. A receipt embedded in a
+    // draft, or one for a differently shaped paste, is corruption.
+    const claudeCollapsedPaste = visibleRegion
+      .match(/^\[Pastedtext#\d+\+(\d+)lines\]$/);
+    if (claudeCollapsedPaste) {
+      const expectedNewlines = expectedFrame.match(/\n/g)?.length ?? 0;
+      return Number(claudeCollapsedPaste[1]) === expectedNewlines ? 'intact' : 'corrupted';
+    }
+
     if (visibleRegion === expected) return 'intact';
     const minimumProofLength = 32;
     if (visibleRegion.length >= minimumProofLength && expected.endsWith(visibleRegion)) return 'intact';
@@ -2177,9 +2225,20 @@ export class FakeTmux implements TmuxControlPlane {
   private attachedClients = new Set<string>();
   private deliveredSelections: string[] = [];
   private wrapperPlacements = new Map<number, string>();
+  private lifecycleHooks = { pane_died: false, pane_exited: false };
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
+  }
+  async ensureLifecycleHooks(): Promise<void> {
+    this.lifecycleHooks = { pane_died: true, pane_exited: true };
+  }
+  async lifecycleHookReadiness(): Promise<LifecycleHookReadiness> {
+    const { pane_died, pane_exited } = this.lifecycleHooks;
+    return { state: pane_died && pane_exited ? 'ready' : 'degraded', pane_died, pane_exited };
+  }
+  stripLifecycleHooks(): void {
+    this.lifecycleHooks = { pane_died: false, pane_exited: false };
   }
   async version(): Promise<string | null> {
     return 'tmux 3.5a (fake)';
@@ -2249,6 +2308,7 @@ export class FakeTmux implements TmuxControlPlane {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));
   }
   async ensureEstate(): Promise<EstateEnsureResult> {
+    await this.ensureLifecycleHooks();
     if (this.shape.sessions.length > 0) {
       const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && Object.entries(TXD_WINDOWS).every(([page, required]) => {

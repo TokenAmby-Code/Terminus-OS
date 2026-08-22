@@ -65,7 +65,7 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
   }
 });
 
-test('tier 1: an on-time delivery attestation is the sole comm return value', async () => {
+test('tier 1: an on-time delivery attestation follows the durable admission id', async () => {
   const old = process.env.AGENT_ID;
   process.env.AGENT_ID = 'source';
   const stdout: string[] = [];
@@ -89,14 +89,15 @@ test('tier 1: an on-time delivery attestation is the sole comm return value', as
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
     expect(calls.map((call) => call.path)).toEqual(['/agents/comm', '/agents/comm/receipt']);
     expect(calls[1]?.body).toEqual({ schema_version: 12, message_id: 'message-1', source_agent_id: 'source' });
-    expect(stdout).toHaveLength(1);
-    expect(JSON.parse(stdout[0]!).phase).toBe('delivery_confirmed');
+    expect(stdout).toHaveLength(2);
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ message_id: 'message-1' });
+    expect(JSON.parse(stdout[1]!).phase).toBe('delivery_confirmed');
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }
 });
 
-test('tier 2: the bounded wait returns bytes sent as the sole comm return value', async () => {
+test('tier 2: the bounded wait returns bytes sent after the durable admission id', async () => {
   const old = process.env.AGENT_ID;
   process.env.AGENT_ID = 'source';
   const stdout: string[] = [];
@@ -109,9 +110,40 @@ test('tier 2: the bounded wait returns bytes sent as the sole comm return value'
   };
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
-    expect(stdout).toHaveLength(1);
-    expect(JSON.parse(stdout[0]!)).toMatchObject({ phase: 'bytes_sent', bytes_sent: 5 });
+    expect(stdout).toHaveLength(2);
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ message_id: 'message-2' });
+    expect(JSON.parse(stdout[1]!)).toMatchObject({ phase: 'bytes_sent', bytes_sent: 5 });
   } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('the durable admission id is printed before an unbounded transport receipt wait settles', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const stdout: string[] = [];
+  let firstOutput!: (value: unknown) => void;
+  const admissionPrinted = new Promise<unknown>((resolve) => { firstOutput = resolve; });
+  let releaseReceipt!: () => void;
+  const receiptHeld = new Promise<void>((resolve) => { releaseReceipt = resolve; });
+  const pending = runCli(['comm', 'target', 'hello'], {
+    request: async (_method, path) => {
+      if (path === '/agents/comm') return { ok: true, message_id: 'durable-message', ask_id: null };
+      await receiptHeld;
+      return { ok: true, phase: 'bytes_sent', message_id: 'durable-message', source_agent_id: 'source', bytes_sent: 5, staged: true, targets: [] };
+    },
+    stdout: (line) => {
+      stdout.push(line);
+      if (stdout.length === 1) firstOutput(JSON.parse(line));
+    },
+    stderr: () => {},
+  });
+  try {
+    expect(await admissionPrinted).toMatchObject({ message_id: 'durable-message' });
+    expect(stdout).toHaveLength(1);
+  } finally {
+    releaseReceipt();
+    await pending;
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }
 });
@@ -138,7 +170,7 @@ test('behavioral pin: a typed comm transport refusal is printed and exits non-ze
   };
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(1);
-    expect(JSON.parse(stdout[0]!)).toMatchObject({
+    expect(JSON.parse(stdout[1]!)).toMatchObject({
       ok: false,
       phase: 'transport_refused',
       submit_verdict: 'transport_failed',

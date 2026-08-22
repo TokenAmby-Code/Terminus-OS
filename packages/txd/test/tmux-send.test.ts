@@ -85,6 +85,27 @@ test('behavioral pin: a replaced pane generation refuses before transport effect
   expect(calls.some((args) => args[0] === 'paste-buffer')).toBe(false);
 });
 
+test('behavioral pin: Claude collapsed-paste receipt verifies the exact multiline frame shape', () => {
+  const messageId = '11111111-1111-4111-8111-111111111111';
+  const frame = `[tx comm ${messageId} from sender]\n${'long operator report '.repeat(90)}`;
+
+  expect(RealTmux.composerVerdict(
+    `❯ [Pasted text #21 +1 lines]\n${'─'.repeat(80)}\n  /workspace • Context 9% used`,
+    messageId,
+    frame,
+  )).toBe('intact');
+  expect(RealTmux.composerVerdict(
+    `❯ [Pasted text #21 +2 lines]\n${'─'.repeat(80)}\n  /workspace • Context 9% used`,
+    messageId,
+    frame,
+  )).toBe('corrupted');
+  expect(RealTmux.composerVerdict(
+    `❯ stale draft [Pasted text #21 +1 lines]\n${'─'.repeat(80)}\n  /workspace • Context 9% used`,
+    messageId,
+    frame,
+  )).toBe('corrupted');
+});
+
 // ── Composer observation at rest — the stop-join's evidence read ───────────
 // One capture when the target's stop lands (the engine is idle; the repaint
 // race that killed send-time observation does not exist here). A VISIBLE

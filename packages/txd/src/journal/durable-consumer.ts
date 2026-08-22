@@ -84,7 +84,7 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
   async initializeLane(lane: JournalLane<any>): Promise<void> {
     validateLane(lane);
     await this.sql.begin(async (transaction) => {
-      const headRows = await transaction.unsafe("SELECT committed_seq FROM journal.head WHERE singleton FOR UPDATE");
+      const headRows = await transaction.unsafe("SELECT committed_seq FROM journal.head WHERE singleton");
       const head = Number(headRows[0]?.committed_seq);
       if (!Number.isSafeInteger(head) || head < 0) throw new Error("journal_head_missing");
       const seed = lane.seed.kind === "beginning" ? 0 : lane.seed.kind === "now" ? head : lane.seed.seq;

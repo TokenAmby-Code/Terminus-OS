@@ -39,14 +39,16 @@ test('adapter failures expose only a stderr category', async () => {
 
 test('lifecycle hook commands shell-quote the tmux-supplied page name', async () => {
   const installed: string[] = [];
+  const installedByHook = new Map<string, string>();
   const tmux = new RealTmux('scratch', {
     run: async (_socket, args) => {
       if (args[0] === 'set-hook') {
         installed.push(args.at(-1)!);
+        installedByHook.set(args.at(-2)!, args.at(-1)!);
         return { code: 0, stdout: '', stderr: '' };
       }
       if (args[0] === 'show-hooks') {
-        return { code: 0, stdout: `tx estate event ${args.at(-1)}\n`, stderr: '' };
+        return { code: 0, stdout: `${args.at(-1)}[0] ${installedByHook.get(args.at(-1)!) ?? ''}\n`, stderr: '' };
       }
       throw new Error(`unexpected command ${args[0]}`);
     },
