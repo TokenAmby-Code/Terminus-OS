@@ -139,6 +139,8 @@ export type CommReceiptRuntime = {
   now: () => number;
   schedule: (wake: () => void, delayMs: number) => () => void;
 };
+export type CommAdmission = Pick<CommAccepted,
+  'ok' | 'message_id' | 'ask_id' | 'source_agent_id' | 'targets' | 'event_ids'>;
 const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
   now: () => Date.now(),
   schedule: (wake, delayMs) => {
@@ -221,6 +223,7 @@ function committedTransportBytes(outcome: { bytes: number; verdict: string }): n
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private commWaiters = new Map<string, Set<() => void>>();
+  private commTransportWaiters = new Map<string, Set<() => void>>();
   private deliveryWaiters = new Map<string, Set<() => void>>();
   private composerObservationsInFlight = new Map<string, Promise<boolean>>();
   // Live pane-shell runs by seat, so a physical pane replacement can abort
@@ -1361,7 +1364,11 @@ export class Daemon {
     }
   }
 
-  async comm(req: CommRequest, transportReceipt: string | null = null): Promise<CommAccepted> {
+  async comm(
+    req: CommRequest,
+    transportReceipt: string | null = null,
+    onAccepted?: (admission: CommAdmission) => void,
+  ): Promise<CommAccepted> {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
@@ -1452,6 +1459,19 @@ export class Daemon {
         // stamp lets the turn-stop join later read the receipt as consumable.
         return { target, binding, frame, target_turn: proj.turnByAgent.get(target.agent_id) ?? 'unobserved' };
       });
+    });
+
+    // The journaled admission is the sender's durable correlation handle.
+    // Expose it before pane I/O: verified staging can legitimately outlive an
+    // HTTP header ceiling, and withholding this already-committed id made a
+    // successful delivery indistinguishable from a lost request.
+    onAccepted?.({
+      ok: true,
+      message_id: prepared.messageId,
+      ask_id: prepared.askId,
+      source_agent_id: req.source_agent_id,
+      targets: prepared.targets,
+      event_ids: prepared.eventIds,
     });
 
     // Tmux repaint is an external wait. It must never hold the journal mutex:
@@ -1579,6 +1599,7 @@ export class Daemon {
       return { ok: true, message_id: prepared.messageId, ask_id: prepared.askId, source_agent_id: req.source_agent_id,
         targets: prepared.targets, staged: allStaged, event_ids };
     });
+    this.wakeCommTransport(prepared.messageId);
     for (const arm of completionArms) {
       this.commReceiptRuntime.schedule(
         () => this.completeLostEnter(arm),
@@ -1933,6 +1954,11 @@ export class Daemon {
     this.deliveryWaiters.delete(messageId);
   }
 
+  private wakeCommTransport(messageId: string): void {
+    for (const wake of this.commTransportWaiters.get(messageId) ?? []) wake();
+    this.commTransportWaiters.delete(messageId);
+  }
+
   // One flush, every message it carried. A frame this agent was never a target
   // of belongs to someone else's correspondence and is skipped in silence; only
   // a flush that matched NOTHING is a refusal, so an ordinary prompt still
@@ -2137,7 +2163,6 @@ export class Daemon {
       const sentRows = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
       const sent = [...new Map(sentRows.map((event) => [String(event.payload.target_agent_id), event])).values()];
       const deadline = Math.max(...sent.map((event) => Date.parse(String(event.payload.receipt_deadline_at ?? ''))));
-      if (!Number.isFinite(deadline)) throw new Error('comm_receipt_deadline_absent');
       const deadlineByTarget = new Map(sent.map((event) => [
         String(event.payload.target_agent_id),
         Date.parse(String(event.payload.receipt_deadline_at ?? '')),
@@ -2150,6 +2175,11 @@ export class Daemon {
       return { accepted, delivery, sent, deadline, timely };
     };
 
+    let transportWake!: () => void;
+    const transportEvent = new Promise<void>((resolve) => { transportWake = resolve; });
+    const transportWaiters = this.commTransportWaiters.get(req.message_id) ?? new Set<() => void>();
+    transportWaiters.add(transportWake);
+    this.commTransportWaiters.set(req.message_id, transportWaiters);
     let wake!: () => void;
     const event = new Promise<void>((resolve) => { wake = resolve; });
     const waiters = this.deliveryWaiters.get(req.message_id) ?? new Set<() => void>();
@@ -2159,6 +2189,14 @@ export class Daemon {
     try {
       let current = await state();
       const targets = (current.accepted.payload.targets ?? []) as CommTarget[];
+      // Admission is returned before pane I/O. Join the daemon's one transport
+      // completion event instead of polling or inventing a timeout for an
+      // operation with no truthful elapsed-time ceiling.
+      if (current.sent.length < targets.length) {
+        await transportEvent;
+        current = await state();
+      }
+      if (!Number.isFinite(current.deadline)) throw new Error('comm_receipt_deadline_absent');
       const unstaged = current.sent.filter((row) => row.payload.submit_verdict !== 'staged');
       if (current.sent.length === targets.length && unstaged.length > 0) {
         const verdicts = new Set(unstaged.map((row) => String(row.payload.submit_verdict)));
@@ -2216,6 +2254,9 @@ export class Daemon {
       };
     } finally {
       cancel();
+      const transportCurrent = this.commTransportWaiters.get(req.message_id);
+      transportCurrent?.delete(transportWake);
+      if (transportCurrent?.size === 0) this.commTransportWaiters.delete(req.message_id);
       const current = this.deliveryWaiters.get(req.message_id);
       current?.delete(wake);
       if (current?.size === 0) this.deliveryWaiters.delete(req.message_id);

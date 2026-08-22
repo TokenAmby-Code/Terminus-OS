@@ -48,7 +48,7 @@ import {
   type HookDiagnostic,
 } from '@terminus-os/contracts';
 import { commFrameTokens } from './comm-frame.ts';
-import type { Daemon } from './core.ts';
+import type { CommAdmission, Daemon } from './core.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 import { readHookDiagnostics } from './diagnostics.ts';
@@ -304,7 +304,28 @@ export function buildRoutes(
         const parsed = await parseMutation(req, CommRequestSchema, 'invalid_comm_request');
         if (parsed instanceof Response) return parsed;
         try {
-          return json(await daemon.comm(parsed, receipt(req)));
+          let admitted = false;
+          let messageId: string | null = null;
+          let accept!: (value: CommAdmission) => void;
+          let refuse!: (error: unknown) => void;
+          const admission = new Promise<CommAdmission>((resolve, reject) => {
+            accept = resolve;
+            refuse = reject;
+          });
+          void daemon.comm(parsed, receipt(req), (value) => {
+            admitted = true;
+            messageId = value.message_id;
+            accept(value);
+          }).catch((error) => {
+            if (!admitted) refuse(error);
+            else console.error(JSON.stringify({
+              level: 'error',
+              event: 'comm_transport_after_admission_failed',
+              message_id: messageId,
+              error: sanitizeTmuxIds(String(error)),
+            }));
+          });
+          return json(await admission);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           return json({ ok: false, error: 'comm_refused', detail }, 422);
