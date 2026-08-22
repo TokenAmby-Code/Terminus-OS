@@ -44,3 +44,24 @@ test('daemon restart with stripped tmux hooks stays degraded until boot re-attes
     },
   });
 });
+
+test('boot re-attests lifecycle hooks after estate convergence changes them', async () => {
+  class HookStrippingEstateTmux extends FakeTmux {
+    override async ensureEstate() {
+      const estate = await super.ensureEstate();
+      this.stripLifecycleHooks();
+      return estate;
+    }
+  }
+
+  const tmux = new HookStrippingEstateTmux();
+  const daemon = new Daemon(new MemoryEventStore(), tmux);
+
+  await daemon.constructEstateAtBoot();
+
+  expect(await tmux.lifecycleHookReadiness()).toEqual({
+    state: 'ready',
+    pane_died: true,
+    pane_exited: true,
+  });
+});
