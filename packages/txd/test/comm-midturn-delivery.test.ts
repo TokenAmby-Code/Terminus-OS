@@ -77,6 +77,42 @@ test('behavioral pin: a mid-turn staged frame absent from the composer at the ta
   });
 });
 
+test('behavioral pin: the stop join cannot assert for a receiver absent from the target snapshot', async () => {
+  const { store, tmux, daemon } = await rig();
+  await targetWorking(store);
+  const messageId = crypto.randomUUID();
+  const frame = 'snapshot mismatch frame';
+  const provenance = { source: 'observer' as const, transport_receipt: null, emitter_version: SCHEMA_VERSION };
+  await store.append({
+    entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted',
+    payload: {
+      source_agent_id: 'sender', source: { persona: 'p', seat_id: 'council:custodes' },
+      target_agent_ids: ['target'], targets: [{ agent_id: 'target', seat_id: 'palace:W', persona: 'p' }],
+      ask_id: null, reply_to_ask_id: null, kind: 'message', name: null, rendered_frame: frame,
+      message: 'contract disagreement',
+    }, provenance, occurred_at: '2026-08-19T00:00:02.000Z',
+  });
+  await store.append({
+    entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_target_snapshotted',
+    payload: { message_id: messageId, targets: [] }, provenance, occurred_at: '2026-08-19T00:00:02.000Z',
+  });
+  await store.append({
+    entity_type: 'message', entity_id: messageId, event_type: 'act.comm_bytes_sent',
+    payload: {
+      target_agent_id: 'target', seat_id: 'palace:W', bytes: frame.length,
+      submit_verdict: 'staged', target_turn: 'working', kind: 'message', name: null,
+      rendered_frame: frame,
+    }, provenance, occurred_at: '2026-08-19T00:00:03.000Z',
+  });
+
+  tmux.setPaneText('palace:W', IDLE_COMPOSER);
+  await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
+
+  expect((await store.readAll()).filter((event) =>
+    event.event_type === 'act.comm_delivery_asserted'
+    && event.payload.message_id === messageId)).toEqual([]);
+});
+
 // The receipt records transport facts and the target turn only; that no
 // send-time departure field exists is pinned by the adversarial sweep in
 // comm-midturn-attestation.adversarial.test.ts, the one place the corpse may

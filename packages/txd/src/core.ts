@@ -3003,6 +3003,10 @@ export class Daemon {
         const messageId = receipt.entity_id;
         const accepted = events.find((event) => event.entity_id === messageId && event.event_type === 'reg.comm_accepted');
         if (!accepted) continue;
+        const snapshot = events.find((event) => event.event_type === 'reg.comm_target_snapshotted'
+          && event.payload.message_id === messageId);
+        const snapshotTargets = (snapshot?.payload.targets ?? []) as CommTarget[];
+        if (!snapshotTargets.some((target) => target.agent_id === req.agent_id)) continue;
         const assertionId = `${messageId}:${req.agent_id}`;
         if (events.some((event) => event.entity_id === assertionId && event.event_type === 'act.comm_delivery_asserted')) continue;
         const observation = await this.tmux.observeFrameAbsence(
