@@ -122,22 +122,26 @@ describe('tmux/tx.conf', () => {
     ]) expect(conf).not.toContain(retired);
   });
 
-  test('keeps panes observable through exit and forwards lifecycle events to txd', () => {
+  test('keeps panes observable through exit without owning daemon lifecycle hooks', () => {
     expect(conf).toContain('%if "#{==:#{TXD_TMUX_SOCKET},k12}"');
     expect(conf).toContain('set -g remain-on-exit on');
-    expect(conf).toContain('set-hook -g pane-died');
-    expect(conf).toContain('set-hook -g pane-exited');
-    expect(conf).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page');
-    expect(conf).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page');
     const lifecycleHooks = conf.split('\n').filter((line) =>
       line.startsWith('set-hook -g ') && line.includes('tx estate event'),
     );
-    expect(lifecycleHooks).toHaveLength(4);
+    expect(lifecycleHooks).toHaveLength(2);
     for (const hook of lifecycleHooks) {
       expect(hook).toContain('systemd-cat --identifier=txd-tmux-hook');
       expect(hook).toContain('2>&1');
       expect(hook).toMatch(/\| systemd-cat .* \|\| true"'$/);
     }
+  });
+
+  test('leaves daemon-owned lifecycle hooks untouched on config reload', () => {
+    const daemonOwnedHooks = conf.split('\n').filter((line) =>
+      /^set-hook -g pane-(?:died|exited)\b/.test(line),
+    );
+
+    expect(daemonOwnedHooks).toEqual([]);
   });
 
   test('observes kill commands the pane hooks never see and forwards them page-less', () => {
