@@ -2856,6 +2856,10 @@ export class Daemon {
         for (const binding of selected) await closeOne(binding.agent_id!, binding);
       }
 
+      // Pane kills in a bulk retirement can rewrite tmux's global hook state.
+      // Make physical read-back part of the running-daemon convergence just as
+      // boot does, after the last close has had a chance to clobber it.
+      await this.tmux.ensureLifecycleHooks();
       const closedCount = verdicts.filter((v) => v.closed).length;
       return {
         ok: closedCount === verdicts.length && verdicts.length > 0,

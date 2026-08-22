@@ -127,6 +127,36 @@ test('closing a mitosis worker removes its pane instead of returning a fixed sea
   expect(buildProjections(await store.readAll()).freelist.some((row) => row.seat_id === seat)).toBe(false);
 });
 
+test('behavioral pin: a running-daemon retirement sweep re-attests lifecycle hooks after pane kills', async () => {
+  class HookStrippingRetirementTmux extends FakeTmux {
+    override async killSeat(seatId: string): Promise<void> {
+      await super.killSeat(seatId);
+      this.stripLifecycleHooks();
+    }
+  }
+
+  const store = new MemoryEventStore();
+  const tmux = new HookStrippingRetirementTmux();
+  const d = new Daemon(store, tmux);
+  await d.constructEstate();
+  await overseer(d, store);
+  const agents = Array.from({ length: 9 }, (_, index) => `retirement-${index}`);
+  for (const agent of agents) {
+    const seat = `mechanicus:${agent}`;
+    await tmux.createStackSeat('mechanicus', seat);
+    await bind(d, store, seat, agent);
+  }
+
+  const closed = await d.close(req({ targets: agents, force: true }));
+
+  expect(closed).toMatchObject({ ok: true, closed_count: 9, refused_count: 0 });
+  expect(await tmux.lifecycleHookReadiness()).toEqual({
+    state: 'ready',
+    pane_died: true,
+    pane_exited: true,
+  });
+});
+
 test('an astartes source is refused and the refusal names the required rank', async () => {
   const { store, d } = setup();
   await bind(d, store, 'palace:W', 'w-1');
