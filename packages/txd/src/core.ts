@@ -2656,6 +2656,11 @@ export class Daemon {
       // Construction is all-or-nothing below the membrane: create on an empty
       // socket, accept the exact canonical shape, refuse every other estate.
       const estate = await this.tmux.ensureEstate();
+      // Estate convergence can itself fire or replace tmux hooks while pages
+      // are being rebuilt. The early install inside ensureEstate protects the
+      // reconstruction; this final install + physical read-back is the boot
+      // postcondition the health surface later observes.
+      await this.tmux.ensureLifecycleHooks();
       // A repaired page contains entirely new terminal processes, even when tmux
       // reused one pane object as the reconstruction seed. Resolve every binding
       // in that border into event truth before the fresh bare seats are exposed.
