@@ -237,6 +237,39 @@ test('a dead readiness plane fails loud before bytes and attests the unarmed gap
   expect(unarmed[0]!.payload.target_agent_id).toBe('worker');
 });
 
+test('behavioral pin: durable admission is exposed before a rejecting comm watch is armed', async () => {
+  let admission: { message_id: string } | undefined;
+  const { store, tmux, d } = await fixture(async () => {
+    if (!admission) throw new Error('watch armed before durable admission was exposed');
+    throw new Error('lifecycled unreachable after admission');
+  });
+
+  await expect(d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'admit before watch',
+    ask: false,
+    reply: false,
+  }, null, (accepted) => { admission = accepted; })).rejects.toThrow('lifecycled unreachable after admission');
+
+  expect(tmux.sends('palace:W')).toEqual([]);
+  expect(admission?.message_id).toBeString();
+  const receipt = await d.waitCommReceipt({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    message_id: admission!.message_id,
+  });
+  expect(receipt).toMatchObject({
+    ok: false,
+    phase: 'transport_refused',
+    message_id: admission!.message_id,
+    submit_verdict: 'transport_failed',
+  });
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_bytes_sent'))
+    .toHaveLength(1);
+});
+
 test('behavioral pin: every new ordinary message receipt is typed while historical payloads remain readable', async () => {
   const { store, d } = await fixture(async () => undefined);
   const accepted = await d.comm({

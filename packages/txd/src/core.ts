@@ -1436,36 +1436,9 @@ export class Daemon {
       return { messageId, askId, replyingToAsk, source, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
     });
 
-    await Promise.all(prepared.targets.map((target) => {
-      return this.armCommWatch(prepared.messageId, req.source_agent_id, target.agent_id, transportReceipt);
-    }));
-
-    const plans = await this.locked(async () => {
-      const proj = await this.projections();
-      const events = await this.store.readAll();
-      const pendingResetSeats = this.pendingScopedResetSeats(events);
-      for (const target of prepared.targets) {
-        const binding = proj.currentBindings.find((row) => row.registered
-          && row.agent_id === target.agent_id && row.seat_id === target.seat_id);
-        if (!binding) throw new Error(`target_binding_changed: ${target.agent_id}`);
-        if (pendingResetSeats.has(target.seat_id)) throw new Error(`scoped_reset_pending: ${target.seat_id}`);
-      }
-      return prepared.targets.map((target) => {
-        const binding = proj.currentBindings.find((row) => row.registered
-          && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
-        const frame = prepared.renderedIntent?.frame
-          ?? commFrame(prepared.messageId, prepared.source, req.message!);
-        // The target's turn state at send, stamped on the receipt: a frame
-        // staged into a WORKING engine is queued into that turn, and only that
-        // stamp lets the turn-stop join later read the receipt as consumable.
-        return { target, binding, frame, target_turn: proj.turnByAgent.get(target.agent_id) ?? 'unobserved' };
-      });
-    });
-
     // The journaled admission is the sender's durable correlation handle.
-    // Expose it before pane I/O: verified staging can legitimately outlive an
-    // HTTP header ceiling, and withholding this already-committed id made a
-    // successful delivery indistinguishable from a lost request.
+    // Expose it immediately after persistence: every later step is transport
+    // planning or effect, and none may strand an already-committed id.
     this.commTransportsInFlight.add(prepared.messageId);
     try {
       onAccepted?.({
@@ -1484,6 +1457,33 @@ export class Daemon {
         message_id: prepared.messageId, error: String(error),
       }));
     }
+
+    try {
+      await Promise.all(prepared.targets.map((target) => {
+        return this.armCommWatch(prepared.messageId, req.source_agent_id, target.agent_id, transportReceipt);
+      }));
+
+      const plans = await this.locked(async () => {
+        const proj = await this.projections();
+        const events = await this.store.readAll();
+        const pendingResetSeats = this.pendingScopedResetSeats(events);
+        for (const target of prepared.targets) {
+          const binding = proj.currentBindings.find((row) => row.registered
+            && row.agent_id === target.agent_id && row.seat_id === target.seat_id);
+          if (!binding) throw new Error(`target_binding_changed: ${target.agent_id}`);
+          if (pendingResetSeats.has(target.seat_id)) throw new Error(`scoped_reset_pending: ${target.seat_id}`);
+        }
+        return prepared.targets.map((target) => {
+          const binding = proj.currentBindings.find((row) => row.registered
+            && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
+          const frame = prepared.renderedIntent?.frame
+            ?? commFrame(prepared.messageId, prepared.source, req.message!);
+          // The target's turn state at send, stamped on the receipt: a frame
+          // staged into a WORKING engine is queued into that turn, and only that
+          // stamp lets the turn-stop join later read the receipt as consumable.
+          return { target, binding, frame, target_turn: proj.turnByAgent.get(target.agent_id) ?? 'unobserved' };
+        });
+      });
 
     // Tmux repaint is an external wait. It must never hold the journal mutex:
     // UserPromptSubmit can arrive as soon as Enter is driven, and that hook is
@@ -1633,7 +1633,19 @@ export class Daemon {
         Math.max(0, arm.deadlineAt - this.commReceiptRuntime.now()),
       );
     }
-    return accepted;
+      return accepted;
+    } catch (error) {
+      // Any post-admission planning or transport failure must leave durable
+      // per-target outcomes. Receipt readers can then return a typed refusal
+      // for the admission id the sender already holds.
+      this.commTransportsInFlight.delete(prepared.messageId);
+      try {
+        await this.terminalizeInactiveCommTransport(prepared.messageId);
+      } finally {
+        this.wakeCommTransport(prepared.messageId);
+      }
+      throw error;
+    }
   }
 
   /**

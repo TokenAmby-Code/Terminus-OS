@@ -139,8 +139,8 @@ test('the durable admission id is printed before an unbounded transport receipt 
     stderr: () => {},
   });
   try {
-    expect(await Promise.race([admissionPrinted, Bun.sleep(100).then(() => null)]))
-      .toMatchObject({ message_id: 'durable-message' });
+    expect(await admissionPrinted).toMatchObject({ message_id: 'durable-message' });
+    expect(stdout).toHaveLength(1);
   } finally {
     releaseReceipt();
     await pending;
