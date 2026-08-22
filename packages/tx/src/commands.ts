@@ -84,6 +84,10 @@ async function comm({ args, request, write }: CommandContext): Promise<number> {
     write(accepted);
     return 1;
   }
+  // The admission is already durable and is the sender's only recovery key.
+  // Print it before the event-driven receipt join so an unbounded pane
+  // transport/validation wait cannot hide a message id that txd committed.
+  write(accepted);
   const receipt = await request('POST', '/agents/comm/receipt', {
     schema_version: SCHEMA_VERSION,
     message_id: accepted.message_id,

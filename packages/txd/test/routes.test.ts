@@ -9,7 +9,7 @@ import { Daemon } from '../src/core.ts';
 import { resolveSshSeatTargets } from '../src/config.ts';
 import { EnvelopeInventoryError } from '../src/envelopes.ts';
 import { buildRoutes, deferredJson, makeServer } from '../src/server.ts';
-import { commFrame } from '../src/comm-frame.ts';
+import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 
 function daemon() {
   return new Daemon(new MemoryEventStore(), new FakeTmux());
@@ -128,6 +128,142 @@ test('comm ask sends response headers before the callback wait completes', async
     });
   } finally {
     release({ ask_id: 'ask-1', complete: true, callbacks: [], outstanding: [] });
+    srv.stop(true);
+  }
+});
+
+test('comm admission returns its durable message id before pane delivery finishes, then the receipt joins the emitted transport fact', async () => {
+  const store = new MemoryEventStore();
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux);
+  for (const [seat, identity] of [['council:custodes', 'sender'], ['palace:W', 'target']] as const) {
+    await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity, persona: 'p', rank: 'astartes', tint: '#111111' });
+    await store.append({
+      entity_type: 'agent', entity_id: identity, event_type: 'reg.agent_registered',
+      payload: { persona: 'p', rank: 'astartes', commander: null },
+      provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-22T12:00:00.000Z',
+    });
+  }
+
+  let transportStarted!: () => void;
+  const started = new Promise<void>((resolve) => { transportStarted = resolve; });
+  let releaseTransport!: () => void;
+  const held = new Promise<void>((resolve) => { releaseTransport = resolve; });
+  const send = tmux.sendVerifiedToSeat.bind(tmux);
+  tmux.sendVerifiedToSeat = async (...args) => {
+    transportStarted();
+    await held;
+    return send(...args);
+  };
+
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  let admissionResponse: Response | undefined;
+  try {
+    const admissionPending = fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'sender',
+        target: 'target',
+        message: 'durable sender receipt',
+        ask: false,
+        reply: false,
+      }),
+    });
+    await started;
+    admissionResponse = await Promise.race([
+      admissionPending,
+      Bun.sleep(100).then(() => undefined),
+    ]);
+    expect(admissionResponse).toBeInstanceOf(Response);
+    const admission = await admissionResponse!.json() as { message_id: string };
+    expect(admission.message_id).toMatch(/^[0-9a-f-]{36}$/);
+
+    const receiptPending = fetch(`http://127.0.0.1:${srv.port}/agents/comm/receipt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'sender',
+        message_id: admission.message_id,
+      }),
+    }).then((response) => response.json());
+
+    releaseTransport();
+    await d.promptSubmitted({
+      schema_version: SCHEMA_VERSION,
+      agent_id: 'target',
+      comm_tokens: [commTokenForMessageId(admission.message_id)],
+    });
+    expect(await receiptPending).toMatchObject({
+      ok: true,
+      phase: 'delivery_confirmed',
+      message_id: admission.message_id,
+    });
+  } finally {
+    releaseTransport();
+    srv.stop(true);
+  }
+});
+
+test('a pane transport exception after comm admission becomes a durable refusal receipt', async () => {
+  const store = new MemoryEventStore();
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux);
+  for (const [seat, identity] of [['council:custodes', 'sender'], ['palace:W', 'target']] as const) {
+    await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity, persona: 'p', rank: 'astartes', tint: '#111111' });
+    await store.append({
+      entity_type: 'agent', entity_id: identity, event_type: 'reg.agent_registered',
+      payload: { persona: 'p', rank: 'astartes', commander: null },
+      provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-22T12:00:00.000Z',
+    });
+  }
+  let transportStarted!: () => void;
+  const started = new Promise<void>((resolve) => { transportStarted = resolve; });
+  let releaseTransport!: () => void;
+  const held = new Promise<void>((resolve) => { releaseTransport = resolve; });
+  tmux.sendVerifiedToSeat = async () => {
+    transportStarted();
+    await held;
+    throw new Error('pane transport rejected');
+  };
+
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const admission = await (await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'sender',
+        target: 'target',
+        message: 'refusal receipt',
+        ask: false,
+        reply: false,
+      }),
+    })).json() as { message_id: string };
+    await started;
+    const receipt = fetch(`http://127.0.0.1:${srv.port}/agents/comm/receipt`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'sender',
+        message_id: admission.message_id,
+      }),
+    }).then((response) => response.json());
+    releaseTransport();
+    expect(await receipt).toMatchObject({
+      ok: false,
+      phase: 'transport_refused',
+      message_id: admission.message_id,
+      submit_verdict: 'transport_failed',
+    });
+  } finally {
+    releaseTransport();
     srv.stop(true);
   }
 });

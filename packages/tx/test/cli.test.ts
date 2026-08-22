@@ -183,8 +183,9 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
     expect(calls.map((call) => call.path)).toEqual([
       '/agents/comm', '/agents/comm/receipt', '/agents/comm/wait',
     ]);
-    expect(JSON.parse(stdout[0]!)).toEqual(receipt);
-    expect(JSON.parse(stdout[1]!).callbacks[0].content)
+    expect(JSON.parse(stdout[0]!)).toMatchObject({ message_id: 'message-1', ask_id: 'ask-1' });
+    expect(JSON.parse(stdout[1]!)).toEqual(receipt);
+    expect(JSON.parse(stdout[2]!).callbacks[0].content)
       .toBe('attesting from pane %28 with window @5 and session $5.');
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
