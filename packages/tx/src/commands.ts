@@ -295,7 +295,7 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'compact-events'],
     summary: 'Archive-attested compaction through a reset journal head',
     run: async ({ args, request, write }) => {
-      const usage = 'usage: tx estate compact-events --reset-journal-head <seq> --archive-attestation <snapshot=path;restore-proof=journal.head=seq>';
+      const usage = 'usage: tx estate compact-events --reset-journal-head <seq> --archive-attestation "<snapshot=path;restore-proof=journal.head=seq>"';
       let resetJournalHead: number | undefined;
       let archiveAttestation: string | undefined;
       for (let index = 0; index < args.length; index += 1) {
