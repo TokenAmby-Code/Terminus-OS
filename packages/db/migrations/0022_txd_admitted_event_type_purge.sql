@@ -50,7 +50,8 @@ DELETE FROM txd.events
    'estate.scoped_reset_refused',
    'estate.scoped_reset_requested',
    'estate.scoped_reset_completed',
-   'estate.scoped_reset_failed'
- );
+   'estate.scoped_reset_failed',
+   'estate.compaction_checkpoint'
+);
 
 ALTER TABLE txd.events ENABLE TRIGGER events_no_delete;

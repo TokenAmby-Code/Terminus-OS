@@ -235,6 +235,7 @@ export const ESTATE_EVENT_NAMES = [
   'scoped_reset_requested',
   'scoped_reset_completed',
   'scoped_reset_failed',
+  'compaction_checkpoint',
 ] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
@@ -283,6 +284,7 @@ export const EVENT_TYPES = [
   'estate.scoped_reset_requested',
   'estate.scoped_reset_completed',
   'estate.scoped_reset_failed',
+  'estate.compaction_checkpoint',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const EventTypeSchema = z.enum(EVENT_TYPES);
@@ -344,6 +346,14 @@ export const EventRecordSchema = EventInputSchema.extend({
   recorded_at: z.string(),
 });
 export type EventRecord = z.infer<typeof EventRecordSchema>;
+
+export const EventLogCompactionRequestSchema = z.strictObject({
+  schema_version: z.number().int(),
+  source_agent_id: z.string().min(1),
+  reset_journal_head: z.number().int().positive(),
+  archive_attestation: z.string().regex(/^nas-restore:sha256:[a-f0-9]{64}$/),
+});
+export type EventLogCompactionRequest = z.infer<typeof EventLogCompactionRequestSchema>;
 
 // ── Projections (spec §10) — all three rebuilt by replay, nobody writes them ─
 export const CurrentBindingSchema = z.object({

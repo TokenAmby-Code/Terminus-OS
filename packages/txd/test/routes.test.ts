@@ -47,6 +47,45 @@ test('GET /tmux/read/estate serves the estate view including who is bound', asyn
   }
 });
 
+test('POST /ctl/estate/compact-events carries the operator archive attestation to txd', async () => {
+  const d = daemon();
+  const calls: unknown[] = [];
+  (d as unknown as { compactEventLog: (request: unknown) => Promise<unknown> }).compactEventLog = async (request) => {
+    calls.push(request);
+    return { ok: true, boundary_seq: 7, archived_events: 6, retained_events: 5 };
+  };
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  try {
+    const body = {
+      schema_version: SCHEMA_VERSION,
+      source_agent_id: 'operator-agent',
+      reset_journal_head: 8722,
+      archive_attestation: `nas-restore:sha256:${'a'.repeat(64)}`,
+    };
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/compact-events`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, boundary_seq: 7, archived_events: 6, retained_events: 5 });
+    expect(calls).toEqual([body]);
+  } finally {
+    srv.stop(true);
+  }
+});
+
+test('POST /ctl/estate/compact-events refuses a missing archive attestation', async () => {
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test' });
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/compact-events`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schema_version: SCHEMA_VERSION, source_agent_id: 'operator-agent', reset_journal_head: 8722 }),
+    });
+    expect(res.status).toBe(422);
+  } finally {
+    srv.stop(true);
+  }
+});
+
 test('GET /tmux/read/diagnostics/hooks serves a bounded typed journal view', async () => {
   const limits: number[] = [];
   const srv = makeServer({
