@@ -292,6 +292,36 @@ export const COMMANDS: readonly Command[] = [
     run: async ({ request, write }) => { write(await request('GET', '/ctl/health')); return 0; },
   },
   {
+    path: ['estate', 'compact-events'],
+    summary: 'Archive-attested compaction through a reset journal head',
+    run: async ({ args, request, write }) => {
+      const usage = 'usage: tx estate compact-events --reset-journal-head <seq> --archive-attestation <nas-restore:sha256:digest>';
+      let resetJournalHead: number | undefined;
+      let archiveAttestation: string | undefined;
+      for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index];
+        if (arg === '--reset-journal-head' && resetJournalHead === undefined) {
+          const raw = args[++index];
+          if (!raw || !/^[1-9][0-9]*$/.test(raw)) throw new Error(usage);
+          resetJournalHead = Number(raw);
+        } else if (arg === '--archive-attestation' && archiveAttestation === undefined) {
+          archiveAttestation = args[++index];
+          if (!archiveAttestation) throw new Error(usage);
+        } else {
+          throw new Error(usage);
+        }
+      }
+      if (!Number.isSafeInteger(resetJournalHead) || !archiveAttestation) throw new Error(usage);
+      write(await request('POST', '/ctl/estate/compact-events', {
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: agentSource('estate compact-events'),
+        reset_journal_head: resetJournalHead,
+        archive_attestation: archiveAttestation,
+      }));
+      return 0;
+    },
+  },
+  {
     path: ['estate', 'show'],
     summary: 'Show estate generation, compatibility, and seats',
     run: async ({ args, request, write }) => {

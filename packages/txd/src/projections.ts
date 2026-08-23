@@ -103,6 +103,51 @@ export function buildProjections(events: EventRecord[]): Projections {
   for (const e of events) {
     lastSeqByEntity.set(entityKey(e.entity_type, e.entity_id), e.seq);
     switch (e.event_type) {
+      case 'estate.compaction_checkpoint': {
+        const payload = e.payload;
+        const arrays = [
+          'current_bindings', 'seat_board', 'open_contradictions', 'turn_by_agent',
+          'ever_bound_agents', 'physical_declarations', 'placement_attested_agents',
+          'abandoned_seats', 'launch_compositions', 'transport_claims',
+        ] as const;
+        if (arrays.some((field) => !Array.isArray(payload[field]))) {
+          throw new Error('invalid_estate_compaction_checkpoint');
+        }
+        paneBySeat.clear();
+        bindingBySeat.clear();
+        physicalDeclarations.clear();
+        placementAttestedAgents.clear();
+        turnByAgent.clear();
+        everBoundAgents.clear();
+        lastSeqByEntity.clear();
+        contradictions.length = 0;
+        abandonedSeats.clear();
+        launchCompositions.clear();
+        transportClaims.clear();
+        for (const row of payload.seat_board as SeatBoardRow[]) {
+          if (!row.seat_id) throw new Error('invalid_estate_compaction_checkpoint');
+          paneBySeat.set(row.seat_id, row.pane);
+        }
+        for (const binding of payload.current_bindings as CurrentBinding[]) bindingBySeat.set(binding.seat_id, { ...binding });
+        for (const [agent, turn] of payload.turn_by_agent as Array<[string, TurnState]>) turnByAgent.set(agent, turn);
+        for (const agent of payload.ever_bound_agents as string[]) everBoundAgents.add(agent);
+        for (const raw of payload.physical_declarations as unknown[]) {
+          const declaration = PhysicalDeclarationSchema.parse(raw);
+          if (!declaration.agent_id) throw new Error('invalid_estate_compaction_checkpoint');
+          physicalDeclarations.set(declaration.agent_id, declaration);
+        }
+        for (const agent of payload.placement_attested_agents as string[]) placementAttestedAgents.add(agent);
+        for (const seat of payload.abandoned_seats as string[]) abandonedSeats.add(seat);
+        for (const composition of payload.launch_compositions as LaunchComposition[]) {
+          launchCompositions.set(composition.seat_id, composition);
+        }
+        for (const claim of payload.transport_claims as TransportClaim[]) transportClaims.set(claim.seat_id, claim);
+        for (const contradiction of payload.open_contradictions as OpenContradiction[]) {
+          contradictions.push(contradiction);
+          lastSeqByEntity.set(entityKey(contradiction.entity_type, contradiction.entity_id), contradiction.seq);
+        }
+        break;
+      }
       case 'reg.pane_created':
         paneBySeat.set(e.entity_id, paneState(e.payload.pane_state));
         break;

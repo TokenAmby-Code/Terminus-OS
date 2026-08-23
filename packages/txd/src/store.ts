@@ -2,9 +2,10 @@
 //
 // One append-only Postgres table (`txd.events`), ONE writer. Truth is the
 // stream; every displayed status is a derived view (see projections.ts).
-// Retention is keep-forever day-one; no snapshots (replay-from-zero every
-// reconcile, honestly measured). The 8 columns are exactly the ruled shape —
-// nothing derived is stored on the write side.
+// Retention is operator-gated at completed estate generations. A compacted
+// prefix becomes one projection checkpoint at the same sequence; open cohorts
+// and the current generation remain ordinary events. The event table keeps the
+// ruled 8-column shape.
 //
 // Append-only is STRUCTURAL, not conventional: database triggers raise on any
 // UPDATE, DELETE, or TRUNCATE, so a stray writer cannot silently rewrite
@@ -19,10 +20,18 @@ import { connectDb, runMigrations, MIGRATIONS_DIR, type DbEndpointT } from '@ter
 import {
   EventInputSchema,
   EventRecordSchema,
+  type EventLogCompactionRequest,
   type EventInput,
   type EventRecord,
 } from '@terminus-os/contracts';
 import { assertNoTmuxIdInIdentifiers } from './ids.ts';
+import {
+  archivedEventDigest,
+  compactEventRecords,
+  compactionResult,
+  openEventSeqs,
+  type EventLogCompactionResult,
+} from './event-log-compaction.ts';
 
 export type Clock = () => string;
 const systemClock: Clock = () => new Date().toISOString();
@@ -36,6 +45,7 @@ export interface EventStore {
   readAll(): Promise<EventRecord[]>;
   readByEntity(entityId: string): Promise<EventRecord[]>;
   count(): Promise<number>;
+  compact(request: EventLogCompactionRequest): Promise<EventLogCompactionResult>;
   close(): Promise<void>;
 }
 
@@ -134,6 +144,58 @@ export class PostgresEventStore implements EventStore {
     return rows[0]!.n;
   }
 
+  async compact(request: EventLogCompactionRequest): Promise<EventLogCompactionResult> {
+    return this.sql.begin(async (tx) => {
+      const resetRows = (await tx`
+        SELECT recorded_at::text AS recorded_at
+        FROM journal.events WHERE seq = ${request.reset_journal_head}`) as { recorded_at: string }[];
+      if (resetRows.length !== 1) throw new Error('reset_journal_head_absent');
+      const prior = (await tx`
+        SELECT reset_journal_head FROM txd.event_compactions
+        WHERE reset_journal_head = ${request.reset_journal_head}`) as { reset_journal_head: number | bigint | string }[];
+      if (prior.length > 0) throw new Error('event_log_already_compacted');
+      const boundaries = (await tx`
+        SELECT seq, entity_id
+        FROM txd.events
+        WHERE event_type = 'estate.rotation_completed'
+          AND occurred_at::timestamptz <= ${resetRows[0]!.recorded_at}::timestamptz
+        ORDER BY seq DESC LIMIT 1`) as { seq: number | bigint | string; entity_id: string }[];
+      if (boundaries.length !== 1) throw new Error('estate_generation_boundary_absent');
+      const boundary_seq = Number(boundaries[0]!.seq);
+      const rows = (await tx`
+        SELECT seq, entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at
+        FROM txd.events ORDER BY seq`) as Row[];
+      const before = rows.map(rowToRecord);
+      const resolved = {
+        boundary_seq,
+        reset_journal_head: request.reset_journal_head,
+        archive_attestation: request.archive_attestation,
+      };
+      const after = compactEventRecords(before, resolved);
+      const open = openEventSeqs(before, boundary_seq);
+      const archived = before.filter((event) => event.seq <= boundary_seq && !open.has(event.seq));
+      const archived_digest = archivedEventDigest(archived);
+      await tx`
+        INSERT INTO txd.event_compactions
+          (reset_journal_head, boundary_seq, boundary_entity_id, archive_attestation,
+           archived_events, archived_digest, source_agent_id)
+        VALUES (${request.reset_journal_head}, ${boundary_seq}, ${boundaries[0]!.entity_id},
+                ${request.archive_attestation}, ${archived.length}, ${archived_digest}, ${request.source_agent_id})`;
+      await tx`SELECT set_config('txd.event_compaction', 'archive-attested', true)`;
+      const archivedSeqs = archived.map((event) => event.seq);
+      const archivedSeqArray = `{${archivedSeqs.join(',')}}`;
+      await tx`DELETE FROM txd.events WHERE seq = ANY(${archivedSeqArray}::bigint[])`;
+      const checkpoint = after.find((event) => event.event_type === 'estate.compaction_checkpoint')!;
+      await tx`
+        INSERT INTO txd.events
+          (seq, entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
+        OVERRIDING SYSTEM VALUE
+        VALUES (${checkpoint.seq}, ${checkpoint.entity_type}, ${checkpoint.entity_id}, ${checkpoint.event_type},
+                ${checkpoint.payload}, ${checkpoint.provenance}, ${checkpoint.occurred_at}, ${checkpoint.recorded_at})`;
+      return compactionResult(before, after, resolved);
+    }) as Promise<EventLogCompactionResult>;
+  }
+
   async close(): Promise<void> {
     await this.sql.close();
   }
@@ -141,11 +203,19 @@ export class PostgresEventStore implements EventStore {
 
 export class MemoryEventStore implements EventStore {
   private events: EventRecord[] = [];
+  private nextSeq = 1;
 
   constructor(private now: Clock = systemClock) {}
 
+  static fromRecords(records: readonly EventRecord[], now: Clock = systemClock): MemoryEventStore {
+    const store = new MemoryEventStore(now);
+    store.events = records.map((record) => EventRecordSchema.parse(record));
+    store.nextSeq = Math.max(0, ...store.events.map((event) => event.seq)) + 1;
+    return store;
+  }
+
   private commit(parsed: EventInput): EventRecord {
-    const rec: EventRecord = { ...parsed, seq: this.events.length + 1, recorded_at: this.now() };
+    const rec: EventRecord = { ...parsed, seq: this.nextSeq++, recorded_at: this.now() };
     this.events.push(rec);
     return rec;
   }
@@ -172,6 +242,15 @@ export class MemoryEventStore implements EventStore {
 
   async count(): Promise<number> {
     return this.events.length;
+  }
+
+  async compact(request: EventLogCompactionRequest): Promise<EventLogCompactionResult> {
+    const boundary = [...this.events].reverse().find((event) => event.event_type === 'estate.rotation_completed');
+    if (!boundary) throw new Error('estate_generation_boundary_absent');
+    const before = [...this.events];
+    const resolved = { boundary_seq: boundary.seq, ...request };
+    this.events = compactEventRecords(before, resolved);
+    return compactionResult(before, this.events, resolved);
   }
 
   async close(): Promise<void> {}

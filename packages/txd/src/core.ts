@@ -43,6 +43,7 @@ import {
   type DispatchRequested,
   type SeatDisqualifier,
   type EventInput,
+  type EventLogCompactionRequest,
   type EventRecord,
   type Health,
   type EstateRotateRequest,
@@ -82,6 +83,7 @@ import {
 import { journalEventSeqFromReceipt } from './journal-receipt.ts';
 import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
+import type { EventLogCompactionResult } from './event-log-compaction.ts';
 import { findTmuxId } from './ids.ts';
 import { buildProjections, type Projections, type LaunchComposition, type TransportClaim } from './projections.ts';
 import {
@@ -3369,6 +3371,13 @@ export class Daemon {
   // txd's job).
   async estateRows(): Promise<SeatBoardRow[]> {
     return (await this.projections()).seatBoard;
+  }
+
+  compactEventLog(request: EventLogCompactionRequest): Promise<EventLogCompactionResult> {
+    return this.locked(async () => {
+      if (request.schema_version !== SCHEMA_VERSION) throw new Error('schema_version_mismatch');
+      return this.store.compact(request);
+    });
   }
 
   async tintReadiness(): Promise<TintReadiness[]> {

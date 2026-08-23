@@ -37,6 +37,7 @@ import {
   CommWaitRequestSchema,
   EstateRotateRequestSchema,
   EstateAbandonRequestSchema,
+  EventLogCompactionRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
   RunRequestSchema,
@@ -517,6 +518,16 @@ export function buildRoutes(
       },
     },
     // ── /agents/* — the deliberate-action plane ─────────────────────────────
+    {
+      method: 'POST',
+      match: exact('/ctl/estate/compact-events'),
+      label: 'POST /ctl/estate/compact-events',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, EventLogCompactionRequestSchema, 'invalid_event_log_compaction_request');
+        if (parsed instanceof Response) return parsed;
+        return json(await daemon.compactEventLog(parsed));
+      },
+    },
     {
       method: 'POST',
       match: exact('/agents/launch'),

@@ -12,6 +12,7 @@ import type { SQL } from 'bun';
 import { connectDb, DbEndpoint, type DbEndpointT } from '@terminus-os/db';
 import { MemoryEventStore, PostgresEventStore } from '../src/store.ts';
 import { EVENT_TYPES, type EventInput } from '@terminus-os/contracts';
+import { buildProjections } from '../src/projections.ts';
 
 function ev(over: Partial<EventInput> = {}): EventInput {
   return {
@@ -122,6 +123,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     await raw`drop schema if exists replay cascade`;
     await raw`drop schema if exists bus cascade`;
     await raw`drop schema if exists telemetry cascade`;
+    await raw`drop schema if exists journal cascade`;
     await raw`drop schema if exists txd cascade`;
     await raw`drop table if exists schema_migrations`;
     store = await PostgresEventStore.connect(endpoint!, () => `2026-07-12T00:00:0${tick++}.000Z`);
@@ -195,6 +197,56 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
              payload->>'pane_state' AS state, provenance->>'source' AS src
       FROM txd.events ORDER BY seq LIMIT 1`) as { pay: string; prov: string; state: string | null; src: string | null }[];
     expect(rows[0]).toEqual({ pay: 'object', prov: 'object', state: 'live', src: 'wrapper' });
+  });
+
+  test('archive-attested compaction records its audit before deleting and preserves replay exactly', async () => {
+    await raw`create schema journal`;
+    await raw`create table journal.events (seq bigint primary key, recorded_at timestamptz not null)`;
+    await raw`insert into journal.events (seq, recorded_at) values (8722, '2026-08-23T14:55:22.201Z')`;
+    const rotation = 'rotation:closed';
+    await store.append(ev({
+      entity_type: 'estate', entity_id: rotation, event_type: 'estate.rotation_requested',
+      payload: { force: true }, occurred_at: '2026-08-16T14:10:47.219Z',
+    }));
+    const completed = await store.append(ev({
+      entity_type: 'estate', entity_id: rotation, event_type: 'estate.rotation_completed',
+      payload: { canonical_seats: 1 }, occurred_at: '2026-08-16T14:10:48.664Z',
+    }));
+    await store.append(ev({
+      entity_type: 'seat', entity_id: 'current:seat', event_type: 'reg.pane_created',
+      payload: { pane_state: 'live' }, occurred_at: '2026-08-17T00:00:00.000Z',
+    }));
+    const before = await store.readAll();
+    const projection = buildProjections(before);
+    const attestation = `nas-restore:sha256:${'a'.repeat(64)}`;
+
+    const result = await store.compact({
+      schema_version: 12,
+      source_agent_id: 'operator-agent',
+      reset_journal_head: 8722,
+      archive_attestation: attestation,
+    });
+
+    expect(result).toMatchObject({
+      ok: true,
+      boundary_seq: completed.seq,
+      archived_events: before.filter((event) => event.seq <= completed.seq).length,
+      reset_journal_head: 8722,
+    });
+    const after = await store.readAll();
+    expect(after[0]).toMatchObject({ seq: completed.seq, event_type: 'estate.compaction_checkpoint' });
+    expect(buildProjections(after)).toEqual(projection);
+    const audits = (await raw`
+      select reset_journal_head::int, boundary_seq::int, archive_attestation, archived_digest
+      from txd.event_compactions`) as Array<Record<string, unknown>>;
+    expect(audits).toEqual([{
+      reset_journal_head: 8722,
+      boundary_seq: completed.seq,
+      archive_attestation: attestation,
+      archived_digest: result.archived_digest,
+    }]);
+    const driven = async (query: PromiseLike<unknown>) => { await query; };
+    await expect(driven(raw`delete from txd.events`)).rejects.toThrow(/append-only/);
   });
 
   test('migration 0005 normalizes historical double-encoded string rows in place', async () => {
