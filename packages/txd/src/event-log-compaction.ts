@@ -20,10 +20,17 @@ export type EventLogCompactionResult = {
   reset_journal_head: number;
 };
 
-const ARCHIVE_ATTESTATION = /^nas-restore:sha256:[a-f0-9]{64}$/;
+const ARCHIVE_ATTESTATION = /^snapshot=(.+);restore-proof=journal\.head=([1-9][0-9]*)$/;
 
-export function assertArchiveAttestation(value: string): void {
-  if (!ARCHIVE_ATTESTATION.test(value)) throw new Error('archive_attestation_required');
+export function parseArchiveAttestation(value: string): {
+  snapshot_path: string;
+  restore_journal_head: number;
+} {
+  const match = ARCHIVE_ATTESTATION.exec(value);
+  if (!match) throw new Error('archive_attestation_required');
+  const restoreJournalHead = Number(match[2]);
+  if (!Number.isSafeInteger(restoreJournalHead)) throw new Error('archive_attestation_required');
+  return { snapshot_path: match[1]!, restore_journal_head: restoreJournalHead };
 }
 
 function checkpointPayload(projection: Projections, request: ResolvedEventLogCompaction) {
@@ -130,9 +137,12 @@ export function compactEventRecords(
   events: readonly EventRecord[],
   request: ResolvedEventLogCompaction,
 ): EventRecord[] {
-  assertArchiveAttestation(request.archive_attestation);
+  const attestation = parseArchiveAttestation(request.archive_attestation);
   if (!Number.isSafeInteger(request.reset_journal_head) || request.reset_journal_head < 1) {
     throw new Error('invalid_reset_journal_head');
+  }
+  if (attestation.restore_journal_head < request.reset_journal_head) {
+    throw new Error('archive_restore_before_reset_head');
   }
   if (!Number.isSafeInteger(request.boundary_seq) || request.boundary_seq < 1) {
     throw new Error('invalid_estate_generation_boundary');

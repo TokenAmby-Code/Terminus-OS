@@ -70,7 +70,7 @@ test('boot replay rebuilds the identical estate model with a superseded generati
   const expected = buildProjections(before);
   const compacted = compactEventRecords(before, {
     boundary_seq: 9,
-    archive_attestation: `nas-restore:sha256:${'a'.repeat(64)}`,
+    archive_attestation: 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739',
     reset_journal_head: 8722,
   });
 
@@ -99,12 +99,20 @@ test('compaction refuses an absent archive attestation before changing the strea
   })).toThrow('archive_attestation_required');
 });
 
+test('compaction refuses a restore proof that does not reach the reset journal head', () => {
+  expect(() => compactEventRecords(fixture(), {
+    boundary_seq: 9,
+    archive_attestation: 'snapshot=/verified/reset-point;restore-proof=journal.head=8721',
+    reset_journal_head: 8722,
+  })).toThrow('archive_restore_before_reset_head');
+});
+
 test('compaction refuses an open rotation and never consumes the current generation', () => {
   const events = fixture();
   events.splice(8, 1);
   expect(() => compactEventRecords(events, {
     boundary_seq: 9,
-    archive_attestation: `nas-restore:sha256:${'b'.repeat(64)}`,
+    archive_attestation: 'snapshot=/verified/reset-point;restore-proof=journal.head=8739',
     reset_journal_head: 8722,
   })).toThrow('estate_generation_not_closed');
   expect(events.map((row) => row.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14]);

@@ -218,7 +218,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     }));
     const before = await store.readAll();
     const projection = buildProjections(before);
-    const attestation = `nas-restore:sha256:${'a'.repeat(64)}`;
+    const attestation = 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739';
 
     const result = await store.compact({
       schema_version: 12,

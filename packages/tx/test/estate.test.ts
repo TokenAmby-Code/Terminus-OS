@@ -77,7 +77,7 @@ test('event-log compaction requires an explicit archive attestation and reset he
     expect(await runCli([
       'estate', 'compact-events',
       '--reset-journal-head', '8722',
-      '--archive-attestation', `nas-restore:sha256:${'a'.repeat(64)}`,
+      '--archive-attestation', 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739',
     ], { request, stdout: (line) => output.push(JSON.parse(line)), stderr: () => {} })).toBe(0);
   } finally {
     if (env === undefined) delete process.env.AGENT_ID;
@@ -90,7 +90,7 @@ test('event-log compaction requires an explicit archive attestation and reset he
       schema_version: SCHEMA_VERSION,
       source_agent_id: 'operator-agent',
       reset_journal_head: 8722,
-      archive_attestation: `nas-restore:sha256:${'a'.repeat(64)}`,
+      archive_attestation: 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739',
     },
   }]);
   expect(output).toEqual([{ ok: true, boundary_seq: 7, archived_events: 6, retained_events: 5 }]);

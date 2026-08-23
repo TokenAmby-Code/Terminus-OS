@@ -60,7 +60,7 @@ test('POST /ctl/estate/compact-events carries the operator archive attestation t
       schema_version: SCHEMA_VERSION,
       source_agent_id: 'operator-agent',
       reset_journal_head: 8722,
-      archive_attestation: `nas-restore:sha256:${'a'.repeat(64)}`,
+      archive_attestation: 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739',
     };
     const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/compact-events`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
