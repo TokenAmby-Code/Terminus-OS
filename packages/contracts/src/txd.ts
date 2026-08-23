@@ -351,7 +351,7 @@ export const EventLogCompactionRequestSchema = z.strictObject({
   schema_version: z.number().int(),
   source_agent_id: z.string().min(1),
   reset_journal_head: z.number().int().positive(),
-  archive_attestation: z.string().regex(/^nas-restore:sha256:[a-f0-9]{64}$/),
+  archive_attestation: z.string().regex(/^snapshot=.+;restore-proof=journal\.head=[1-9][0-9]*$/),
 });
 export type EventLogCompactionRequest = z.infer<typeof EventLogCompactionRequestSchema>;
 
