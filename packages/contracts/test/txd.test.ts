@@ -242,6 +242,7 @@ describe("txd lifecycle vocabulary", () => {
       estate_generation: "canonical",
       activation_pending: false,
       tints: [],
+      comm_transport: { state: "ready", unresolved_target_agent_ids: [] },
     };
     expect(HealthSchema.parse(health).service).toBe("txd");
     expect(HealthSchema.parse(health).activation_pending).toBe(false);

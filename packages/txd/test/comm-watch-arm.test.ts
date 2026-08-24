@@ -608,7 +608,7 @@ test('a gate transport failure with an observed-interactive composer attempts de
     publish: async () => undefined,
   };
   const { store, tmux, d } = await fixture(async () => {
-    throw new CommGateTransportFailure('lifecycled_comm_gate_transport_ceiling_exceeded');
+    throw new CommGateTransportFailure('lifecycled_comm_gate_transport_failed');
   }, physical);
   tmux.setPaneText('palace:W', '› Write tests for @filename\n\n  gpt-5.6-sol medium');
 
@@ -636,4 +636,26 @@ test('a gate transport failure on an unpainted newborn still refuses before byte
   expect(tmux.sends('palace:W')).toEqual([]);
   const unarmed = (await store.readAll()).filter((e) => e.event_type === 'act.comm_watch_unarmed');
   expect(unarmed.length).toBe(1);
+});
+
+test('a gate ceiling expiry after lifecycled owns the watch still attempts delivery to an unpainted target', async () => {
+  const { CommGateTransportFailure } = await import('../src/core.ts');
+  const { store, tmux, d } = await fixture(async () => {
+    throw new CommGateTransportFailure('lifecycled_comm_gate_transport_ceiling_exceeded');
+  });
+
+  const accepted = await d.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'worker',
+    message: 'the server-side gate elapsed',
+    ask: false,
+    reply: false,
+  });
+
+  expect(tmux.sends('palace:W')).toHaveLength(1);
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(false);
+  // A client-side response ceiling is not evidence that the server-side watch
+  // is unarmed. Do not turn absence of the final HTTP answer into that claim.
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_watch_unarmed')).toEqual([]);
 });
