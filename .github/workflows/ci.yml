@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  TOKEN_FLEET_PACKAGES_READ: ${{ secrets.TOKEN_FLEET_PACKAGES_READ }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
