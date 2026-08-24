@@ -2,6 +2,7 @@
 // Source-run under Bun, no build step. systemd user unit owns the process.
 
 import { describeEndpoint } from '@terminus-os/db';
+import { notifyReady } from '@terminus-os/systemd';
 import { loadConfig } from './config.ts';
 import { PostgresEventStore } from './store.ts';
 import { RealTmux } from './tmux.ts';
@@ -122,6 +123,19 @@ console.log(
     build,
   }),
 );
+
+// The control plane is serving: the journal listener is registered, its drain
+// is requested and the server is bound — the same edge the log above records,
+// told to systemd. Under Type=notify this write is what completes the start
+// job, so `systemctl restart txd.service` returns here rather than at fork.
+//
+// Deliberately BEFORE the estate rung below. Standing the estate reconciles
+// external tmux state, and txd's own availability must never be hostage to it:
+// a wedged estate has to find txd up and answering /ctl/health, which is the
+// surface an operator reads to see that the estate is what is wrong. The rung
+// below already treats an unresolved estate as a legitimate state rather than
+// a failure.
+notifyReady();
 
 // Stand the canonical persistent estate declaratively (rung 2). A predecessor
 // topology deliberately left in place for an operator-owned rotation remains

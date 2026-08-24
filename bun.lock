@@ -71,6 +71,7 @@
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
+        "@terminus-os/systemd": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",

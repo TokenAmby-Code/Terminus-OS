@@ -38,6 +38,14 @@ describe('systemd/txd.service pins', () => {
     pin('WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd');
   });
 
+  // Without these two lines the daemon's readiness datagram is written into a
+  // void: systemd never waits for it, so `systemctl restart` returns at fork and
+  // every caller reading that return as readiness is wrong.
+  test('the start job completes on the daemon\'s own serving edge', () => {
+    expect(lines.filter((line) => line.startsWith('Type='))).toEqual(['Type=notify']);
+    pin('NotifyAccess=main');
+  });
+
   test('missing config skips the unit via ConditionPathExists — no crashloop', () => {
     pin('ConditionPathExists=%h/secrets/txd/txd.json');
   });
