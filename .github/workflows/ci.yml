@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  TOKEN_FLEET_PACKAGES_READ: ${{ secrets.TOKEN_FLEET_PACKAGES_READ }}
+  CIVIC_PACKAGES_READ: ${{ secrets.CIVIC_PACKAGES_READ }}
 
 jobs:
   check:
