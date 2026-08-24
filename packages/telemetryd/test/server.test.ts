@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import type { DesktopTelemetryEventT, PhoneMacroDroidHookRecordT } from "@terminus-os/contracts";
+import type { Observation } from "@tokenamby-code/stc-contract/lib/service-observation.ts";
 import { makeServer } from "../src/server.ts";
 import type { TelemetryStore } from "../src/store.ts";
 
@@ -16,6 +17,17 @@ class MemoryStore implements TelemetryStore {
 
   async recordPhoneHook(hook: PhoneMacroDroidHookRecordT): Promise<void> {
     this.phoneHooks.push(hook);
+  }
+
+  async observePostgres(): Promise<Observation> {
+    return {
+      state: "ready",
+      evidence: {
+        select_1: 1,
+        server_version: "18.0",
+        connection_identity: "test",
+      },
+    };
   }
 
   async close(): Promise<void> {}
@@ -54,6 +66,94 @@ test("records one typed desktop event and deduplicates its event id", async () =
   const duplicate = await fetch(`${base}/events`, { method: "POST", body: JSON.stringify(event) });
   expect(await duplicate.json()).toEqual({ ok: true, event_id: event.event_id, recorded: false });
   expect(store.events).toHaveLength(1);
+});
+
+test("health is the shared walk over the declared postgres and ingress probes", async () => {
+  const store = new MemoryStore();
+  const base = serve(store);
+
+  const response = await fetch(`${base}/health`);
+  const body = await response.json() as {
+    ok: boolean;
+    probes: Array<{ name: string; rung: string; state: string; evidence: Record<string, unknown> }>;
+  };
+
+  expect(response.status).toBe(200);
+  expect(body.ok).toBe(true);
+  expect(body.probes.map(({ name, rung, state }) => ({ name, rung, state }))).toEqual([
+    { name: "postgres", rung: "dependency", state: "ready" },
+    { name: "telemetry-ingress", rung: "function", state: "ready" },
+  ]);
+  expect(body.probes[0]?.evidence.select_1).toBe(1);
+  expect(body.probes[1]?.evidence).toEqual({
+    last_admitted_event: null,
+    last_persisted_event: null,
+    failed_persists: 0,
+  });
+});
+
+test("a failed postgres observation makes telemetryd health red", async () => {
+  class PostgresDownStore extends MemoryStore {
+    override async observePostgres() {
+      return {
+        state: "failed" as const,
+        detail: "postgres unavailable",
+        evidence: {
+          select_1: null,
+          server_version: null,
+          connection_identity: "test",
+        },
+      };
+    }
+  }
+  const base = serve(new PostgresDownStore());
+
+  const response = await fetch(`${base}/health`);
+  const body = await response.json() as { ok: boolean; probes: Array<{ name: string; state: string }> };
+
+  expect(response.status).toBe(503);
+  expect(body.ok).toBe(false);
+  expect(body.probes).toContainEqual(expect.objectContaining({ name: "postgres", state: "failed" }));
+});
+
+test("a failed persist makes the telemetry-ingress function probe red without synthesizing an event", async () => {
+  class FailingStore extends MemoryStore {
+    override async record(): Promise<boolean> {
+      throw new Error("postgres write failed");
+    }
+  }
+  const base = serve(new FailingStore());
+
+  const failedPersist = await fetch(`${base}/events`, { method: "POST", body: JSON.stringify(event) });
+  expect(failedPersist.status).toBe(500);
+  const response = await fetch(`${base}/health`);
+  const body = await response.json() as {
+    ok: boolean;
+    probes: Array<{ name: string; state: string; evidence: Record<string, unknown> }>;
+  };
+
+  expect(response.status).toBe(503);
+  expect(body.ok).toBe(false);
+  expect(body.probes).toContainEqual(expect.objectContaining({
+    name: "telemetry-ingress",
+    state: "failed",
+    evidence: {
+      last_admitted_event: event.event_id,
+      last_persisted_event: null,
+      failed_persists: 1,
+    },
+  }));
+});
+
+test("inspect uses the shared surface and never carries a verdict", async () => {
+  const base = serve(new MemoryStore());
+
+  const response = await fetch(`${base}/inspect`);
+  const body = await response.json() as Record<string, unknown>;
+
+  expect(response.status).toBe(200);
+  expect(body.ok).toBeUndefined();
+  expect(body.probes).toBeArray();
 });
 
 test("rejects enforcement instructions at the ingress boundary", async () => {

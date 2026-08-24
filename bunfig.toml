@@ -1,0 +1,2 @@
+[install.scopes]
+"@tokenamby-code" = { url = "https://npm.pkg.github.com", token = "$TOKEN_FLEET_PACKAGES_READ" }
