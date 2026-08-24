@@ -42,6 +42,7 @@
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
+        "@tokenamby-code/stc-contract": "1.0.0",
       },
     },
     "packages/tx": {
@@ -83,6 +84,8 @@
     "@terminus-os/tx": ["@terminus-os/tx@workspace:packages/tx"],
 
     "@terminus-os/txd": ["@terminus-os/txd@workspace:packages/txd"],
+
+    "@tokenamby-code/stc-contract": ["@tokenamby-code/stc-contract@1.0.0", "https://npm.pkg.github.com/download/@tokenamby-code/stc-contract/1.0.0/676686b10a97066c4842fea57655763648ddd8d9", { "dependencies": { "zod": "^4.4.3" } }, "sha512-Ff75jt57VpQxLNwIn+4XOpcTVlA/NQsyTs/vhen2AIx1YqM0PWbCexm8Nh70dL4ibAwguwYdrYd9t57HS3zaXw=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
