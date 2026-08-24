@@ -5,7 +5,8 @@
 // sendto(2) come straight from libc through bun:ffi. Forking systemd-notify(1)
 // would work on the wire but the signal would carry the helper's identity, and
 // NotifyAccess=main accepts only the main process — so the daemon writes it
-// itself.
+// itself. Every Terminus daemon under Type=notify writes the same datagram, so
+// it lives here once rather than once per package.
 
 import { dlopen, FFIType, ptr } from 'bun:ffi';
 

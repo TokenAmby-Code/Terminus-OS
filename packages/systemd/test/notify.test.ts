@@ -1,10 +1,11 @@
 // sd_notify readiness — behavioral-pin lane.
 //
 // The readiness datagram is deploy-critical: under Type=notify it is the write
-// that completes busd's start job, so `systemctl restart busd.service` returns
-// on the listen edge instead of on fork. If it never arrives systemd holds the
-// start job to its own ceiling and then kills the bus, so these pins assert the
-// wire bytes and the address encoding rather than trusting the syscall wrapper.
+// that completes a daemon's start job, so `systemctl restart <unit>` returns on
+// that daemon's serving edge instead of on fork. If it never arrives systemd
+// holds the start job to its own ceiling and then kills the daemon, so these
+// pins assert the wire bytes and the address encoding rather than trusting the
+// syscall wrapper.
 //
 // The receiver here binds and reads with the same libc primitives from the
 // other side (bind/recvfrom against the module's socket/sendto), so a pass is
@@ -16,7 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { notifyReady } from '../src/systemd-notify.ts';
+import { notifyReady } from '../src/index.ts';
 
 const AF_UNIX = 1;
 const SOCK_DGRAM = 2;
@@ -66,7 +67,7 @@ afterEach(() => {
 
 describe('notifyReady', () => {
   test('writes READY=1 to a filesystem NOTIFY_SOCKET', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'busd-notify-'));
+    const dir = mkdtempSync(join(tmpdir(), 'terminus-notify-'));
     const path = join(dir, 'notify');
     const socket = receiver(path);
     try {
@@ -80,7 +81,7 @@ describe('notifyReady', () => {
   });
 
   test('writes READY=1 to an abstract NOTIFY_SOCKET', () => {
-    const name = `busd-notify-${process.pid}`;
+    const name = `terminus-notify-${process.pid}`;
     const socket = receiver(`\0${name}`);
     try {
       process.env.NOTIFY_SOCKET = `@${name}`;
@@ -91,7 +92,7 @@ describe('notifyReady', () => {
     }
   });
 
-  test('no NOTIFY_SOCKET is a silent no-op — busd runs outside systemd unchanged', () => {
+  test('no NOTIFY_SOCKET is a silent no-op — a daemon outside systemd runs unchanged', () => {
     delete process.env.NOTIFY_SOCKET;
     expect(() => notifyReady()).not.toThrow();
   });
@@ -99,29 +100,12 @@ describe('notifyReady', () => {
   test('an unreachable NOTIFY_SOCKET fails loud rather than silently succeeding', () => {
     // A swallowed failure here becomes a systemd start-job hang with no cause in
     // the journal: the silent-intermittent shape the polls doctrine forbids.
-    process.env.NOTIFY_SOCKET = join(tmpdir(), `busd-notify-absent-${process.pid}`);
+    process.env.NOTIFY_SOCKET = join(tmpdir(), `terminus-notify-absent-${process.pid}`);
     expect(() => notifyReady()).toThrow(/sd_notify/);
   });
 
   test('an over-long NOTIFY_SOCKET is refused before the syscall', () => {
     process.env.NOTIFY_SOCKET = `/${'x'.repeat(120)}`;
     expect(() => notifyReady()).toThrow(/sd_notify/);
-  });
-});
-
-const daemon = await Bun.file(new URL('../src/daemon.ts', import.meta.url).pathname).text();
-
-describe('daemon wiring', () => {
-  test('signals at the listen edge, after the server is serving', () => {
-    const listening = daemon.indexOf("event: 'listening'");
-    const signal = daemon.indexOf('notifyReady()');
-    expect(listening).toBeGreaterThan(-1);
-    expect(signal).toBeGreaterThan(listening);
-  });
-
-  test('readiness is an edge, never a timer', () => {
-    // A delay before the signal would be a magic number standing in for the
-    // real edge, and the edge is already in hand.
-    expect(daemon).not.toMatch(/setTimeout|setInterval|Bun\.sleep/);
   });
 });
