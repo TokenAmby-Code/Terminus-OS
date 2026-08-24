@@ -1577,6 +1577,9 @@ export class RealTmux implements TmuxControlPlane {
       `exec /usr/bin/env ${environment}`,
       this.shellQuote(launch.wrapper),
       this.shellQuote(launch.engine),
+      ...(launch.engine === 'claude'
+        ? [this.shellQuote('--session-id'), this.shellQuote(launch.launchNonce)]
+        : []),
       ...(launch.prompt === undefined ? [] : [this.shellQuote(launch.prompt)]),
     ].join(' ');
     const result = await this.command('start_seat_engine', launch.seatId, [

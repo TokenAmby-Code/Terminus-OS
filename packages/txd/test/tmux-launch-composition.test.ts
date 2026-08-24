@@ -35,7 +35,7 @@ test('orders ride the launch as one shell-quoted argument', async () => {
   // Single-quoted with every embedded quote broken out: the shell reassembles
   // exactly the bytes handed in, newlines and all.
   expect(command.endsWith(` '${orders.replaceAll("'", "'\"'\"'")}'`)).toBe(true);
-  expect(command).toContain("'/fleet/agent-wrapper' 'claude' '");
+  expect(command).toContain(`'/fleet/agent-wrapper' 'claude' '--session-id' '${launch.launchNonce}' '`);
 });
 
 test('a bodiless launch ends at the engine, with no empty argument trailing it', async () => {
@@ -44,7 +44,7 @@ test('a bodiless launch ends at the engine, with no empty argument trailing it',
   expect(await tmux.startSeatEngine(launch)).toBe(true);
 
   const respawn = calls.find((args) => args[0] === 'respawn-pane')!;
-  expect(respawn.at(-1)!.endsWith("'/fleet/agent-wrapper' 'claude'")).toBe(true);
+  expect(respawn.at(-1)!.endsWith(`'/fleet/agent-wrapper' 'claude' '--session-id' '${launch.launchNonce}'`)).toBe(true);
 });
 
 test('bind stamps AGENT_ID into the pane environment', async () => {
@@ -54,4 +54,22 @@ test('bind stamps AGENT_ID into the pane environment', async () => {
 
   const respawn = calls.find((args) => args[0] === 'respawn-pane')!;
   expect(respawn).toContain(`AGENT_ID=${launch.agentId}`);
+});
+
+test('a Claude launch pins a fresh engine session to the generation-specific launch nonce', async () => {
+  const { calls, tmux } = recorder();
+
+  expect(await tmux.startSeatEngine(launch)).toBe(true);
+
+  const respawn = calls.find((args) => args[0] === 'respawn-pane')!;
+  expect(respawn.at(-1)).toContain(`'claude' '--session-id' '${launch.launchNonce}'`);
+});
+
+test('a Codex launch does not receive Claude session arguments', async () => {
+  const { calls, tmux } = recorder();
+
+  expect(await tmux.startSeatEngine({ ...launch, engine: 'codex' })).toBe(true);
+
+  const respawn = calls.find((args) => args[0] === 'respawn-pane')!;
+  expect(respawn.at(-1)).not.toContain('--session-id');
 });

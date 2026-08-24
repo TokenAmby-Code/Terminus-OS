@@ -118,7 +118,16 @@ type Now = () => string;
  * open. The daemon's gate closure throws this class for fetch-level failures
  * so the comm path can tell the two apart.
  */
-export class CommGateTransportFailure extends Error {}
+export class CommGateTransportFailure extends Error {
+  readonly reason: 'transport_ceiling_exceeded' | 'transport_failed';
+
+  constructor(message: string) {
+    super(message);
+    this.reason = message.endsWith('_transport_ceiling_exceeded')
+      ? 'transport_ceiling_exceeded'
+      : 'transport_failed';
+  }
+}
 
 export type CommWatchArmInput = {
   message_id: string;
@@ -1242,16 +1251,13 @@ export class Daemon {
 
   // Arm the delivery watch and composer gate BEFORE bytes go to the pane.
   //
-  // Delivery attempts come first: a gate TRANSPORT failure is a fact about
-  // lifecycled's reachability, not a verdict about the target composer. When
-  // txd's own observation already proved the composer interactive, the
-  // attempt proceeds with the unarmed gap attested — the delivery stays
-  // unasserted (ok:false) until its effect fact arrives, so nothing is
-  // claimed that was not observed. The unpainted newborn keeps its hard
-  // stop: there the dead-zone race is real and txd holds no interactivity
-  // proof of its own, so sending without the gate would recreate it. A typed
-  // domain refusal from lifecycled is an affirmative answer and refuses as
-  // before.
+  // Delivery attempts come first. A client ceiling elapsed only after
+  // lifecycled held the request for its full server-owned gate contract; it is
+  // not evidence that the already-created watch is unarmed, so bytes proceed
+  // and delivery remains unresolved until an effect fact arrives. An earlier
+  // transport failure still records the unarmed gap: an observed-interactive
+  // composer may proceed, while an unpainted newborn keeps its hard stop. A
+  // typed domain refusal is an affirmative answer and refuses as before.
   private async armCommWatch(
     messageId: string,
     sourceAgentId: string,
@@ -1268,6 +1274,8 @@ export class Daemon {
         composer_interactive_observed: composerInteractiveObserved,
       });
     } catch (error) {
+      if (error instanceof CommGateTransportFailure
+        && error.reason === 'transport_ceiling_exceeded') return;
       await this.locked(() => this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'act.comm_watch_unarmed',
         payload: { message_id: messageId, target_agent_id: targetAgentId, detail: String(error) },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now() }));
@@ -3871,7 +3879,8 @@ export class Daemon {
   }
 
   async health(machine: string, build: { version: string; git_sha: string; bun: string }): Promise<Health> {
-    const proj = await this.projections();
+    const events = await this.store.readAll();
+    const proj = buildProjections(events);
     // Probe the externally supervised estate socket, not just `tmux -V` — a
     // responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
@@ -3880,11 +3889,34 @@ export class Daemon {
     const activation_pending = estate_generation === 'foreign';
     const open = proj.openContradictions.length;
     const tints = await this.tintReadiness();
+    const currentAgentIds = new Set(proj.currentBindings
+      .filter((binding) => binding.agent_id)
+      .map((binding) => binding.agent_id!));
+    const unresolvedCommTransport = new Map<string, number>();
+    for (const event of events) {
+      const targetAgentId = typeof event.payload.target_agent_id === 'string'
+        ? event.payload.target_agent_id
+        : null;
+      if (!targetAgentId || !currentAgentIds.has(targetAgentId)) continue;
+      if (event.event_type === 'act.comm_bytes_sent'
+        && event.payload.submit_verdict === 'transport_failed'
+        && event.payload.bytes === 0) {
+        unresolvedCommTransport.set(targetAgentId, event.seq);
+      }
+      if (event.event_type === 'act.comm_delivery_asserted') {
+        unresolvedCommTransport.delete(targetAgentId);
+      }
+    }
+    const comm_transport = {
+      state: unresolvedCommTransport.size === 0 ? 'ready' as const : 'degraded' as const,
+      unresolved_target_agent_ids: [...unresolvedCommTransport.keys()].sort(),
+    };
     return {
       ok: open === 0
         && tmux_reachable
         && hooks.state === 'ready'
         && estate_generation === 'canonical'
+        && comm_transport.state === 'ready'
         && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
@@ -3899,6 +3931,7 @@ export class Daemon {
       estate_generation,
       activation_pending,
       tints,
+      comm_transport,
     };
   }
 }

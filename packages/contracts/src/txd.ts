@@ -441,6 +441,12 @@ export const HealthSchema = z.object({
   // The daemon stays available without mutating it until the operator rotates.
   activation_pending: z.boolean(),
   tints: z.array(TintReadinessSchema),
+  // An observed zero-effect comm refusal remains unhealthy for the current
+  // receiver until that receiver produces a delivery assertion.
+  comm_transport: z.object({
+    state: z.enum(['ready', 'degraded']),
+    unresolved_target_agent_ids: z.array(CanonicalIdSchema),
+  }),
 });
 export type Health = z.infer<typeof HealthSchema>;
 

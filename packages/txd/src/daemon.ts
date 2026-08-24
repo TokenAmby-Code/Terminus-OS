@@ -58,9 +58,11 @@ const store = await PostgresEventStore.connect(cfg.db);
 const tmux = new RealTmux(cfg.tmuxSocket, { machine: cfg.machine });
 const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
 // The pre-send comm watch, armed against lifecycled's local ingress socket.
-// The await is bounded by the same transport contract as lifecycled's delivery
-// awaits; a refusal or timeout surfaces
-// as act.comm_watch_unarmed and leaves the target pane untouched.
+// The await is bounded outside lifecycled's own gate contract. A typed refusal
+// or an early transport failure leaves an unpainted target untouched. A client
+// ceiling is not an unarmed-watch fact: lifecycled already held the request for
+// the complete server-owned interval, so txd attempts bytes and waits for the
+// ordinary delivery effect.
 const commWatchArm = cfg.lifecycledSocket
   ? async (input: CommWatchArmInput) => {
       await postLifecycledGate('/agents/comm/gate', {
