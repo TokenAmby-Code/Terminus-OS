@@ -15,6 +15,7 @@
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
+        "@terminus-os/systemd": "workspace:*",
         "zod": "^4.4.3",
       },
       "devDependencies": {
@@ -36,12 +37,17 @@
         "zod": "^4.4.3",
       },
     },
+    "packages/systemd": {
+      "name": "@terminus-os/systemd",
+      "version": "0.1.0",
+    },
     "packages/telemetryd": {
       "name": "@terminus-os/telemetryd",
       "version": "0.1.0",
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
+        "@terminus-os/systemd": "workspace:*",
         "@tokenamby-code/stc-contract": "1.0.0",
       },
     },
@@ -78,6 +84,8 @@
     "@terminus-os/contracts": ["@terminus-os/contracts@workspace:packages/contracts"],
 
     "@terminus-os/db": ["@terminus-os/db@workspace:packages/db"],
+
+    "@terminus-os/systemd": ["@terminus-os/systemd@workspace:packages/systemd"],
 
     "@terminus-os/telemetryd": ["@terminus-os/telemetryd@workspace:packages/telemetryd"],
 

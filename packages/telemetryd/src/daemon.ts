@@ -1,4 +1,5 @@
 import { DEFAULT_DB_CONFIG, describeEndpoint } from "@terminus-os/db";
+import { notifyReady } from "@terminus-os/systemd";
 import { makeServer } from "./server.ts";
 import { PostgresTelemetryStore } from "./store.ts";
 
@@ -13,6 +14,13 @@ const build = { version: "0.1.0", git_sha: process.env.GIT_SHA ?? "unknown", bun
 const server = makeServer({ store, build, bind, port });
 
 console.log(JSON.stringify({ level: "info", event: "listening", service: "telemetryd", bind, port, db: describeEndpoint(db), build }));
+
+// The ingress is bound and the store is connected: the same edge the log above
+// records, told to systemd. Under Type=notify this write is what completes the
+// start job, so `systemctl restart telemetryd.service` returns here rather than
+// at fork — which is what makes a deploy leg's restart a readiness fact instead
+// of a fork fact.
+notifyReady();
 
 async function shutdown(): Promise<void> {
   await server.stop();

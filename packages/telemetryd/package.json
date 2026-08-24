@@ -12,6 +12,7 @@
   "dependencies": {
     "@tokenamby-code/stc-contract": "1.0.0",
     "@terminus-os/contracts": "workspace:*",
-    "@terminus-os/db": "workspace:*"
+    "@terminus-os/db": "workspace:*",
+    "@terminus-os/systemd": "workspace:*"
   }
 }

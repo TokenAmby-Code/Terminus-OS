@@ -10,7 +10,7 @@ import { PostgresReplayStore } from './replay-store.ts';
 import { Dispatcher, ReplayDispatcher } from './dispatcher.ts';
 import { makeServer, type BuildInfo } from './server.ts';
 import { resolveGitSha } from './build.ts';
-import { notifyReady } from './systemd-notify.ts';
+import { notifyReady } from '@terminus-os/systemd';
 
 const build: BuildInfo = {
   version: '0.1.0',
