@@ -1053,9 +1053,13 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   private lifecycleHookCommands() {
+    // Every hook capture goes to the txd-tmux-hook journal identifier, which is
+    // the sole surface `tx inspect hooks` reads. A hook that skips systemd-cat
+    // fires invisibly to the diagnostic, so the tail is identical to the one
+    // tx.conf's kill hooks carry.
     return {
-      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name}"',
-      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page #{q:window_name}"',
+      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
+      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page #{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
     } as const;
   }
 

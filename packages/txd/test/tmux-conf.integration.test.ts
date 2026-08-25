@@ -102,6 +102,10 @@ test.skipIf(!estateCapable)('txd boot reinstalls lifecycle hooks on a persistent
     const paneExited = new TextDecoder().decode(staleTmux('show-hooks', '-g', 'pane-exited').stdout);
     expect(paneDied).toMatch(/pane-died\[\d+\][^\n]*tx estate event pane-died/);
     expect(paneExited).toMatch(/pane-exited\[\d+\][^\n]*tx estate event pane-exited/);
+    // `tx inspect hooks` reads the txd-tmux-hook journal identifier, so a hook
+    // that does not pipe through systemd-cat fires invisibly to the diagnostic.
+    expect(paneDied).toContain('2>&1 | systemd-cat --identifier=txd-tmux-hook || true');
+    expect(paneExited).toContain('2>&1 | systemd-cat --identifier=txd-tmux-hook || true');
   } finally {
     staleTmux('kill-server');
   }
