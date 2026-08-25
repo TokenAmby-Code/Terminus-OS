@@ -35,9 +35,20 @@ import { osc52Sequence, validateAttachedClientTty, validateClipboardBytes } from
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
+/**
+ * One canonical page that fails the acceptance predicate while live tagged
+ * panes still occupy it. `seats` names a live-seat set that is not the declared
+ * one; `geometry` names a declared seat set in the wrong shape.
+ */
+export type PageDivergence = {
+  page: TxdPage;
+  clause: 'seats' | 'geometry';
+  detail: string;
+};
 export type EstateEnsureResult = {
   state: 'created' | 'existing';
   rebuilt_pages: TxdPage[];
+  diverged_pages: PageDivergence[];
 };
 export type EstateGeneration = 'empty' | 'canonical' | 'recoverable' | 'foreign';
 export type LifecycleHookReadiness = {
@@ -167,8 +178,14 @@ export interface TmuxControlPlane {
   killServer(): Promise<boolean>;
   /** Live seats as canonical ids + pane liveness. Never exposes %id. */
   listSeats(): Promise<SeatObservation[]>;
-  /** Create/repair the declared estate and report every page whose processes were reconstructed. */
+  /**
+   * Create the declared estate on an empty socket, or accept an existing one:
+   * a page with no live tagged pane is reconstructed; a page that still holds
+   * live panes is never rebuilt here, only reported in `diverged_pages`.
+   */
   ensureEstate(): Promise<EstateEnsureResult>;
+  /** Every canonical page failing the acceptance predicate, with the clause it fails. */
+  estateDivergences(): Promise<PageDivergence[]>;
   /** Classify the observed estate; an unrecognized topology is foreign, never repaired blind. */
   estateGeneration(): Promise<EstateGeneration>;
   /** Create a bare seat: a single-pane session tagged with the canonical id. */
@@ -1189,34 +1206,78 @@ export class RealTmux implements TmuxControlPlane {
     return this.pageGeometryMatches(page, expected, await this.estateRows());
   }
 
+  /** The acceptance predicate for one page, stated as the clause it fails. */
+  private async pageDivergence(page: TxdPage, expected: readonly string[]): Promise<PageDivergence | null> {
+    if (await this.pageIsCanonical(page, expected)) return null;
+    const observed = (await this.listSeats()).filter((seat) => seatBelongsToPage(page, seat.seat_id));
+    const live = observed.filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id);
+    const dead = observed.filter((seat) => seat.pane === 'dead').map((seat) => seat.seat_id);
+    const missing = expected.filter((seat) => !observed.some((row) => row.seat_id === seat));
+    const unexpected = live.filter((seat) => !expected.includes(seat));
+    const duplicates = [...new Set(live.filter((seat, index) => live.indexOf(seat) !== index))];
+    const seatsDiverged = isStackPage(page)
+      ? missing.length > 0 || dead.length > 0 || duplicates.length > 0
+      : missing.length > 0 || dead.length > 0 || unexpected.length > 0 || duplicates.length > 0;
+    const render = (list: string[]): string => (list.length === 0 ? 'none' : list.join(', '));
+    if (seatsDiverged) {
+      return {
+        page,
+        clause: 'seats',
+        detail: `missing: ${render(missing)}; dead: ${render(dead)}; unexpected: ${render(unexpected)}; duplicates: ${render(duplicates)}`,
+      };
+    }
+    return { page, clause: 'geometry', detail: this.describePage(page, await this.estateRows()) };
+  }
+
+  async estateDivergences(): Promise<PageDivergence[]> {
+    const divergences: PageDivergence[] = [];
+    for (const [page, expected] of Object.entries(TXD_WINDOWS)) {
+      const divergence = await this.pageDivergence(page as TxdPage, expected);
+      if (divergence) divergences.push(divergence);
+    }
+    return divergences;
+  }
+
   /**
-   * Drive one canonical page to canonical shape. Recovery enforces rather than
-   * observes: it acts, then re-reads the estate to attest what the action did.
-   * A page reaches here only once it has been read as genuinely diverged, so
-   * the repair left is the destructive rebuild that replaces every process on
-   * the page — a flexible page's missing allocation pane is the one exception,
-   * repaired by splitting into the window its workers already occupy.
+   * Accept one existing canonical page without closing a live pane. A flexible
+   * page's missing or dead allocation pane is repaired around its workers. A
+   * page with no live tagged pane left has nobody on it for a rebuild to
+   * sacrifice, so that class alone is reconstructed. Every other divergence is
+   * returned, never repaired: repair of an occupied page is an explicit
+   * operator verb, not a boot side effect.
    */
-  private async enforcePage(page: string, expected: readonly string[]): Promise<{ canonical: boolean; rebuilt: boolean }> {
-    if (await this.pageIsCanonical(page, expected)) return { canonical: true, rebuilt: false };
-    // Flexible pages preserve all live worker panes. A missing allocation pane
-    // is repaired by splitting one into the existing window, never by
-    // reconstructing the page around a worker.
+  private async acceptPage(
+    page: TxdPage,
+    expected: readonly string[],
+  ): Promise<{ divergence: PageDivergence | null; rebuilt: boolean }> {
+    if (await this.pageIsCanonical(page, expected)) return { divergence: null, rebuilt: false };
+    const observed = (await this.listSeats()).filter((seat) => seatBelongsToPage(page, seat.seat_id));
     if (isStackPage(page)) {
-      const observed = (await this.listSeats()).filter((seat) => seatBelongsToPage(page, seat.seat_id));
       const allocation = observed.filter((seat) => seat.seat_id === TXD_STACK_WINDOWS[page]);
-      if (allocation.length > 1) return { canonical: false, rebuilt: false };
       if (allocation.length === 1 && allocation[0]!.pane === 'dead') {
-        if (!(await this.resetSeat(TXD_STACK_WINDOWS[page]))) return { canonical: false, rebuilt: false };
-        return { canonical: await this.pageIsCanonical(page, expected), rebuilt: false };
+        if (!(await this.resetSeat(TXD_STACK_WINDOWS[page]))) {
+          throw new Error(`txd could not repair the ${page} allocation pane: ${this.describePage(page, await this.estateRows())}`);
+        }
+        return { divergence: await this.pageDivergence(page, expected), rebuilt: false };
       }
       if (allocation.length === 0 && observed.some((seat) => seat.pane === 'live')) {
         await this.createStackSeat(page, TXD_STACK_WINDOWS[page]);
-        return { canonical: await this.pageIsCanonical(page, expected), rebuilt: false };
+        return { divergence: await this.pageDivergence(page, expected), rebuilt: false };
       }
     }
-    if (!(await this.rebuildPage(page))) return { canonical: false, rebuilt: true };
-    return { canonical: await this.pageIsCanonical(page, expected), rebuilt: true };
+    if (observed.some((seat) => seat.pane === 'live')) {
+      return { divergence: await this.pageDivergence(page, expected), rebuilt: false };
+    }
+    if (!(await this.rebuildPage(page))) {
+      throw new Error(
+        `txd could not drive canonical page ${page} to canonical shape: ${this.describePage(page, await this.estateRows())}`,
+      );
+    }
+    const divergence = await this.pageDivergence(page, expected);
+    if (divergence) {
+      throw new Error(`txd could not drive canonical page ${page} to canonical shape: ${divergence.detail}`);
+    }
+    return { divergence: null, rebuilt: true };
   }
 
   async rebuildPage(page: string): Promise<boolean> {
@@ -1285,22 +1346,22 @@ export class RealTmux implements TmuxControlPlane {
       if (!(await this.clearDefaultAgentEnvironment(TXD_SESSION))) {
         throw new Error('txd could not clear the estate session agent environment');
       }
-      // Canonical recovery is enforcement, not assertion. Every page is driven
-      // to canonical shape against the same predicate that later accepts it;
-      // a repair trigger weaker than the acceptance predicate leaves drift that
-      // is observed, called recoverable, never repaired, and then fatal.
+      // Acceptance is observation, not enforcement. Each page is read against
+      // the same predicate that later accepts it; a page still holding live
+      // panes that fails it is reported, and only a page nobody occupies is
+      // reconstructed. The one estate-wide postcondition is that every page
+      // was either accepted, rebuilt to acceptance, or named as diverged.
       const rebuilt_pages: TxdPage[] = [];
+      const diverged_pages: PageDivergence[] = [];
       for (const [page, expectedSeats] of Object.entries(TXD_WINDOWS)) {
-        const enforced = await this.enforcePage(page, expectedSeats);
-        if (enforced.rebuilt) rebuilt_pages.push(page as TxdPage);
-        if (!enforced.canonical) {
-          throw new Error(
-            `txd could not drive canonical page ${page} to canonical shape: ${this.describePage(page, await this.estateRows())}`,
-          );
-        }
+        const accepted = await this.acceptPage(page as TxdPage, expectedSeats);
+        if (accepted.rebuilt) rebuilt_pages.push(page as TxdPage);
+        if (accepted.divergence) diverged_pages.push(accepted.divergence);
       }
-      const divergence = this.canonicalDivergence(await this.estateRows());
-      if (divergence) throw new Error(`txd canonical estate recovery could not converge: ${divergence}`);
+      if (diverged_pages.length === 0) {
+        const divergence = this.canonicalDivergence(await this.estateRows());
+        if (divergence) throw new Error(`txd canonical estate recovery could not converge: ${divergence}`);
+      }
       const seats = (await this.listSeats()).filter((seat) => seat.pane === 'live').map((seat) => seat.seat_id);
       for (const seat of seats) {
         try {
@@ -1312,7 +1373,7 @@ export class RealTmux implements TmuxControlPlane {
           );
         }
       }
-      return { state: 'existing', rebuilt_pages };
+      return { state: 'existing', rebuilt_pages, diverged_pages };
     }
 
     let sessionCreated = false;
@@ -1379,7 +1440,7 @@ export class RealTmux implements TmuxControlPlane {
       // is a broken constructor, so roll the whole session back and say why.
       const divergence = this.canonicalDivergence(await this.estateRows());
       if (divergence) throw new Error(`txd canonical estate construction postcondition failed: ${divergence}`);
-      return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
+      return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[], diverged_pages: [] };
     } catch (error) {
       if (sessionCreated) await this.command('rollback_estate', 'estate', ['kill-session', '-t', TXD_SESSION]);
       throw error;
@@ -2210,6 +2271,9 @@ export class FakeTmux implements TmuxControlPlane {
   private failReap = new Set<string>(); // seats whose reapSeat is forced to fail
   private resets: string[] = [];
   private pageRebuilds: string[] = [];
+  private geometryDrift = new Set<string>();
+  /** Test control: the page keeps every seat live but loses its declared geometry. */
+  driftPageGeometry(page: TxdPage): void { this.geometryDrift.add(page); }
   reachableFlag = true;
   killed = false;
   private commands = new Map<string, string>();
@@ -2310,50 +2374,72 @@ export class FakeTmux implements TmuxControlPlane {
   async listSeats(): Promise<SeatObservation[]> {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));
   }
+  private fakePageDivergence(page: TxdPage, expected: readonly string[]): PageDivergence | null {
+    const shaped = this.shape.windows[page] ?? [];
+    const live = shaped.filter((seat) => this.seats.get(seat)?.pane === 'live');
+    const dead = shaped.filter((seat) => this.seats.get(seat)?.pane === 'dead');
+    const missing = expected.filter((seat) => !shaped.includes(seat));
+    const unexpected = isStackPage(page) ? [] : live.filter((seat) => !expected.includes(seat));
+    const duplicates = [...new Set(shaped.filter((seat, index) => shaped.indexOf(seat) !== index))];
+    const foreign = shaped.filter((seat) => !seatBelongsToPage(page, seat));
+    if (missing.length === 0 && dead.length === 0 && unexpected.length === 0 && duplicates.length === 0 && foreign.length === 0) {
+      return this.geometryDrift.has(page)
+        ? { page, clause: 'geometry', detail: `page ${page} geometry is not canonical` }
+        : null;
+    }
+    const render = (list: string[]): string => (list.length === 0 ? 'none' : list.join(', '));
+    return {
+      page,
+      clause: 'seats',
+      detail: `missing: ${render(missing)}; dead: ${render(dead)}; unexpected: ${render([...unexpected, ...foreign])}; duplicates: ${render(duplicates)}`,
+    };
+  }
+  async estateDivergences(): Promise<PageDivergence[]> {
+    if (this.shape.sessions.length === 0) return [];
+    return Object.entries(TXD_WINDOWS).flatMap(([page, expected]) => {
+      const divergence = this.fakePageDivergence(page as TxdPage, expected);
+      return divergence ? [divergence] : [];
+    });
+  }
   async ensureEstate(): Promise<EstateEnsureResult> {
     await this.ensureLifecycleHooks();
     if (this.shape.sessions.length > 0) {
-      const canonical = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
-        && Object.entries(TXD_WINDOWS).every(([page, required]) => {
-          const observed = this.shape.windows[page] ?? [];
-          return required.every((seat) => observed.filter((candidate) => candidate === seat).length === 1)
-            && observed.every((seat) => seatBelongsToPage(page, seat) && this.seats.get(seat)?.pane === 'live');
-        });
-      if (canonical) return { state: 'existing', rebuilt_pages: [] };
       const recoverable = this.shape.sessions.length === 1 && this.shape.sessions[0] === TXD_SESSION
         && Object.entries(this.shape.windows).every(([page, seats]) => {
           return Object.hasOwn(TXD_WINDOWS, page) && seats.every((seat) => seatBelongsToPage(page, seat));
         });
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
       const rebuilt_pages: TxdPage[] = [];
-      for (const [page, expectedSeats] of Object.entries(TXD_WINDOWS)) {
+      const diverged_pages: PageDivergence[] = [];
+      for (const [name, expectedSeats] of Object.entries(TXD_WINDOWS)) {
+        const page = name as TxdPage;
+        if (this.fakePageDivergence(page, expectedSeats) === null) continue;
         const shaped = this.shape.windows[page] ?? [];
-        let healthy = expectedSeats.every((seat) => shaped.includes(seat) && this.seats.get(seat)?.pane === 'live')
-          && shaped.every((seat) => seatBelongsToPage(page, seat));
-        if (!healthy && isStackPage(page)) {
+        const live = shaped.filter((seat) => this.seats.get(seat)?.pane === 'live');
+        if (isStackPage(page)) {
           const allocation = shaped.filter((seat) => seat === TXD_STACK_WINDOWS[page]);
-          const live = shaped.filter((seat) => this.seats.get(seat)?.pane === 'live');
           if (allocation.length === 1 && this.seats.get(allocation[0]!)?.pane === 'dead') {
             await this.resetSeat(allocation[0]!);
           } else if (allocation.length === 0 && live.length > 0) {
             await this.createStackSeat(page, TXD_STACK_WINDOWS[page]);
           }
-          const repaired = this.shape.windows[page] ?? [];
-          healthy = expectedSeats.every((seat) => repaired.filter((candidate) => candidate === seat).length === 1
-              && this.seats.get(seat)?.pane === 'live')
-            && repaired.every((seat) => seatBelongsToPage(page, seat) && this.seats.get(seat)?.pane === 'live');
         }
-        if (!healthy && !(await this.rebuildPage(page))) throw new Error(`FakeTmux: failed page reconstruction ${page}`);
-        if (!healthy) rebuilt_pages.push(page as TxdPage);
+        if (live.length > 0) {
+          const divergence = this.fakePageDivergence(page, expectedSeats);
+          if (divergence) diverged_pages.push(divergence);
+          continue;
+        }
+        if (!(await this.rebuildPage(page))) throw new Error(`FakeTmux: failed page reconstruction ${page}`);
+        rebuilt_pages.push(page);
       }
-      return { state: 'existing', rebuilt_pages };
+      return { state: 'existing', rebuilt_pages, diverged_pages };
     }
     this.shape = {
       sessions: [TXD_SESSION],
       windows: Object.fromEntries(Object.entries(TXD_WINDOWS).map(([window, seats]) => [window, [...seats]])),
     };
     for (const seat of TXD_ESTATE) this.seats.set(seat, { pane: 'live', generation: crypto.randomUUID() });
-    return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[] };
+    return { state: 'created', rebuilt_pages: Object.keys(TXD_WINDOWS) as TxdPage[], diverged_pages: [] };
   }
   async estateGeneration(): Promise<EstateGeneration> {
     if (this.shape.sessions.length === 0) return 'empty';
@@ -2362,7 +2448,7 @@ export class FakeTmux implements TmuxControlPlane {
       return required.every((seat) => observed.filter((candidate) => candidate === seat).length === 1)
         && observed.every((seat) => seatBelongsToPage(page, seat) && this.seats.get(seat)?.pane === 'live');
     });
-    if (canonical) return 'canonical';
+    if (canonical && this.geometryDrift.size === 0) return 'canonical';
     const recoverable = Object.entries(this.shape.windows).every(([page, seats]) => {
       return Object.hasOwn(TXD_WINDOWS, page) && seats.every((seat) => seatBelongsToPage(page, seat));
     });
@@ -2478,6 +2564,7 @@ export class FakeTmux implements TmuxControlPlane {
       this.commands.delete(seat);
     }
     this.pageRebuilds.push(page);
+    this.geometryDrift.delete(page);
     return true;
   }
   async startSeatEngine(launch: SeatEngineLaunch): Promise<boolean> {

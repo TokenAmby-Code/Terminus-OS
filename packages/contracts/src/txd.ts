@@ -235,6 +235,7 @@ export const ESTATE_EVENT_NAMES = [
   'scoped_reset_requested',
   'scoped_reset_completed',
   'scoped_reset_failed',
+  'page_canonical_observed',
   'compaction_checkpoint',
 ] as const;
 
@@ -284,6 +285,7 @@ export const EVENT_TYPES = [
   'estate.scoped_reset_requested',
   'estate.scoped_reset_completed',
   'estate.scoped_reset_failed',
+  'estate.page_canonical_observed',
   'estate.compaction_checkpoint',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -418,6 +420,13 @@ export const TintReadinessSchema = z.object({
 });
 export type TintReadiness = z.infer<typeof TintReadinessSchema>;
 
+export const EstatePageDivergenceSchema = z.object({
+  page: z.string(),
+  clause: z.enum(['seats', 'geometry']),
+  detail: z.string(),
+});
+export type EstatePageDivergence = z.infer<typeof EstatePageDivergenceSchema>;
+
 export const HealthSchema = z.object({
   ok: z.boolean(),
   service: z.literal('txd'),
@@ -437,6 +446,10 @@ export const HealthSchema = z.object({
     pane_exited: z.boolean(),
   }),
   estate_generation: z.enum(['empty', 'canonical', 'recoverable', 'foreign']),
+  // Every canonical page that fails the acceptance predicate, named with the
+  // clause it fails. A `recoverable` estate is red HERE, page by page: boot
+  // observes drift and attests it; it never closes a live pane to repair it.
+  estate_divergence: z.array(EstatePageDivergenceSchema),
   // A foreign shape can be a deliberately unrotated predecessor topology.
   // The daemon stays available without mutating it until the operator rotates.
   activation_pending: z.boolean(),
