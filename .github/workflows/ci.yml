@@ -9,9 +9,9 @@ permissions:
   contents: read
 
 env:
-  # The org secret still carries its Civic-era name; the variable is the one
-  # fleet-packages projects for the @tokenamby-code scope on the machines.
-  TOKEN_FLEET_PACKAGES_READ: ${{ secrets.CIVIC_PACKAGES_READ }}
+  # One registry read credential, one name, everywhere (Emperor 2026-08-25):
+  # the same TokenAmby-Package bot PAT that fleet-packages projects on the hosts.
+  PACKAGES_READ: ${{ secrets.PACKAGES_READ }}
 
 jobs:
   check:
