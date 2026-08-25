@@ -23,11 +23,16 @@
 # exactly this workspace, and the production dependency install. Nothing under
 # the checkout's bin/ enters: an apply leg is not something a daemon loads.
 #
-# Identity is the tree itself. The digest folds file bytes, mode bits, directory
-# topology, and symlink targets, with mtimes and ownership normalized so a
-# re-copy of identical sources yields an identical digest. A leg that keys its
-# restart on that digest restarts exactly when the code a daemon would load
-# changed — never because the repository merged something else.
+# Identity is what the daemon loads. The digest folds the closure packages —
+# file bytes, mode bits, directory topology, and the dependency links bun laid
+# inside them, whose targets name the resolved version of every third-party
+# package — plus the runtime workspace files (tsconfig.json, bunfig.toml), with
+# mtimes and ownership normalized so a re-copy of identical sources yields an
+# identical digest. The lockfile and the stubs are deliberately outside it: a
+# dependency bump in some other workspace member changes both and changes
+# nothing this daemon resolves. A leg that keys its restart on the digest
+# restarts exactly when the code a daemon would load changed — never because
+# the repository merged something else.
 set -euo pipefail
 export LC_ALL=C
 
@@ -107,8 +112,10 @@ if ! resolve_report="$(cd "$candidate/packages/$package" \
 fi
 rm -rf "$resolve_output"
 
+digest_members=(tsconfig.json bunfig.toml)
+for member in "${!closure[@]}"; do digest_members+=("packages/$member"); done
 digest="$(tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
-  --format=gnu -cf - -C "$candidate" . | sha256sum | cut -d' ' -f1)"
+  --format=gnu -cf - -C "$candidate" "${digest_members[@]}" | sha256sum | cut -d' ' -f1)"
 generation="$generations/$digest"
 if [[ -d "$generation" ]]; then
   rm -rf "$candidate"

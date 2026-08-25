@@ -13,7 +13,7 @@ describe('tmux/tx.conf', () => {
     expect(conf).toContain('set -g default-terminal "tmux-256color"');
     expect(conf).toContain('set -g base-index 0');
     expect(conf).toContain('setw -g pane-base-index 0');
-    expect(conf).toContain('bind r source-file ~/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf');
+    expect(conf).toContain('bind r source-file ~/.local/lib/terminus-os/txd/packages/txd/tmux/tx.conf');
   });
 
   test('contains idempotent pane focus and native pane navigation', () => {
@@ -82,7 +82,7 @@ describe('tmux/tx.conf', () => {
     expect(selection).toContain('unbind -T copy-mode-vi MouseDragEnd1Pane');
     const enter = selection.split('\n').find((line) => line.startsWith('bind -T copy-mode Enter '));
     expect(enter).toContain('copy-pipe-and-cancel -P');
-    expect(enter).toContain('$HOME/.bun/bin/bun $HOME/runtimes/Terminus-OS/live/packages/tx/bin/tx-selection');
+    expect(enter).toContain('$HOME/.bun/bin/bun $HOME/.local/lib/terminus-os/tx/packages/tx/bin/tx-selection');
     expect(enter).toContain('#{client_tty}');
     expect(selection.match(/tx-selection/g)).toHaveLength(1);
   });

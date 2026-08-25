@@ -39,9 +39,11 @@ StartLimitBurst=5
 # unresolved, because /ctl/health is the surface that says so.
 Type=notify
 NotifyAccess=main
-# The k12 box layout is ~/runtimes/Terminus-OS/{live,battlefield,config,
-# Terminus-OS.git} — the checkout lives under live/.
-WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd
+# The daemon executes from the installed generation apply-txd realizes with
+# terminus-install-generation, never from the deploy checkout: the checkout is a
+# synchronization target whose dependency install first destroys every
+# node_modules under it. GIT_SHA arrives through the leg's generation drop-in.
+WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd
 Environment=TXD_CONFIG=%h/secrets/txd/txd.json
 Environment=IMPERIUM_MACHINE=k12-personal
 Environment=TXD_ROTATION_LOCK_FILE=%h/.local/state/txd/estate-rotation.lock
