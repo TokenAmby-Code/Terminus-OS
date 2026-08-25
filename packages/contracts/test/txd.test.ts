@@ -7,6 +7,7 @@ import {
   CommReceiptSchema,
   CommReceiptWaitRequestSchema,
   CommRequestSchema,
+  CommTargetSchema,
   EVENT_TYPES,
   ESTATE_EVENT_NAMES,
   EventInputSchema,
@@ -90,6 +91,27 @@ describe("txd lifecycle vocabulary", () => {
         ...raw,
       })).toThrow();
     }
+  });
+
+  test('comm targets distinguish stable logical seats from rotating agent instances', () => {
+    expect(CommTargetSchema.parse({
+      agent_id: 'pax-instance-current',
+      seat_id: 'council:pax',
+      persona: 'pax',
+      logical_identity: { kind: 'stable_seat', seat_id: 'council:pax' },
+    }).logical_identity).toEqual({ kind: 'stable_seat', seat_id: 'council:pax' });
+
+    expect(CommTargetSchema.parse({
+      agent_id: 'worker-instance',
+      seat_id: 'palace:W',
+      persona: 'blood-angels',
+      logical_identity: { kind: 'agent_instance', agent_id: 'worker-instance' },
+    }).logical_identity).toEqual({ kind: 'agent_instance', agent_id: 'worker-instance' });
+
+    // Schema-12 history predates the explicit logical identity field.
+    expect(CommTargetSchema.parse({
+      agent_id: 'historic-instance', seat_id: 'palace:W', persona: null,
+    }).logical_identity).toBeUndefined();
   });
 
   test("event input holds dumb facts only — the 6 pre-store columns", () => {
