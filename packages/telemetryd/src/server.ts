@@ -5,15 +5,16 @@ import {
   PhoneMacroDroidHookReceipt,
   PhoneMacroDroidHookRecord,
 } from "@terminus-os/contracts";
-import stcPackage from "@tokenamby-code/stc-contract/package.json";
 import {
   PROBE_RUNGS,
   assertProbeSet,
   makeObservationHandler,
   type Deadline,
   type Observation,
+  type ObservationStore,
   type Probe,
-} from "@tokenamby-code/stc-contract/lib/service-observation.ts";
+} from "@tokenamby-code/stc-contract/observation";
+import { runningRuntimeMarker } from "@tokenamby-code/stc-contract/version";
 import type { TelemetryStore } from "./store.ts";
 
 
@@ -29,6 +30,8 @@ function json(body: unknown, status = 200): Response {
 
 export function makeServer(options: {
   store: TelemetryStore;
+  /** Every health walk is recorded durably; the store is the STC's, not ours. */
+  observationStore: ObservationStore;
   build: BuildInfo;
   bind?: string;
   port?: number;
@@ -79,10 +82,11 @@ export function makeServer(options: {
   const observe = makeObservationHandler({
     identity: { service: "telemetryd", daemon: "telemetryd", cli: null },
     version: options.build.version,
-    stcVersion: stcPackage.version,
+    stcVersion: runningRuntimeMarker().version,
     machine: "k12-personal",
     probes,
     holdings: [],
+    observationStore: options.observationStore,
   });
 
   async function persist(eventId: string, write: () => Promise<unknown>): Promise<boolean> {
