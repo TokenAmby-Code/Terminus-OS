@@ -13,13 +13,14 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const root = join(import.meta.dir, "..");
 
 const SERVICES = [
-  { service: "txd", unit: "packages/txd/systemd/txd.service", leg: "packages/txd/bin/apply-txd" },
-  { service: "telemetryd", unit: "packages/telemetryd/systemd/telemetryd.service", leg: "packages/telemetryd/bin/apply-telemetryd" },
-  { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "packages/busd/bin/apply-busd" },
+  { service: "txd", unit: "packages/txd/systemd/txd.service", leg: "bin/apply-txd" },
+  { service: "telemetryd", unit: "packages/telemetryd/systemd/telemetryd.service", leg: "bin/apply-telemetryd" },
+  { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "bin/apply-busd" },
 ] as const;
 
 const read = (relative: string) => readFileSync(join(root, relative), "utf8");
@@ -49,5 +50,45 @@ describe("apply leg and installed unit agree", () => {
     // the Token-Fleet registry. A leg outside that repository never trampolines
     // into the installer to declare its own.
     expect(read(leg)).not.toContain("FLEET_RESTART_CONTROLS_ONLY");
+  });
+});
+
+describe("a service's restart key does not fold in its own installer", () => {
+  // terminus-package-fingerprint emits everything a service loads at RUNTIME —
+  // that is what its restart stamp keys on. It walks packages/<svc> whole,
+  // pruning only node_modules and test. An apply leg placed under
+  // packages/<svc>/ therefore lands INSIDE the restart key, and editing the
+  // installer would restart the daemon it installs. For txd that means
+  // re-minting council identities and retiring every live overseer session to
+  // deliver a change the running process cannot observe.
+  //
+  // The legs live at the repository root instead, outside every package walk,
+  // so no prune rule is needed and none is added: this repository's helper stays
+  // byte-identical to the Token-Fleet copy it replaces, which is what makes
+  // "no stamp moves because of the move" checkable rather than argued.
+  const fingerprint = (pkg: string) => {
+    const result = spawnSync(join(root, "bin/terminus-package-fingerprint"), [root, pkg], {
+      encoding: "utf8", maxBuffer: 1024 * 1024 * 256,
+    });
+    expect(result.status).toBe(0);
+    return result.stdout;
+  };
+
+  test.each(SERVICES)("$service: no apply leg is inside its restart key", ({ service }) => {
+    const paths = fingerprint(service).split("\n").filter((line) => line.startsWith("packages/"));
+    expect(paths.filter((path) => path.includes("/apply-"))).toEqual([]);
+  });
+
+  test.each(SERVICES)("$service: the restart key still reaches its src/", ({ service }) => {
+    const paths = fingerprint(service).split("\n");
+    expect(paths.some((path) => path.startsWith(`packages/${service}/src/`))).toBe(true);
+  });
+
+  test("no package carries a bin/ directory that a future leg could be filed into", () => {
+    const listed = spawnSync("git", ["ls-files", "-z", "--", "packages"], { cwd: root, encoding: "utf8" });
+    expect(listed.status).toBe(0);
+    const offenders = listed.stdout.split("\0").filter(Boolean)
+      .filter((path) => path.split("/").includes("bin"));
+    expect(offenders).toEqual([]);
   });
 });
