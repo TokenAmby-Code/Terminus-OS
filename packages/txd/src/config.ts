@@ -29,6 +29,8 @@ export type DaemonConfig = {
   db: DbEndpointT;
   /** The tmux socket name (`tmux -L <name>`) this daemon owns authoritatively. */
   tmuxSocket: string;
+  /** Generated Token-Fleet machine registry used to bind SSH transport IPs to device identity. */
+  machineRegistryPath: string;
   /** Kernel lock held across an estate rotation until reconstruction completes. */
   rotationLockFile: string;
   /** Private handoff FIFO between the retiring and reconstructed daemon generations. */
@@ -75,6 +77,7 @@ const HARD_DEFAULTS = {
     application_name: 'txd',
   }),
   tmuxSocket: 'k12',
+  machineRegistryPath: `${process.env.HOME}/runtimes/Token-Fleet/live/shared/generated/registry.json`,
   lifecycledSocket: `${process.env.XDG_RUNTIME_DIR ?? `/run/user/${process.getuid?.() ?? 1000}`}/lifecycled/ingress.sock`,
   commWatchTimeoutMs: 5 * 60 * 1000,
   rotationLockFile: `${process.env.XDG_STATE_HOME ?? `${process.env.HOME}/.local/state`}/txd/estate-rotation.lock`,
@@ -176,6 +179,7 @@ function envDefaults(): PartialConfig {
           })
         : undefined,
     tmuxSocket: process.env.TXD_TMUX_SOCKET,
+    machineRegistryPath: process.env.TXD_MACHINE_REGISTRY,
     lifecycledSocket: process.env.TXD_LIFECYCLED_SOCKET,
     commWatchTimeoutMs: process.env.TXD_COMM_WATCH_TIMEOUT_MS ? Number(process.env.TXD_COMM_WATCH_TIMEOUT_MS) : undefined,
     rotationLockFile: process.env.TXD_ROTATION_LOCK_FILE,
@@ -196,6 +200,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     machine: raw.machine ?? env.machine, // NO hard default — must be known
     db: raw.db ?? env.db ?? HARD_DEFAULTS.db,
     tmuxSocket: raw.tmuxSocket ?? env.tmuxSocket ?? HARD_DEFAULTS.tmuxSocket,
+    machineRegistryPath: raw.machineRegistryPath ?? env.machineRegistryPath ?? HARD_DEFAULTS.machineRegistryPath,
     lifecycledSocket: raw.lifecycledSocket ?? env.lifecycledSocket ?? HARD_DEFAULTS.lifecycledSocket,
     commWatchTimeoutMs: raw.commWatchTimeoutMs ?? env.commWatchTimeoutMs ?? HARD_DEFAULTS.commWatchTimeoutMs,
     rotationLockFile: raw.rotationLockFile ?? env.rotationLockFile ?? HARD_DEFAULTS.rotationLockFile,
@@ -216,6 +221,7 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
     throw new Error(`txd config error: invalid db endpoint — ${db.error.message}`);
   cfg.db = db.data;
   if (!cfg.tmuxSocket) throw new Error('txd config error: tmuxSocket is required');
+  if (!cfg.machineRegistryPath) throw new Error('txd config error: machineRegistryPath is required');
   if (cfg.lifecycledSocket === undefined) throw new Error('txd config error: lifecycledSocket is required (empty string disables the comm watch plane)');
   if (!Number.isInteger(cfg.commWatchTimeoutMs) || cfg.commWatchTimeoutMs! < 5 * 60 * 1000)
     throw new Error(`txd config error: invalid commWatchTimeoutMs ${cfg.commWatchTimeoutMs}`);

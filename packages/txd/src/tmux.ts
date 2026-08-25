@@ -31,7 +31,12 @@ import {
   type ModeTransitionIntent,
   type ModeTransitionMechanism,
 } from '@terminus-os/contracts';
-import { osc52Sequence, validateAttachedClientTty, validateClipboardBytes } from './osc52.ts';
+import {
+  deliverClipboardToOrigin,
+  type ClipboardMachineRegistry,
+  type ClipboardOriginObservation,
+  type ClipboardOriginOutcome,
+} from './clipboard-origin.ts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
@@ -276,8 +281,8 @@ export interface TmuxControlPlane {
   loadClipboard(text: string): Promise<number>;
   /** Read the one transient clipboard buffer as raw bytes. */
   readClipboard(): Promise<Uint8Array>;
-  /** Commit one selection to the transient buffer and its invoking attached client. */
-  commitClipboardSelection(text: string, clientTty: string): Promise<number>;
+  /** Commit one selection to the transient buffer and its transport-bound origin. */
+  commitClipboardSelection(text: string, clientTty: string): Promise<ClipboardOriginOutcome>;
 }
 
 // The declared split placing each seat, mirrored from constructPage's
@@ -404,6 +409,7 @@ type TmuxRunner = (socket: string, args: string[], stdin?: Uint8Array) => Promis
 type TmuxBinaryResult = { code: number; stdout: Uint8Array; stderr: string; overflow?: boolean };
 type TmuxBinaryRunner = (socket: string, args: string[]) => Promise<TmuxBinaryResult>;
 type WriteClient = (path: string, data: Uint8Array) => Promise<void>;
+type ObserveClipboardOrigin = (clientTty: string) => Promise<ClipboardOriginObservation>;
 
 export type TmuxAuditRecord = {
   operation: string;
@@ -535,6 +541,8 @@ export class RealTmux implements TmuxControlPlane {
   private audit: AuditSink;
   private binaryRunner: TmuxBinaryRunner;
   private writeClient: WriteClient;
+  private observeClipboardOrigin: ObserveClipboardOrigin;
+  private machineRegistry: ClipboardMachineRegistry;
   private machine: string | undefined;
   private waitFor: WaitForSignal;
   private paneInputQueues = new Map<string, Promise<unknown>>();
@@ -545,6 +553,8 @@ export class RealTmux implements TmuxControlPlane {
       run?: TmuxRunner;
       runBytes?: TmuxBinaryRunner;
       writeClient?: WriteClient;
+      observeClipboardOrigin?: ObserveClipboardOrigin;
+      machineRegistry?: ClipboardMachineRegistry;
       audit?: AuditSink;
       machine?: string;
       waitForSignal?: WaitForSignal;
@@ -553,14 +563,26 @@ export class RealTmux implements TmuxControlPlane {
     this.runner = options.run ?? run;
     this.binaryRunner = options.runBytes ?? runBytes;
     this.audit = options.audit ?? ((record) => console.info(JSON.stringify({ level: 'info', event: 'tmux_operation', ...record })));
-    this.writeClient = options.writeClient ?? (async (path, data) => {
-      const handle = await open(path, 'w');
-      try {
-        await handle.write(data);
-      } finally {
-        await handle.close();
-      }
+    this.writeClient = options.writeClient ?? (async (target, data) => {
+      const loaded = await this.command(
+        'clipboard_origin_transfer',
+        'origin-client',
+        ['load-buffer', '-w', '-b', CLIPBOARD_BUFFER_NAME, '-t', target, '-'],
+        data,
+      );
+      if (loaded.code !== 0) throw new Error('clipboard origin transport refused');
+      // The transfer effect already succeeded. Keep explicit clipboard push
+      // coherent for an empty selection without letting bookkeeping rewrite
+      // the observed delivery outcome.
+      await this.command(
+        'clipboard_origin_marker',
+        CLIPBOARD_BUFFER_NAME,
+        ['set-option', '-g', '@tx_clipboard_empty', data.byteLength === 0 ? '1' : '0'],
+      );
     });
+    this.machineRegistry = options.machineRegistry ?? { machines: {} };
+    this.observeClipboardOrigin = options.observeClipboardOrigin
+      ?? ((clientTty) => this.readClipboardOrigin(clientTty));
     this.machine = options.machine;
     this.waitFor = options.waitForSignal ?? waitForSignal;
   }
@@ -699,36 +721,67 @@ export class RealTmux implements TmuxControlPlane {
     if (marker.code !== 0) throw new Error(`txd clipboard ${direction} failed: ${this.stderrCategory(marker)}`);
   }
 
-  async commitClipboardSelection(text: string, clientTty: string): Promise<number> {
-    const bytes = new TextEncoder().encode(text);
-    validateClipboardBytes(bytes);
+  private async readClipboardOrigin(clientTty: string): Promise<ClipboardOriginObservation> {
     const clients = await this.command(
       'observe_clipboard_clients',
       'invoking-client',
-      ['list-clients', '-F', '#{client_tty}'],
+      ['list-clients', '-F', '#{client_tty}\t#{client_pid}'],
     );
-    if (clients.code !== 0) throw new Error('attached clients are unavailable');
-    const target = validateAttachedClientTty(
-      clientTty,
-      clients.stdout.split('\n').map((line) => line.trim()).filter(Boolean),
-    );
-    try {
-      await this.replaceClipboard(bytes, 'clipboard_selection');
-      await this.writeClient(target, osc52Sequence(bytes));
-      await this.command(
-        'report_clipboard_selection',
-        'invoking-client',
-        ['display-message', '-c', target, `clipboard push succeeded (${bytes.byteLength} bytes)`],
-      );
-      return bytes.byteLength;
-    } catch (error) {
-      await this.command(
-        'report_clipboard_selection',
-        'invoking-client',
-        ['display-message', '-c', target, `clipboard push failed (${bytes.byteLength} bytes)`],
-      );
-      throw error;
+    if (clients.code !== 0) {
+      return { requested_tty: clientTty, attached_clients: [], process_ancestors: {} };
     }
+    const attached_clients = clients.stdout.split('\n').filter(Boolean).flatMap((line) => {
+      const [tty, rawPid] = line.split('\t');
+      const process_id = Number(rawPid);
+      return tty && Number.isInteger(process_id) && process_id > 1 ? [{ tty, process_id }] : [];
+    });
+    const process_ancestors: ClipboardOriginObservation['process_ancestors'] = {};
+    for (const client of attached_clients) {
+      let processId = client.process_id;
+      const visited = new Set<number>();
+      while (processId > 1 && !visited.has(processId)) {
+        visited.add(processId);
+        try {
+          const [witness, command] = await Promise.all([
+            processWitness(processId),
+            readFile(`/proc/${processId}/cmdline`),
+          ]);
+          if (!witness || witness.parent_pid < 1) break;
+          process_ancestors[processId] = {
+            parent_process_id: witness.parent_pid,
+            command: command.toString('utf8').replaceAll('\0', ' ').trim(),
+          };
+          processId = witness.parent_pid;
+        } catch {
+          break;
+        }
+      }
+    }
+    return { requested_tty: clientTty, attached_clients, process_ancestors };
+  }
+
+  async commitClipboardSelection(text: string, clientTty: string): Promise<ClipboardOriginOutcome> {
+    const bytes = new TextEncoder().encode(text);
+    const observation = await this.observeClipboardOrigin(clientTty);
+    const result = await deliverClipboardToOrigin(
+      bytes,
+      observation,
+      this.machineRegistry,
+      this.writeClient,
+      (entry) => this.audit({
+        operation: entry.operation,
+        target: entry.origin ?? 'unresolved-origin',
+        outcome: entry.outcome === 'delivered' ? 'succeeded' : 'failed',
+        duration_ms: 0,
+        stderr_category: entry.outcome === 'delivered' ? 'none' : 'transport_error',
+      }),
+    );
+    await this.command(
+      'report_clipboard_selection',
+      'invoking-client',
+      ['display-message', '-c', clientTty, `clipboard ${result.outcome} (${bytes.byteLength} bytes)`],
+    );
+    return result;
   }
 
   async readClipboard(): Promise<Uint8Array> {
@@ -2368,11 +2421,12 @@ export class FakeTmux implements TmuxControlPlane {
   }
   attachClient(tty: string): void { this.attachedClients.add(tty); }
   selectionDeliveries(): string[] { return [...this.deliveredSelections]; }
-  async commitClipboardSelection(text: string, clientTty: string): Promise<number> {
-    validateAttachedClientTty(clientTty, [...this.attachedClients]);
-    const bytes = await this.loadClipboard(text);
+  async commitClipboardSelection(text: string, clientTty: string): Promise<ClipboardOriginOutcome> {
+    const bytes = new TextEncoder().encode(text).byteLength;
+    if (!this.attachedClients.has(clientTty)) return { outcome: 'disconnected_origin', bytes };
+    await this.loadClipboard(text);
     this.deliveredSelections.push(clientTty);
-    return bytes;
+    return { outcome: 'delivered', origin: 'wsl', bytes };
   }
   setCommand(seatId: string, command: string): void { this.commands.set(seatId, command); }
   async listSeats(): Promise<SeatObservation[]> {

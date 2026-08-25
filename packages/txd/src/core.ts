@@ -101,6 +101,7 @@ import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
+import type { ClipboardOriginOutcome } from './clipboard-origin.ts';
 import type { TxdPublishedEventType } from './events.ts';
 
 // Reg-audit attestation set DEFINED SO FAR (door step 1). The refusal machinery
@@ -1228,11 +1229,11 @@ export class Daemon {
     });
   }
 
-  async clipboardSelection(req: ClipboardSelectionRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number }> {
+  async clipboardSelection(req: ClipboardSelectionRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME } & ClipboardOriginOutcome> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const bytes = await this.tmux.commitClipboardSelection(req.content, req.client_tty);
-      return { buffer_name: CLIPBOARD_BUFFER_NAME, bytes };
+      const result = await this.tmux.commitClipboardSelection(req.content, req.client_tty);
+      return { buffer_name: CLIPBOARD_BUFFER_NAME, ...result };
     });
   }
 

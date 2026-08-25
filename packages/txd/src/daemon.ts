@@ -13,6 +13,7 @@ import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
 import { makeJournalPublisher } from './events.ts';
 import { createTxdEventJournal, createTxdJournalConnection } from './event-journal.ts';
 import { realRemoteEnvelopeLister } from './envelopes.ts';
+import { parseClipboardMachineRegistry } from './clipboard-origin.ts';
 
 const build: BuildInfo = {
   version: '0.1.0',
@@ -56,7 +57,8 @@ async function postLifecycledGate(
 }
 // Connect + migrate (forward-only, shared migrations home) — fail loud at boot.
 const store = await PostgresEventStore.connect(cfg.db);
-const tmux = new RealTmux(cfg.tmuxSocket, { machine: cfg.machine });
+const machineRegistry = parseClipboardMachineRegistry(await Bun.file(cfg.machineRegistryPath).json());
+const tmux = new RealTmux(cfg.tmuxSocket, { machine: cfg.machine, machineRegistry });
 const rotationBarrier = new ProcessEstateRotationBarrier(cfg.rotationLockFile, cfg.rotationSignalFifo);
 // The pre-send comm watch, armed against lifecycled's local ingress socket.
 // The await is bounded outside lifecycled's own gate contract. A typed refusal

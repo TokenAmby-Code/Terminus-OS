@@ -49,6 +49,7 @@ Environment=IMPERIUM_MACHINE=k12-personal
 Environment=TXD_ROTATION_LOCK_FILE=%h/.local/state/txd/estate-rotation.lock
 Environment=TXD_ROTATION_SIGNAL_FIFO=%h/.local/state/txd/estate-rotation.signal
 Environment=TXD_AGENT_WRAPPER=%h/runtimes/Token-Fleet/live/shared/bin/agent-wrapper
+Environment=TXD_MACHINE_REGISTRY=%h/runtimes/Token-Fleet/live/shared/generated/registry.json
 # Absolute bun path (pinned 1.3.14 on the fleet).
 ExecStart=%h/.bun/bin/bun src/daemon.ts
 Restart=on-failure

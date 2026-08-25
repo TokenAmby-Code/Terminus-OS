@@ -5,11 +5,19 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { RealTmux, type TmuxAuditRecord } from '../src/tmux.ts';
-import { osc52Sequence } from '../src/osc52.ts';
+
+const machineRegistry = { machines: { wsl: { tailscaleIp: '100.66.10.74' } } };
+const observedWsl = (tty: string) => ({
+  requested_tty: tty,
+  attached_clients: [{ tty, process_id: 71 }],
+  process_ancestors: {
+    71: { parent_process_id: 70, command: 'tmux attach' },
+    70: { parent_process_id: 1, command: 'tailscaled ssh --remote-ip=100.66.10.74' },
+  },
+});
 
 test('the adapter validates the attached client before mutating and targets one tty', async () => {
   const calls: Array<{ args: string[]; stdin?: Uint8Array }> = [];
-  const writes: Array<{ path: string; data: Uint8Array }> = [];
   const audits: TmuxAuditRecord[] = [];
   const text = 'exact\n雪 😀';
   const bytes = new TextEncoder().encode(text);
@@ -22,21 +30,20 @@ test('the adapter validates the attached client before mutating and targets one 
         stderr: '',
       };
     },
-    writeClient: async (path, data) => { writes.push({ path, data: data.slice() }); },
+    machineRegistry,
+    observeClipboardOrigin: async (tty) => observedWsl(tty),
     audit: (record) => audits.push(record),
   });
 
-  expect(await tmux.commitClipboardSelection(text, '/dev/pts/7')).toBe(bytes.byteLength);
-  expect(calls[0]?.args).toEqual(['list-clients', '-F', '#{client_tty}']);
-  expect(calls[1]).toEqual({
-    args: ['load-buffer', '-b', 'tx-clipboard', '-'],
+  expect(await tmux.commitClipboardSelection(text, '/dev/pts/7')).toEqual({ outcome: 'delivered', origin: 'wsl', bytes: bytes.byteLength });
+  expect(calls[0]).toEqual({
+    args: ['load-buffer', '-w', '-b', 'tx-clipboard', '-t', '/dev/pts/7', '-'],
     stdin: bytes,
   });
-  expect(calls[2]?.args).toEqual(['set-option', '-g', '@tx_clipboard_empty', '0']);
-  expect(writes).toEqual([{ path: '/dev/pts/7', data: osc52Sequence(bytes) }]);
+  expect(calls[1]?.args).toEqual(['set-option', '-g', '@tx_clipboard_empty', '0']);
   expect(calls.at(-1)?.args).toEqual([
     'display-message', '-c', '/dev/pts/7',
-    `clipboard push succeeded (${bytes.byteLength} bytes)`,
+    `clipboard delivered (${bytes.byteLength} bytes)`,
   ]);
   const serializedAudits = JSON.stringify(audits);
   expect(serializedAudits).not.toContain(text);
@@ -52,10 +59,12 @@ test('the adapter rejects an unrelated tty without changing the buffer or writin
       return { code: 0, stdout: '/dev/pts/7\n', stderr: '' };
     },
     writeClient: async () => { writes += 1; },
+    machineRegistry,
+    observeClipboardOrigin: async (tty) => ({ ...observedWsl(tty), attached_clients: [] }),
     audit: () => {},
   });
-  await expect(tmux.commitClipboardSelection('secret', '/dev/pts/8')).rejects.toThrow('not attached');
-  expect(calls).toEqual([['list-clients', '-F', '#{client_tty}']]);
+  await expect(tmux.commitClipboardSelection('secret', '/dev/pts/8')).resolves.toEqual({ outcome: 'disconnected_origin', bytes: 6 });
+  expect(calls).toEqual([['display-message', '-c', '/dev/pts/8', 'clipboard disconnected_origin (6 bytes)']]);
   expect(writes).toBe(0);
 });
 
@@ -65,16 +74,18 @@ test('selection failure reports byte count without content', async () => {
   const tmux = new RealTmux('test', {
     run: async (_socket, args) => {
       calls.push(args);
-      if (args[0] === 'list-clients') return { code: 0, stdout: '/dev/pts/7\n', stderr: '' };
-      if (args[0] === 'load-buffer') return { code: 1, stdout: '', stderr: 'secret backend detail' };
       return { code: 0, stdout: '', stderr: '' };
     },
-    writeClient: async () => { throw new Error('not reached'); },
+    writeClient: async () => { throw new Error('private terminal refusal detail'); },
+    machineRegistry,
+    observeClipboardOrigin: async (tty) => observedWsl(tty),
     audit: () => {},
   });
-  await expect(tmux.commitClipboardSelection(secret, '/dev/pts/7')).rejects.toThrow('clipboard selection');
+  await expect(tmux.commitClipboardSelection(secret, '/dev/pts/7')).resolves.toEqual({
+    outcome: 'transport_refused', origin: 'wsl', bytes: new TextEncoder().encode(secret).byteLength,
+  });
   const report = calls.at(-1)?.join(' ') ?? '';
-  expect(report).toContain(`clipboard push failed (${new TextEncoder().encode(secret).byteLength} bytes)`);
+  expect(report).toContain(`clipboard transport_refused (${new TextEncoder().encode(secret).byteLength} bytes)`);
   expect(report).not.toContain(secret);
 });
 
@@ -88,7 +99,7 @@ describe('real adapter selection path', () => {
     if (directory) await rm(directory, { recursive: true, force: true });
   });
 
-  test('loads the named buffer and writes OSC 52 only to the attached pseudo-tty', async () => {
+  test('loads the named buffer and asks tmux to copy only through the attached client', async () => {
     directory = await mkdtemp(join(tmpdir(), 'tx-selection-'));
     const transcript = join(directory, 'tty.log');
     expect(Bun.spawnSync([
@@ -118,13 +129,18 @@ describe('real adapter selection path', () => {
     const tty = new TextDecoder().decode(listed.stdout).trim();
     const text = 'real path\n雪 😀';
     const bytes = new TextEncoder().encode(text);
-    const tmux = new RealTmux(socket, { audit: () => {} });
+    const tmux = new RealTmux(socket, {
+      audit: () => {},
+      machineRegistry,
+      observeClipboardOrigin: async (target) => observedWsl(target),
+    });
 
-    expect(await tmux.commitClipboardSelection(text, tty)).toBe(bytes.byteLength);
+    expect(await tmux.commitClipboardSelection(text, tty)).toEqual({ outcome: 'delivered', origin: 'wsl', bytes: bytes.byteLength });
     expect(Bun.spawnSync(['tmux', '-L', socket, 'save-buffer', '-b', 'tx-clipboard', '-']).stdout)
       .toEqual(Buffer.from(bytes));
     Bun.spawnSync(['tmux', '-L', socket, 'kill-server']);
     await attached.exited;
-    expect((await readFile(transcript)).includes(osc52Sequence(bytes))).toBe(true);
+    const rendered = await readFile(transcript);
+    expect(rendered.includes(new TextEncoder().encode(Buffer.from(bytes).toString('base64')))).toBe(true);
   });
 });
