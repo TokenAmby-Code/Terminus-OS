@@ -1818,19 +1818,22 @@ export class Daemon {
         if (!binding.agent_id || !binding.engine) throw new Error(`engine_unattested: ${req.target}`);
         return { kind: 'agent' as const, binding };
       }
+      const bareSeatId = logicalIdentity.kind === 'stable_seat'
+        ? logicalIdentity.seat_id
+        : req.target;
       // No registered binding answers to this identity, so the only reading
       // left is a bare declared seat. Anything else is absent — loud.
-      if (!TXD_ESTATE.includes(req.target)) throw new Error(`identity_absent: ${req.target}`);
-      if (proj.abandonedSeats.has(req.target)) throw new Error(`seat_abandoned: ${req.target}`);
+      if (!TXD_ESTATE.includes(bareSeatId)) throw new Error(`identity_absent: ${req.target}`);
+      if (proj.abandonedSeats.has(bareSeatId)) throw new Error(`seat_abandoned: ${bareSeatId}`);
       // A binding mid-birth is an agent arriving; racing its registration
       // with a shell line would type into its wrapper.
-      if (proj.currentBindings.some((binding) => binding.seat_id === req.target)) {
-        throw new Error(`seat_binding_pending: ${req.target}`);
+      if (proj.currentBindings.some((binding) => binding.seat_id === bareSeatId)) {
+        throw new Error(`seat_binding_pending: ${bareSeatId}`);
       }
-      if (pendingResetSeats.has(req.target)) throw new Error(`scoped_reset_pending: ${req.target}`);
-      const row = proj.seatBoard.find((entry) => entry.seat_id === req.target);
-      if (row && row.pane === 'dead') throw new Error(`pane_dead: ${req.target}`);
-      return { kind: 'pane' as const, seatId: req.target };
+      if (pendingResetSeats.has(bareSeatId)) throw new Error(`scoped_reset_pending: ${bareSeatId}`);
+      const row = proj.seatBoard.find((entry) => entry.seat_id === bareSeatId);
+      if (row && row.pane === 'dead') throw new Error(`pane_dead: ${bareSeatId}`);
+      return { kind: 'pane' as const, seatId: bareSeatId };
     });
 
     const runId = crypto.randomUUID();
