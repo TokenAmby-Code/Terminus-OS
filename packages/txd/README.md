@@ -28,6 +28,17 @@ contracts source, and the public route shape.
   Construction is idempotent. Mitosis worker panes retain flexible native
   tiled geometry; arbitrary or foreign pages are refused before mutation.
   txd is the constructor; tx never constructs.
+- **Boot observes; it never closes a live pane.** A restart arrives with every
+  merge in txd's closure, so boot is not a repair site. An existing page that
+  still holds a live tagged pane is accepted as it stands however far it has
+  drifted: the drift is flagged as a `page_drift` contradiction on the page
+  entity and named on `/ctl/health` `estate_divergence` (page + failed clause,
+  `seats` or `geometry`) while `estate_generation` reads `recoverable`. Boot
+  repairs a dead or missing seat alone, in place, exactly as the lifecycle
+  ingress does, and rebuilds only a page with no live tagged pane left.
+  Repairing an occupied page is an explicit operator verb (`tx estate`
+  page/pane reset) that computes the page's foreground workloads and refuses
+  `estate_busy` unless forced.
 - **Static Council singletons.** Custodes (Claude) and Fabricator-General
   (Codex) are compile-time declarations launched through the Fleet wrapper.
   A private one-time handshake binds each fresh agent only after txd

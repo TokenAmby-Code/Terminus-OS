@@ -51,6 +51,7 @@ DELETE FROM txd.events
    'estate.scoped_reset_requested',
    'estate.scoped_reset_completed',
    'estate.scoped_reset_failed',
+   'estate.page_canonical_observed',
    'estate.compaction_checkpoint'
 );
 
