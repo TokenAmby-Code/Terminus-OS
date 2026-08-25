@@ -2,13 +2,16 @@
   "name": "terminus-os",
   "private": true,
   "type": "module",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:adversarial": "bun test .adversarial.test.ts"
   },
   "devDependencies": {
+    "@tokenamby-code/stc-contract": "1.2.1",
     "@types/bun": "latest",
     "typescript": "^5.7.0"
   }

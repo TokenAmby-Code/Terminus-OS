@@ -9,7 +9,9 @@ permissions:
   contents: read
 
 env:
-  CIVIC_PACKAGES_READ: ${{ secrets.CIVIC_PACKAGES_READ }}
+  # The org secret still carries its Civic-era name; the variable is the one
+  # fleet-packages projects for the @tokenamby-code scope on the machines.
+  TOKEN_FLEET_PACKAGES_READ: ${{ secrets.CIVIC_PACKAGES_READ }}
 
 jobs:
   check:

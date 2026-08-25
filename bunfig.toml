@@ -5,4 +5,4 @@
 preload = ["./test/workspace-closure-preload.ts"]
 
 [install.scopes]
-"@tokenamby-code" = { url = "https://npm.pkg.github.com", token = "$CIVIC_PACKAGES_READ" }
+"@tokenamby-code" = { url = "https://npm.pkg.github.com", token = "$TOKEN_FLEET_PACKAGES_READ" }

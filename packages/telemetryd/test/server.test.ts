@@ -1,9 +1,17 @@
 import { afterEach, expect, test } from "bun:test";
 import type { DesktopTelemetryEventT, PhoneMacroDroidHookRecordT } from "@terminus-os/contracts";
-import type { Observation } from "@tokenamby-code/stc-contract/lib/service-observation.ts";
+import type { Observation, ObservationStore, ObservedProbeReading } from "@tokenamby-code/stc-contract/observation";
 import { makeServer } from "../src/server.ts";
 import type { TelemetryStore } from "../src/store.ts";
 
+
+/** Records every walk the surface hands it; what the store does with a walk is the package's own contract. */
+class MemoryObservationStore implements ObservationStore {
+  readonly walks: ObservedProbeReading[][] = [];
+  async recordWalk(readings: ObservedProbeReading[]): Promise<void> {
+    this.walks.push(readings);
+  }
+}
 
 class MemoryStore implements TelemetryStore {
   readonly events: DesktopTelemetryEventT[] = [];
@@ -49,8 +57,11 @@ const event = {
   youtube: true,
 };
 
+const observationStores: MemoryObservationStore[] = [];
 function serve(store: TelemetryStore) {
-  const server = makeServer({ store, build: { version: "test", git_sha: "abc", bun: Bun.version }, port: 0 });
+  const observationStore = new MemoryObservationStore();
+  observationStores.push(observationStore);
+  const server = makeServer({ store, observationStore, build: { version: "test", git_sha: "abc", bun: Bun.version }, port: 0 });
   servers.push(server);
   return `http://${server.hostname}:${server.port}`;
 }
@@ -75,11 +86,18 @@ test("health is the shared walk over the declared postgres and ingress probes", 
   const response = await fetch(`${base}/health`);
   const body = await response.json() as {
     ok: boolean;
+    stc_version: string;
     probes: Array<{ name: string; rung: string; state: string; evidence: Record<string, unknown> }>;
   };
 
   expect(response.status).toBe(200);
   expect(body.ok).toBe(true);
+  // The marker is the executing package's own version, not a manifest read.
+  expect(body.stc_version).toBe("1.2.1");
+  // Every walk lands in the STC durable observation store, one reading per probe.
+  expect(observationStores.at(-1)?.walks.map((walk) => walk.map((reading) => reading.name))).toEqual([
+    ["postgres", "telemetry-ingress"],
+  ]);
   expect(body.probes.map(({ name, rung, state }) => ({ name, rung, state }))).toEqual([
     { name: "postgres", rung: "dependency", state: "ready" },
     { name: "telemetry-ingress", rung: "function", state: "ready" },
