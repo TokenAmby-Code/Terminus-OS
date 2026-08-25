@@ -789,7 +789,20 @@ export const AgentInjectRequestSchema = z.object({
   text: z.string().min(1),
 }).strict();
 
-export const CommTargetSchema = z.object({ agent_id: z.string(), seat_id: z.string(), persona: z.string().nullable() });
+// The logical address and the rotating delivery instance are separate facts.
+// Historical schema-12 rows predate this field, so it remains optional at the
+// wire reader; every newly admitted target supplies it in txd before snapshot.
+export const CommLogicalIdentitySchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('stable_seat'), seat_id: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('agent_instance'), agent_id: z.string().min(1) }).strict(),
+]);
+export type CommLogicalIdentity = z.infer<typeof CommLogicalIdentitySchema>;
+export const CommTargetSchema = z.object({
+  agent_id: z.string(),
+  seat_id: z.string(),
+  persona: z.string().nullable(),
+  logical_identity: CommLogicalIdentitySchema.optional(),
+});
 export type CommTarget = z.infer<typeof CommTargetSchema>;
 // `staged` = this message's bytes were handed to the target pane and Enter was
 // pressed. Delivery is asserted later and separately by

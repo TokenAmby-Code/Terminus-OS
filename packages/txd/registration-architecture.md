@@ -4,9 +4,9 @@ Status: ruled for implementation. Council rotation is outside this change.
 
 ## Authorities
 
-`registrationd` is the only logical identity authority. It mints `agent_id`,
-owns the durable birth transaction, assembles the complete instruction and
-persona package, and writes the final agent record.
+`registrationd` is the only agent-instance identity authority. It mints
+`agent_id`, owns the durable birth transaction, assembles the complete
+instruction and persona package, and writes the final agent record.
 
 `txd` is the physical tmux authority. It constructs panes, observes process
 ancestry, attests canonical placement and pane generation, applies and reads
@@ -23,10 +23,19 @@ delivery. A bus event is always a one-way fact and never a return value.
 
 ## Identity and placement
 
-The sole logical identity is `agent_id`. The sole fleet identity variable in
-an engine environment is `AGENT_ID`. It is an identifier, not a credential.
-Transport authentication and registration truth, not an environment string,
-authorize persona-sensitive operations.
+`agent_id` is the identity of one rotating engine/birth instance. A perpetual
+persona additionally has one stable logical identity: its canonical
+estate-declared seat. A bare perpetual label is only an alias for that seat;
+it never aliases an instance ID. Txd resolves the stable seat through a
+currently registered, non-retired binding and snapshots both facts separately:
+the stable logical seat and the rotating delivery `agent_id`. This distinction
+is typed at the resolver boundary, so a retirement fact makes an instance
+unroutable even before its later seat-cleared fact folds.
+
+The sole fleet instance-identity variable in an engine environment is
+`AGENT_ID`. It is an identifier, not a credential. Transport authentication
+and registration truth, not an environment string, authorize
+persona-sensitive operations.
 
 `PANE_ID` is placement context. txd installs the canonical seat label in each
 pane's process environment with tmux's per-pane `-e PANE_ID=<seat>` option.

@@ -50,6 +50,29 @@ export type Projections = {
   transportClaims: Map<string, TransportClaim>;
 };
 
+// A current binding is replay topology, not routing authority by itself: the
+// retirement fact can fold before seat_cleared. Every agent-directed effect
+// must cross this refinement so a retired instance is unrepresentable as a
+// routable target during that interval.
+export type RoutableBinding = CurrentBinding & {
+  agent_id: string;
+  registered: true;
+};
+
+export function isRoutableBinding(
+  binding: CurrentBinding,
+  projections: Projections,
+): binding is RoutableBinding {
+  return binding.registered
+    && binding.agent_id !== null
+    && projections.turnByAgent.get(binding.agent_id) !== 'retired';
+}
+
+export function routableBindings(projections: Projections): RoutableBinding[] {
+  return projections.currentBindings.filter((binding): binding is RoutableBinding =>
+    isRoutableBinding(binding, projections));
+}
+
 export type LaunchComposition = {
   seat_id: string;
   pane_generation: string;

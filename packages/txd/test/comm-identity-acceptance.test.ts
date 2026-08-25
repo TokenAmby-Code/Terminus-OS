@@ -43,25 +43,39 @@ const send = (daemon: Daemon, target: string) => daemon.comm({
   schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target, message: 'orders', ask: false, reply: false,
 });
 
+const stableTarget = (agent_id: string, seat_id: string, persona: string) => ({
+  agent_id,
+  seat_id,
+  persona,
+  logical_identity: { kind: 'stable_seat' as const, seat_id },
+});
+
+const instanceTarget = (agent_id: string, seat_id: string, persona: string) => ({
+  agent_id,
+  seat_id,
+  persona,
+  logical_identity: { kind: 'agent_instance' as const, agent_id },
+});
+
 // The live specimen, 2026-08-21: `tx comm Custodes` refused identity_absent at
 // the daemon while `tx comm council:custodes` delivered.
 test('a mis-cased council seat id addresses the same seat as its canonical form', async () => {
   const { daemon } = await rig();
   const accepted = await send(daemon, 'COUNCIL:PAX');
-  expect(accepted.targets).toEqual([{ agent_id: 'agent-pax', seat_id: 'council:pax', persona: 'pax' }]);
+  expect(accepted.targets).toEqual([stableTarget('agent-pax', 'council:pax', 'pax')]);
 });
 
 test('a mis-cased bare council name addresses its council seat', async () => {
   const { daemon } = await rig();
   const accepted = await send(daemon, 'Custodes');
-  expect(accepted.targets).toEqual([{ agent_id: 'agent-custodes', seat_id: 'council:custodes', persona: 'custodes' }]);
+  expect(accepted.targets).toEqual([stableTarget('agent-custodes', 'council:custodes', 'custodes')]);
 });
 
 test('every bare council persona name resolves to its page-qualified seat', async () => {
   const { daemon } = await rig();
   for (const [seatId, persona] of COUNCIL) {
     const accepted = await send(daemon, persona);
-    expect(accepted.targets).toEqual([{ agent_id: `agent-${persona}`, seat_id: seatId, persona }]);
+    expect(accepted.targets).toEqual([stableTarget(`agent-${persona}`, seatId, persona)]);
   }
 });
 
@@ -71,7 +85,7 @@ test('acceptance softness never reaches the event stream: recorded targets stay 
   const accepted = (await store.readAll()).filter((event) => event.event_type === 'reg.comm_accepted');
   expect(accepted).toHaveLength(1);
   expect(accepted[0]!.payload.targets).toEqual([
-    { agent_id: 'agent-fabricator-general', seat_id: 'council:fabricator-general', persona: 'fabricator-general' },
+    stableTarget('agent-fabricator-general', 'council:fabricator-general', 'fabricator-general'),
   ]);
   expect(JSON.stringify(accepted[0]!.payload)).not.toContain('Fabricator-General');
 });
@@ -93,9 +107,15 @@ test('a bare exclusive or fleet page name is not softened into a seat', async ()
 // The roster is the estate's council declaration, so a future council seat
 // inherits bare-name addressing without touching the funnel mouth.
 test('the funnel mouth resolves bare names against the council roster it is given', () => {
-  expect(acceptCommIdentity('Lord-Inquisitor', ['council:lord-inquisitor'])).toBe('council:lord-inquisitor');
-  expect(acceptCommIdentity('custodes', ['council:lord-inquisitor'])).toBe('custodes');
-  expect(acceptCommIdentity('somnium:NE', ['council:lord-inquisitor'])).toBe('somnium:NE');
+  expect(acceptCommIdentity('Lord-Inquisitor', ['council:lord-inquisitor'])).toEqual({
+    kind: 'stable_seat', seat_id: 'council:lord-inquisitor',
+  });
+  expect(acceptCommIdentity('custodes', ['council:lord-inquisitor'])).toEqual({
+    kind: 'binding', identity: 'custodes',
+  });
+  expect(acceptCommIdentity('somnium:NE', ['council:lord-inquisitor'])).toEqual({
+    kind: 'binding', identity: 'somnium:NE',
+  });
 });
 
 test('a bare name matching more than one council seat refuses loudly, naming the candidates', () => {
@@ -110,19 +130,19 @@ test('a bare name matching more than one council seat refuses loudly, naming the
 test('an uppercase canonical seat id still addresses its seat', async () => {
   const { daemon } = await rig();
   const accepted = await send(daemon, 'palace:W');
-  expect(accepted.targets).toEqual([{ agent_id: 'sender', seat_id: 'palace:W', persona: 'space-wolves' }]);
+  expect(accepted.targets).toEqual([instanceTarget('sender', 'palace:W', 'space-wolves')]);
 });
 
 test('an uppercase canonical seat id is addressable in any casing', async () => {
   const { daemon } = await rig();
   for (const spelling of ['palace:w', 'PALACE:W', 'Palace:W']) {
     const accepted = await send(daemon, spelling);
-    expect(accepted.targets).toEqual([{ agent_id: 'sender', seat_id: 'palace:W', persona: 'space-wolves' }]);
+    expect(accepted.targets).toEqual([instanceTarget('sender', 'palace:W', 'space-wolves')]);
   }
 });
 
 test('a persona is addressable in any casing, and answers with its canonical spelling', async () => {
   const { daemon } = await rig();
   const accepted = await send(daemon, 'Space-Wolves');
-  expect(accepted.targets).toEqual([{ agent_id: 'sender', seat_id: 'palace:W', persona: 'space-wolves' }]);
+  expect(accepted.targets).toEqual([instanceTarget('sender', 'palace:W', 'space-wolves')]);
 });
