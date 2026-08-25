@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# apply-telemetryd — deliver the desktop telemetry ingress on k12-personal.
+#
+# telemetryd is deployed on exactly one machine, so Terminus-OS owns it whole:
+# source, unit, and this leg. Every other machine is a loud no-op.
+set -euo pipefail
+
+machine="${1:?usage: apply-telemetryd <machine>}"
+if [[ "$machine" != "k12-personal" ]]; then
+  echo "apply($machine): telemetryd leg NO-OP — telemetryd runs only on k12-personal"
+  exit 0
+fi
+
+fleet="${FLEET_CHECKOUT:-$HOME/runtimes/Token-Fleet/live}"
+"$fleet/shared/bin/validate-service-placement" telemetryd "$machine"
+terminus="${TERMINUS_CHECKOUT:-$HOME/runtimes/Terminus-OS/live}"
+unit_src="$terminus/packages/telemetryd/systemd/telemetryd.service"
+source_dir="$terminus/packages/telemetryd/src"
+if [[ ! -f "$unit_src" ]] || [[ ! -d "$source_dir" ]]; then
+  echo "apply($machine): telemetryd leg PARKED — Terminus telemetryd package is not present"
+  exit 0
+fi
+
+grep -qx 'WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/telemetryd' "$unit_src" || {
+  echo "apply($machine): telemetryd WorkingDirectory is not the deploy-owned runtime" >&2
+  exit 1
+}
+grep -qx 'ExecStart=%h/.bun/bin/bun src/daemon.ts' "$unit_src" || {
+  echo "apply($machine): telemetryd must use the Fleet-pinned Bun" >&2
+  exit 1
+}
+grep -qx 'Environment=TELEMETRYD_BIND=127.0.0.1' "$unit_src" || {
+  echo "apply($machine): telemetryd must remain loopback-only behind edge-proxy" >&2
+  exit 1
+}
+grep -qx 'Restart=on-failure' "$unit_src" || {
+  echo "apply($machine): telemetryd must fail loud and restart on failure" >&2
+  exit 1
+}
+
+unit_dir="$HOME/.config/systemd/user"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
+unit_dst="$unit_dir/telemetryd.service"
+stamp="$state_dir/telemetryd.applied.sha256"
+sha="$(git -C "$terminus" rev-parse HEAD)"
+# Keyed on telemetryd's real dependency set (its package plus the transitive
+# workspace closure it imports), never repository HEAD — the same over-broad
+# key that restarted busd on unrelated Terminus-OS merges lived here too.
+new_hash="$({ cat "$unit_src"; "$terminus/bin/terminus-package-fingerprint" "$terminus" telemetryd; } | sha256sum | cut -d' ' -f1)"
+old_hash="$(cat "$stamp" 2>/dev/null || true)"
+
+mkdir -p "$unit_dir" "$state_dir"
+cp -f "$unit_src" "$unit_dst"
+systemctl --user daemon-reload
+systemctl --user enable telemetryd.service
+if [[ "$new_hash" != "$old_hash" ]] || ! systemctl --user is-active --quiet telemetryd.service; then
+  systemctl --user restart telemetryd.service
+else
+  echo "apply($machine): telemetryd unchanged and active — no restart"
+fi
+echo "$new_hash" > "$stamp"
+echo "apply($machine): telemetryd converged (terminus sha ${sha:0:9})"

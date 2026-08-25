@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# apply-txd — deliver the txd estate daemon on k12-personal.
+#
+# Ownership: Token-Fleet is for services deployed across more than one machine.
+# txd runs on exactly one box, so Terminus-OS owns it whole — its source, its
+# units, and this leg. Unit and leg landing in one commit is what lets the
+# WorkingDirectory they agree on change at all; while they lived in two
+# repositories converging independently, neither could move first.
+#
+# Every machine that is not k12-personal is a loud no-op.
+#
+# The leg is one idempotent host pass over a githubd-realized Terminus target:
+#   1. Secrets contract: ensure ~/secrets/txd exists, mode 700. Contents are
+#      provisioning-time material and never touched here.
+#   2. Unit delivery: install validated units, but never stop or restart an
+#      active estate. Drift is installed for the next explicit rotation.
+set -euo pipefail
+
+machine="${1:?usage: apply-txd <machine>}"
+if [[ "$machine" != "k12-personal" ]]; then
+  echo "apply($machine): txd leg NO-OP — txd runs only on k12-personal (spec §1: one-box daemon)"
+  exit 0
+fi
+
+fleet="${FLEET_CHECKOUT:-$HOME/runtimes/Token-Fleet/live}"
+"$fleet/shared/bin/validate-service-placement" txd "$machine"
+"$fleet/shared/bin/validate-service-placement" tx-estate "$machine"
+terminus="${TERMINUS_CHECKOUT:-$HOME/runtimes/Terminus-OS/live}"
+
+if ! git -C "$terminus" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "apply($machine): txd leg PARKED — no Terminus-OS runtime checkout at $terminus (clone it over the deploy key first)"
+  exit 0
+fi
+
+# Cross-repo gate: the txd extraction (Terminus-OS PR) delivers this package.
+unit_dir="$terminus/packages/txd/systemd"
+txd_src="$unit_dir/txd.service"
+estate_src="$unit_dir/tx-estate.service"
+tx_src="$terminus/packages/tx/src/main.ts"
+tmux_conf="$terminus/packages/txd/tmux/tx.conf"
+if [[ ! -f "$txd_src" ]] || [[ ! -f "$estate_src" ]] || [[ ! -f "$tx_src" ]] || [[ ! -f "$tmux_conf" ]]; then
+  echo "apply($machine): txd leg PARKED — txd units, tx CLI, and tmux config are not all present in $terminus/packages; nothing installed"
+  exit 0
+fi
+
+# ── 1. validate the complete generation before any installed-state mutation ─
+grep -q '^KillMode=process' "$txd_src" || {
+  echo "apply($machine): txd unit missing KillMode=process — daemon restarts must never kill the daemon-spawned tmux estate; refusing to install" >&2
+  exit 1
+}
+if grep -q '^PrivateTmp=' "$txd_src"; then
+  echo "apply($machine): txd unit sets PrivateTmp — banned on fleet user units because the implicit user namespace breaks protected runtime access on systemd 259; refusing to install" >&2
+  exit 1
+fi
+grep -q '^Restart=on-failure' "$txd_src" || {
+  echo "apply($machine): txd unit missing Restart=on-failure (fleet convention); refusing to install" >&2
+  exit 1
+}
+grep -q '^ExecStart=%h/\.bun/bin/bun ' "$txd_src" || {
+  echo "apply($machine): txd unit must ExecStart the pinned absolute bun (%h/.bun/bin/bun, apply-fleet-runtime pin); refusing to install" >&2
+  exit 1
+}
+# Defect A (2026-07-20): a unit with a nonexistent WorkingDirectory sailed
+# through the pin set and got installed. The daemon runs from the live runtime
+# checkout's package dir — pin the exact value, not just the key's presence.
+grep -qx 'WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd' "$txd_src" || {
+  echo "apply($machine): txd unit must pin WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd (the live runtime checkout this leg propagates); refusing to install" >&2
+  exit 1
+}
+grep -qx 'BindsTo=tx-estate.service' "$txd_src" || {
+  echo "apply($machine): txd unit must bind its lifecycle to tx-estate.service; refusing to install" >&2
+  exit 1
+}
+grep -qE '^After=.*tx-estate\.service' "$txd_src" || {
+  echo "apply($machine): txd unit must start after tx-estate.service; refusing to install" >&2
+  exit 1
+}
+grep -qx 'Type=simple' "$estate_src" || {
+  echo "apply($machine): estate unit must supervise foreground tmux as Type=simple; refusing to install" >&2
+  exit 1
+}
+grep -qx 'Restart=always' "$estate_src" || {
+  echo "apply($machine): estate unit must restart the supervised tmux server; refusing to install" >&2
+  exit 1
+}
+grep -qx 'RestartSec=2' "$estate_src" || {
+  echo "apply($machine): estate unit must use the pinned restart delay; refusing to install" >&2
+  exit 1
+}
+# Terminus-OS owns WHAT txd is, and it ruled that the estate starts txd with a
+# Wants edge rather than upholding it: Upholds periodically reasserts a txd that
+# has deterministically failed, re-arming a fault StartLimit exists to make
+# loud. The estate unit says so in its own comment. This pin asserted the
+# retired shape, so every realization of a Terminus-OS checkout carrying the
+# ruled unit died here — `exit 1` out of the machine step, which is what
+# stranded the convergence wall on 2026-08-21.
+grep -qx 'Wants=txd.service' "$estate_src" || {
+  echo "apply($machine): estate unit must want txd reconstruction; refusing to install" >&2
+  exit 1
+}
+grep -qx 'KillMode=process' "$estate_src" || {
+  echo "apply($machine): estate unit missing KillMode=process; refusing to install" >&2
+  exit 1
+}
+if grep -q '^PrivateTmp=' "$estate_src"; then
+  echo "apply($machine): estate unit sets PrivateTmp — refusing to install" >&2
+  exit 1
+fi
+grep -qx 'NoNewPrivileges=false' "$estate_src" || {
+  echo "apply($machine): estate unit must keep pane processes outside NoNewPrivileges; refusing to install" >&2
+  exit 1
+}
+grep -Fqx 'ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf' "$estate_src" || {
+  echo "apply($machine): estate unit must supervise foreground tmux with the pinned tx.conf; refusing to install" >&2
+  exit 1
+}
+grep -Fqx 'ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server' "$estate_src" || {
+  echo "apply($machine): estate unit must own configured-server shutdown; refusing to install" >&2
+  exit 1
+}
+
+# ── 3. install the estate unit owners ────────────────────────────────────────
+install -d -m 700 "$HOME/secrets/txd"
+
+user_unit_dir="$HOME/.config/systemd/user"
+user_bin_dir="$HOME/.local/bin"
+txd_dst="$user_unit_dir/txd.service"
+estate_dst="$user_unit_dir/tx-estate.service"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
+stamp="$state_dir/txd.applied.sha256"
+registration_env="$HOME/.config/token-fleet/txd-registration.env"
+sha="$(git -C "$terminus" rev-parse HEAD)"
+# Keyed on txd's real dependency set. This leg never hashed packages/txd/src at
+# all — repository HEAD was standing in for the daemon's own source as well as
+# for the @terminus-os/{contracts,db} closure it imports, so dropping HEAD
+# without this fingerprint would have left txd source changes unrestarted. The
+# fingerprint covers the whole txd package plus the allocation generation txd
+# actually loads from its systemd EnvironmentFile. Omitting that installed
+# configuration left txd serving an old allocation digest after registrationd
+# restarted into a new one. packages/tx is deliberately absent: the tx CLI is
+# symlinked, not copied, so it is current without a daemon restart.
+[[ -f "$registration_env" ]] || {
+  echo "apply($machine): txd registration environment is absent at $registration_env" >&2
+  exit 1
+}
+new_hash="$({
+  "$terminus/bin/terminus-package-fingerprint" "$terminus" txd
+  printf '\0'
+  cat "$registration_env"
+} | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)"
+old_hash="$(cat "$stamp" 2>/dev/null || true)"
+estate_changed=1
+if [[ -f "$estate_dst" ]] && cmp -s "$estate_src" "$estate_dst"; then
+  estate_changed=0
+fi
+
+mkdir -p "$user_unit_dir" "$user_bin_dir" "$state_dir"
+ln -sfn "$tx_src" "$user_bin_dir/tx"
+cp -f "$txd_src" "$txd_dst"
+cp -f "$estate_src" "$estate_dst"
+systemctl --user daemon-reload
+systemctl --user enable tx-estate.service txd.service
+if ! systemctl --user is-active --quiet tx-estate.service; then
+  echo "apply($machine): estate started — no running estate existed"
+  systemctl --user start tx-estate.service
+  systemctl --user start txd.service
+else
+  if [[ "$estate_changed" == 1 ]]; then
+    echo "apply($machine): estate preserved — maintenance required; installed estate unit is pending explicit rotation"
+  else
+    echo "apply($machine): estate preserved — active generation unchanged"
+  fi
+  if [[ "$new_hash" != "$old_hash" ]] || ! systemctl --user is-active --quiet txd.service; then
+    echo "apply($machine): (re)starting txd.service"
+    systemctl --user restart txd.service
+  else
+    echo "apply($machine): txd unchanged and active — no restart"
+  fi
+fi
+
+# A running estate deliberately survives txd generation changes. Source the
+# deployed configuration into that same server, then prove the reload neither
+# replaced panes/processes nor changed estate geometry. Binding checks are
+# against tmux's active read model, not the file we just delivered.
+tmux_socket="$(sed -n 's/^Environment=TXD_TMUX_SOCKET=//p' "$estate_src" | tail -1)"
+if [[ -z "$tmux_socket" ]]; then
+  echo "apply($machine): estate unit does not declare TXD_TMUX_SOCKET; refusing untyped config activation" >&2
+  exit 1
+fi
+tmux_bin="$(command -v tmux)"
+before_panes="$("$tmux_bin" -L "$tmux_socket" list-panes -a -F '#{pane_id}:#{pane_pid}:#{pane_start_command}')"
+before_geometry="$("$tmux_bin" -L "$tmux_socket" list-windows -a -F '#{session_name}:#{window_index}:#{window_layout}')"
+"$tmux_bin" -L "$tmux_socket" source-file "$tmux_conf"
+after_panes="$("$tmux_bin" -L "$tmux_socket" list-panes -a -F '#{pane_id}:#{pane_pid}:#{pane_start_command}')"
+after_geometry="$("$tmux_bin" -L "$tmux_socket" list-windows -a -F '#{session_name}:#{window_index}:#{window_layout}')"
+if [[ "$before_panes" != "$after_panes" ]] || [[ "$before_geometry" != "$after_geometry" ]]; then
+  echo "apply($machine): tx.conf reload changed pane identity/process or estate geometry" >&2
+  exit 1
+fi
+
+for binding in \
+  "prefix e resize-pane -Z" \
+  "prefix h select-pane -L" \
+  "prefix j select-pane -D" \
+  "prefix k select-pane -U" \
+  "prefix l select-pane -R" \
+  "pane-select h select-pane -L" \
+  "pane-select j select-pane -D" \
+  "pane-select k select-pane -U" \
+  "pane-select l select-pane -R" \
+  "pane-select Enter resize-pane -Z" \
+  "pane-select Escape display-message" \
+  "pane-select q display-message"
+do
+  read -r table key expected <<<"$binding"
+  active="$("$tmux_bin" -L "$tmux_socket" list-keys -T "$table" "$key")"
+  if [[ "$active" != *"$expected"* ]]; then
+    echo "apply($machine): active tx.conf binding verification failed: table=$table key=$key expected=$expected" >&2
+    exit 1
+  fi
+done
+for binding in \
+  "root C-k copy-mode" \
+  "copy-mode Space begin-selection" \
+  "copy-mode Left cursor-left" \
+  "copy-mode Right cursor-right" \
+  "copy-mode Up cursor-up" \
+  "copy-mode Down cursor-down" \
+  "copy-mode C-Left previous-word" \
+  "copy-mode C-Right next-word" \
+  "copy-mode Home start-of-line" \
+  "copy-mode End end-of-line" \
+  "copy-mode PPage page-up" \
+  "copy-mode NPage page-down" \
+  "copy-mode Tab other-end" \
+  "copy-mode Enter tx-selection" \
+  "copy-mode Escape cancel"
+do
+  read -r table key expected <<<"$binding"
+  active="$("$tmux_bin" -L "$tmux_socket" list-keys -T "$table" "$key")"
+  if [[ "$active" != *"$expected"* ]]; then
+    echo "apply($machine): active selection binding verification failed: table=$table key=$key expected=$expected" >&2
+    exit 1
+  fi
+done
+clipboard_policy="$("$tmux_bin" -L "$tmux_socket" show-options -g -v set-clipboard)"
+if [[ "$clipboard_policy" != off ]]; then
+  echo "apply($machine): active clipboard policy must be set-clipboard off" >&2
+  exit 1
+fi
+echo "apply($machine): tmux configuration reloaded and verified without pane loss"
+
+systemctl --user daemon-reload
+echo "$new_hash" > "$stamp"
+echo "apply($machine): txd leg converged (terminus sha ${sha:0:9})"

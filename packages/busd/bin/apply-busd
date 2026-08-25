@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# apply-busd — deliver the central event bus daemon on k12-personal.
+#
+# busd is deployed on exactly one machine, so Terminus-OS owns it whole:
+# source, unit, and this leg. Every other machine is a loud no-op.
+set -euo pipefail
+
+machine="${1:?usage: apply-busd <machine>}"
+if [[ "$machine" != "k12-personal" ]]; then
+  echo "apply($machine): busd leg NO-OP — busd runs only on k12-personal"
+  exit 0
+fi
+
+fleet="${FLEET_CHECKOUT:-$HOME/runtimes/Token-Fleet/live}"
+"$fleet/shared/bin/validate-service-placement" busd "$machine"
+terminus="${TERMINUS_CHECKOUT:-$HOME/runtimes/Terminus-OS/live}"
+unit_src="$terminus/packages/busd/systemd/busd.service"
+path_src="$terminus/packages/busd/systemd/busd-postgres.path"
+source_dir="$terminus/packages/busd/src"
+config_src="$HOME/runtimes/Token-Fleet/live/machines/k12-personal/busd.json"
+if [[ ! -f "$unit_src" ]] || [[ ! -f "$path_src" ]] || [[ ! -d "$source_dir" ]]; then
+  echo "apply($machine): busd leg PARKED — Terminus busd package is not present"
+  exit 0
+fi
+if [[ ! -f "$config_src" ]]; then
+  echo "apply($machine): busd machine configuration is missing" >&2
+  exit 1
+fi
+
+grep -qx 'WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/busd' "$unit_src" || {
+  echo "apply($machine): busd WorkingDirectory is not the deploy-owned runtime" >&2
+  exit 1
+}
+grep -qx 'ExecStart=%h/.bun/bin/bun src/daemon.ts' "$unit_src" || {
+  echo "apply($machine): busd must use the Fleet-pinned Bun" >&2
+  exit 1
+}
+grep -qx 'Environment=BUSD_BIND=127.0.0.1' "$unit_src" || {
+  echo "apply($machine): busd must remain loopback-only behind edge-proxy" >&2
+  exit 1
+}
+grep -qx 'Environment=BUSD_CONFIG=%h/.config/token-fleet/busd.json' "$unit_src" || {
+  echo "apply($machine): busd must load the machine-owned subscription configuration" >&2
+  exit 1
+}
+grep -qx 'Restart=on-failure' "$unit_src" || {
+  echo "apply($machine): busd must fail loud and restart on failure" >&2
+  exit 1
+}
+# Readiness contract. Type=simple returns the restart below on fork, which left
+# every leg standing after this one to re-derive "is the bus listening?" for
+# itself — one of them did, racily, with a single-shot probe, and took machine
+# converges red. Under Type=notify busd signals READY=1 the moment Bun.serve
+# binds, so the restart returns on the listen edge. The legs that consume that
+# guarantee no longer probe, so it is asserted here rather than assumed.
+grep -qx 'Type=notify' "$unit_src" || {
+  echo "apply($machine): busd must signal readiness so the restart returns on the listen edge" >&2
+  exit 1
+}
+grep -qx 'NotifyAccess=main' "$unit_src" || {
+  echo "apply($machine): busd readiness must come from the daemon itself, not a helper fork" >&2
+  exit 1
+}
+if grep -Eq 'ExecStartPre=|TimeoutStartSec=|RestartSec=|(^|[^[:alnum:]_])(sleep|until)([^[:alnum:]_]|$)' "$unit_src"; then
+  echo "apply($machine): busd must not poll or tune retry timers" >&2
+  exit 1
+fi
+grep -qx 'PathExists=/var/run/postgresql/.s.PGSQL.5432' "$path_src" || {
+  echo "apply($machine): busd PostgreSQL readiness must use the peer-socket path event" >&2
+  exit 1
+}
+
+unit_dir="$HOME/.config/systemd/user"
+config_dir="$HOME/.config/token-fleet"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
+unit_dst="$unit_dir/busd.service"
+path_dst="$unit_dir/busd-postgres.path"
+stamp="$state_dir/busd.applied.sha256"
+sha="$(git -C "$terminus" rev-parse HEAD)"
+# The restart key is busd's real dependency set — its own package plus the
+# transitive workspace closure (@terminus-os/contracts, @terminus-os/db) it
+# imports from outside packages/busd — never repository HEAD. Folding HEAD in
+# restarted busd on every unrelated Terminus-OS merge; see the helper's header.
+new_hash="$({ cat "$unit_src" "$path_src" "$config_src"; "$terminus/bin/terminus-package-fingerprint" "$terminus" busd; } | sha256sum | cut -d' ' -f1)"
+old_hash="$(cat "$stamp" 2>/dev/null || true)"
+
+mkdir -p "$unit_dir" "$config_dir" "$state_dir"
+cp -f "$unit_src" "$unit_dst"
+cp -f "$path_src" "$path_dst"
+cp -f "$config_src" "$config_dir/busd.json"
+systemctl --user daemon-reload
+systemctl --user disable busd.service 2>/dev/null || true
+systemctl --user enable --now busd-postgres.path
+if [[ "$new_hash" != "$old_hash" ]] || ! systemctl --user is-active --quiet busd.service; then
+  systemctl --user restart busd.service
+else
+  echo "apply($machine): busd unchanged and active — no restart"
+fi
+echo "$new_hash" > "$stamp"
+echo "apply($machine): busd converged (terminus sha ${sha:0:9})"
