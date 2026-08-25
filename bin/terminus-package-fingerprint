@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# terminus-package-fingerprint — emit the content of everything a Terminus-OS
+# service actually loads at runtime, so an apply leg's restart stamp keys on
+# that service's real dependency set instead of the whole repository.
+#
+# Why this exists. apply-busd, apply-telemetryd, and apply-txd each folded
+# `git -C "$terminus" rev-parse HEAD` into their stamp. Repository HEAD is
+# not a dependency of any single service: a change touching four files under
+# packages/txd still moved the busd stamp, so the next converge restarted busd,
+# and the adjacent GitHub-webhook-ingress leg found the freshly forked busd not
+# yet listening and aborted the machine pass. Every merge burned one converge.
+#
+# The stamps cannot simply drop HEAD. busd, telemetryd, and txd all
+# import @terminus-os/contracts and @terminus-os/db, which live OUTSIDE each
+# daemon's own package directory — apply-busd's `find "$source_dir"` term covered
+# packages/busd/src only. HEAD was an over-broad but genuinely load-bearing proxy
+# for "a package I import changed". Deleting it outright would have traded
+# spurious restarts for MISSED restarts, which is the strictly worse failure.
+#
+# So resolve the real dependency set: the transitive `workspace:*` closure of the
+# named package, hashed by file content.
+#
+# Excluded by construction:
+#   node_modules/  Not tracked. Its @terminus-os/* entries are symlinks into the
+#                  closure this walk already resolves, and third-party versions
+#                  are pinned by the root lockfile, which is included below.
+#   test/          No package's src/ imports its own test/ — nothing under a
+#                  test directory is reachable from an ExecStart entrypoint.
+#
+# Included beyond the packages themselves: the workspace root package.json,
+# bun.lock, and tsconfig.json. Those three change what `bun src/daemon.ts`
+# resolves without touching any package directory.
+#
+# Output is a deterministic byte stream (relative path, then content, in sorted
+# path order) intended for a caller's sha256sum. Renames move the fingerprint
+# because the path is emitted alongside the content.
+set -euo pipefail
+export LC_ALL=C
+
+terminus="${1:?usage: terminus-package-fingerprint <terminus-checkout> <package>...}"
+shift
+(($#)) || {
+  echo "terminus-package-fingerprint: at least one package name is required" >&2
+  exit 1
+}
+
+command -v jq >/dev/null || {
+  echo "terminus-package-fingerprint: jq is required to resolve the workspace closure" >&2
+  exit 1
+}
+
+# Breadth-first over `workspace:*` dependencies. A new workspace dependency
+# extends the fingerprint automatically — the enumeration cannot drift behind
+# the manifest the way a hand-listed source directory would.
+declare -A seen=()
+queue=("$@")
+closure=()
+while ((${#queue[@]})); do
+  package="${queue[0]}"
+  queue=("${queue[@]:1}")
+  [[ -n "${seen[$package]:-}" ]] && continue
+  seen["$package"]=1
+  manifest="$terminus/packages/$package/package.json"
+  [[ -f "$manifest" ]] || {
+    echo "terminus-package-fingerprint: no package manifest at $manifest" >&2
+    exit 1
+  }
+  closure+=("$package")
+  while IFS= read -r dependency; do
+    [[ -n "$dependency" ]] && queue+=("$dependency")
+  done < <(jq -r '
+    (.dependencies // {}) | to_entries[]
+    | select(.value | startswith("workspace:"))
+    | .key | sub("^@terminus-os/"; "")
+  ' "$manifest")
+done
+
+emit() {
+  local path="$1"
+  printf '%s\n' "${path#"$terminus"/}"
+  cat "$path"
+}
+
+for workspace_file in package.json bun.lock tsconfig.json; do
+  [[ -f "$terminus/$workspace_file" ]] || {
+    echo "terminus-package-fingerprint: workspace file $workspace_file is missing from $terminus" >&2
+    exit 1
+  }
+  emit "$terminus/$workspace_file"
+done
+
+mapfile -d '' files < <(
+  while IFS= read -r package; do
+    find "$terminus/packages/$package" \
+      -type d \( -name node_modules -o -name test \) -prune -o \
+      -type f -print0
+  done < <(printf '%s\n' "${closure[@]}" | sort) | sort -z
+)
+for file in "${files[@]}"; do
+  emit "$file"
+done
