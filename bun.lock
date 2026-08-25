@@ -5,7 +5,7 @@
     "": {
       "name": "terminus-os",
       "devDependencies": {
-        "@tokenamby-code/stc-contract": "1.2.1",
+        "@tokenamby-code/stc-contract": "1.3.0",
         "@types/bun": "latest",
         "typescript": "^5.7.0",
       },
@@ -45,11 +45,15 @@
     "packages/telemetryd": {
       "name": "@terminus-os/telemetryd",
       "version": "0.1.0",
+      "bin": {
+        "telemetryd": "src/daemon.ts",
+        "tm": "src/cli.ts",
+      },
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
         "@terminus-os/systemd": "workspace:*",
-        "@tokenamby-code/stc-contract": "1.2.1",
+        "@tokenamby-code/stc-contract": "1.3.0",
       },
     },
     "packages/tx": {
@@ -95,7 +99,7 @@
 
     "@terminus-os/txd": ["@terminus-os/txd@workspace:packages/txd"],
 
-    "@tokenamby-code/stc-contract": ["@tokenamby-code/stc-contract@1.2.1", "https://npm.pkg.github.com/download/@tokenamby-code/stc-contract/1.2.1/6651458b14dcbf9b4d3aec13f94af0e64fc7017c", { "dependencies": { "zod": "^4.4.3" } }, "sha512-oO6zh3piX4x0hZyh9W3gZgzQy/Xdhvc2kkhYXwWH6oHsWQfPiADe4laAU5kZwHmVbQH7Xy4JTm0oOIeieuJs8g=="],
+    "@tokenamby-code/stc-contract": ["@tokenamby-code/stc-contract@1.3.0", "https://npm.pkg.github.com/download/@tokenamby-code/stc-contract/1.3.0/055f39a5b0c0d2a90f21374bc8f1dfc80d75f8b3", { "dependencies": { "zod": "^4.4.3" } }, "sha512-yw42gtnSvpu5IDnAYvH/D2m3yYCHNpFztexC5eGL0IV35PxuBQYYKY51KJsiNgHCbZHpliypY7zZNnbYt4kXmw=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
