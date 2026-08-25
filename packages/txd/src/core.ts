@@ -30,6 +30,7 @@ import {
   COMM_DELIVERY_RECEIPT_TIMEOUT_MS,
   type CommHook,
   type CommIntent,
+  type CommLogicalIdentity,
   type CommRequest,
   type CommReceiptWaitRequest,
   type CommReceipt,
@@ -87,7 +88,14 @@ import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
 import type { EventLogCompactionResult } from './event-log-compaction.ts';
 import { findTmuxId } from './ids.ts';
-import { buildProjections, type Projections, type LaunchComposition, type TransportClaim } from './projections.ts';
+import {
+  buildProjections,
+  isRoutableBinding,
+  routableBindings,
+  type Projections,
+  type LaunchComposition,
+  type TransportClaim,
+} from './projections.ts';
 import {
   isStackPage,
   isStackSeat,
@@ -97,7 +105,12 @@ import {
   type TxdPage,
   type TxdStackPage,
 } from './estate.ts';
-import { acceptCommIdentity, sameIdentity } from './comm-identity.ts';
+import {
+  acceptCommIdentity,
+  COUNCIL_ROSTER,
+  sameIdentity,
+  type AcceptedCommIdentity,
+} from './comm-identity.ts';
 import { commanderEchoFrame, commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
@@ -163,8 +176,11 @@ type InternalComm = {
   messageId: string;
   sourceAgentIdInFrame: string;
   expectedSourceBoundSeq: number;
+  expectedTargetAgentId: string;
+  expectedTargetBoundSeq: number;
   commanderEcho: CommanderEchoMetadata;
 };
+type ResolvedCommTarget = CommTarget & { logical_identity: CommLogicalIdentity };
 const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
   now: () => Date.now(),
   schedule: (wake, delayMs) => {
@@ -1260,14 +1276,35 @@ export class Daemon {
   // Casing is folded here, at the comparison, and nowhere else: the target a
   // caller names is matched case-insensitively, and the identity that comes
   // back is the binding's own — canonical by construction.
-  private commTargets(identity: string, proj: Projections): CommTarget[] {
-    const matches = proj.currentBindings.filter((b) =>
-      b.registered
-      && ((b.agent_id !== null && sameIdentity(b.agent_id, identity))
-        || (b.persona !== null && sameIdentity(b.persona, identity))
-        || sameIdentity(b.seat_id, identity)),
-    );
-    return matches.map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
+  private perpetualSeatIds(): readonly string[] {
+    return this.physicalRegistration
+      ? Object.keys(this.physicalRegistration.perpetual)
+      : COUNCIL_ROSTER;
+  }
+
+  private acceptLogicalCommIdentity(raw: string): AcceptedCommIdentity {
+    return acceptCommIdentity(raw, this.perpetualSeatIds());
+  }
+
+  private identityBindings(identity: AcceptedCommIdentity, proj: Projections) {
+    const candidates = routableBindings(proj);
+    return identity.kind === 'stable_seat'
+      ? candidates.filter((binding) => sameIdentity(binding.seat_id, identity.seat_id))
+      : candidates.filter((binding) =>
+        sameIdentity(binding.agent_id, identity.identity)
+        || (binding.persona !== null && sameIdentity(binding.persona, identity.identity))
+        || sameIdentity(binding.seat_id, identity.identity));
+  }
+
+  private commTargets(identity: AcceptedCommIdentity, proj: Projections): ResolvedCommTarget[] {
+    return this.identityBindings(identity, proj).map((binding) => ({
+      agent_id: binding.agent_id,
+      seat_id: binding.seat_id,
+      persona: binding.persona,
+      logical_identity: identity.kind === 'stable_seat'
+        ? identity
+        : { kind: 'agent_instance', agent_id: binding.agent_id },
+    }));
   }
 
   // Arm the delivery watch and composer gate BEFORE bytes go to the pane.
@@ -1312,9 +1349,8 @@ export class Daemon {
     if (!this.physicalRegistration) return false;
     const observation = await this.locked(async () => {
       const events = await this.store.readAll();
-      const binding = buildProjections(events).currentBindings.find((row) =>
-        row.registered && row.agent_id === targetAgentId,
-      );
+      const projections = buildProjections(events);
+      const binding = routableBindings(projections).find((row) => row.agent_id === targetAgentId);
       if (!binding?.pane_generation) return null;
       const observationId = `${targetAgentId}:${binding.pane_generation}`;
       return {
@@ -1333,8 +1369,9 @@ export class Daemon {
       const occurredAt = this.now();
       const shouldPublish = await this.locked(async () => {
         const events = await this.store.readAll();
-        const current = buildProjections(events).currentBindings.find((row) =>
-          row.registered
+        const projections = buildProjections(events);
+        const current = projections.currentBindings.find((row) =>
+          isRoutableBinding(row, projections)
           && row.agent_id === targetAgentId
           && row.seat_id === observation.seatId
           && row.pane_generation === observation.paneGeneration,
@@ -1405,8 +1442,8 @@ export class Daemon {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
-      const sourceBindings = proj.currentBindings.filter((b) =>
-        b.registered && b.agent_id === req.source_agent_id);
+      const sourceBindings = routableBindings(proj).filter((binding) =>
+        binding.agent_id === req.source_agent_id);
       if (sourceBindings.length === 0) throw new Error('source_not_registered');
       // The frame names its sender as persona AND seat. A persona alone is not
       // a key — several seats may wear one — so a source whose identity cannot
@@ -1423,34 +1460,55 @@ export class Daemon {
       // The funnel mouth. A caller-supplied identity is softened to its
       // canonical form exactly once, here; `--self` and `--reply` name an
       // agent id txd itself recorded, which is canonical already.
-      let targetIdentity = req.target === '--self'
-        ? req.source_agent_id
-        : req.target === undefined ? undefined : acceptCommIdentity(req.target);
+      let targetIdentity: AcceptedCommIdentity | undefined = req.target === '--self'
+        ? { kind: 'binding', identity: req.source_agent_id }
+        : req.target === undefined ? undefined : this.acceptLogicalCommIdentity(req.target);
       let replyingToAsk: string | null = null;
       if (req.reply) {
         const inbound = [...events].reverse().find((e) => e.event_type === 'reg.comm_accepted'
           && Array.isArray(e.payload.target_agent_ids)
           && e.payload.target_agent_ids.includes(req.source_agent_id));
         if (!inbound) throw new Error('no_recent_inbound_sender');
-        targetIdentity = String(inbound.payload.source_agent_id);
+        const inboundSource = inbound.payload.source as { seat_id?: unknown } | undefined;
+        const sourceSeatId = typeof inboundSource?.seat_id === 'string' ? inboundSource.seat_id : null;
+        targetIdentity = sourceSeatId && this.perpetualSeatIds().some((seatId) => sameIdentity(seatId, sourceSeatId))
+          ? { kind: 'stable_seat', seat_id: sourceSeatId }
+          : { kind: 'binding', identity: String(inbound.payload.source_agent_id) };
         replyingToAsk = typeof inbound.payload.ask_id === 'string' ? inbound.payload.ask_id : null;
       }
-      let targets: CommTarget[];
+      let targets: ResolvedCommTarget[];
       if (req.page) {
-        targets = proj.currentBindings
-          .filter((b) => b.registered && b.seat_id.split(':', 1)[0] === req.page)
-          .map((b) => ({ agent_id: b.agent_id!, seat_id: b.seat_id, persona: b.persona }));
+        targets = routableBindings(proj)
+          .filter((b) => b.seat_id.split(':', 1)[0] === req.page)
+          .map((b) => ({
+            agent_id: b.agent_id,
+            seat_id: b.seat_id,
+            persona: b.persona,
+            logical_identity: { kind: 'agent_instance', agent_id: b.agent_id },
+          }));
         if (targets.length === 0) throw new Error(`page_absent: ${req.page}`);
       } else {
         targets = this.commTargets(targetIdentity!, proj);
-        if (targets.length === 0) throw new Error(`identity_absent: ${targetIdentity}`);
-        if (targets.length > 1) throw new Error(AMBIGUOUS_IDENTITY(targetIdentity!));
+        const canonicalIdentity = targetIdentity!.kind === 'stable_seat'
+          ? targetIdentity!.seat_id
+          : targetIdentity!.identity;
+        if (targets.length === 0) throw new Error(`identity_absent: ${canonicalIdentity}`);
+        if (targets.length > 1) throw new Error(AMBIGUOUS_IDENTITY(canonicalIdentity));
+      }
+      if (internal) {
+        const target = targets[0];
+        const targetBinding = target && routableBindings(proj).find((binding) =>
+          binding.agent_id === target.agent_id && binding.seat_id === target.seat_id);
+        if (target?.agent_id !== internal.expectedTargetAgentId
+          || targetBinding?.bound_seq !== internal.expectedTargetBoundSeq) {
+          throw new Error(`target_binding_changed: ${internal.expectedTargetAgentId}`);
+        }
       }
       const pendingResetSeats = this.pendingScopedResetSeats(events);
       const fenced = targets.find((target) => pendingResetSeats.has(target.seat_id));
       if (fenced) throw new Error(`scoped_reset_pending: ${fenced.seat_id}`);
       const intentBinding = req.intent
-        ? proj.currentBindings.find((binding) => binding.registered && binding.agent_id === targets[0]?.agent_id)
+        ? routableBindings(proj).find((binding) => binding.agent_id === targets[0]?.agent_id)
         : null;
       if (req.intent && !intentBinding?.engine) throw new Error(`target_engine_unresolved: ${targets[0]?.agent_id}`);
       const renderedIntent = req.intent ? renderCommIntent(req.intent, intentBinding!.engine!) : null;
@@ -1569,13 +1627,13 @@ export class Daemon {
         }
         const pendingResetSeats = this.pendingScopedResetSeats(events);
         for (const target of prepared.targets) {
-          const binding = proj.currentBindings.find((row) => row.registered
+          const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
             && row.agent_id === target.agent_id && row.seat_id === target.seat_id);
           if (!binding) throw new Error(`target_binding_changed: ${target.agent_id}`);
           if (pendingResetSeats.has(target.seat_id)) throw new Error(`scoped_reset_pending: ${target.seat_id}`);
         }
         return prepared.targets.map((target) => {
-          const binding = proj.currentBindings.find((row) => row.registered
+          const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
             && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
           const frame = prepared.renderedIntent?.frame ?? prepared.renderedMessageFrame
             ?? commFrame(prepared.messageId, prepared.source, req.message!);
@@ -1771,7 +1829,7 @@ export class Daemon {
         && event.payload.message_id === arm.messageId
         && event.payload.target_agent_id === arm.targetAgentId)) return false;
       const proj = buildProjections(events);
-      const binding = proj.currentBindings.find((row) => row.registered
+      const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
         && row.agent_id === arm.targetAgentId
         && row.seat_id === arm.seatId
         && row.pane_generation === arm.paneGeneration);
@@ -1806,7 +1864,7 @@ export class Daemon {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
-      const binding = proj.currentBindings.find((row) => row.registered && row.agent_id === req.target_agent_id);
+      const binding = routableBindings(proj).find((row) => row.agent_id === req.target_agent_id);
       if (!binding) throw new Error(`target_unbound: ${req.target_agent_id}`);
       const correlationId = crypto.randomUUID();
       return { binding, correlationId };
@@ -1816,7 +1874,7 @@ export class Daemon {
 
     return this.locked(async () => {
       const proj = await this.projections();
-      const binding = proj.currentBindings.find((row) => row.registered
+      const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
         && row.agent_id === req.target_agent_id && row.seat_id === prepared.binding.seat_id);
       if (!binding) throw new Error(`target_binding_changed: ${req.target_agent_id}`);
       const generation = await this.tmux.seatGeneration(binding.seat_id);
@@ -1852,13 +1910,8 @@ export class Daemon {
       const proj = await this.projections();
       const events = await this.store.readAll();
       const pendingResetSeats = this.pendingScopedResetSeats(events);
-      const matches = proj.currentBindings.filter((binding) =>
-        binding.registered && (
-          binding.agent_id === req.target
-          || binding.persona === req.target
-          || binding.seat_id === req.target
-        ),
-      );
+      const logicalIdentity = this.acceptLogicalCommIdentity(req.target);
+      const matches = this.identityBindings(logicalIdentity, proj);
       if (matches.length > 1) throw new Error(AMBIGUOUS_IDENTITY(req.target));
       if (matches.length === 1) {
         const binding = matches[0]!;
@@ -1885,7 +1938,7 @@ export class Daemon {
     if (prepared.kind === 'agent') {
       const response = await this.locked(async (): Promise<RunAgentResponse> => {
         const proj = await this.projections();
-        const binding = proj.currentBindings.find((row) => row.registered
+        const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
           && row.agent_id === prepared.binding.agent_id && row.seat_id === prepared.binding.seat_id);
         if (!binding) throw new Error(`target_binding_changed: ${req.target}`);
         const generation = await this.tmux.seatGeneration(binding.seat_id);
@@ -1944,13 +1997,7 @@ export class Daemon {
         throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       }
       const proj = await this.projections();
-      const matches = proj.currentBindings.filter((binding) =>
-        binding.registered && (
-          binding.agent_id === req.target
-          || binding.persona === req.target
-          || binding.seat_id === req.target
-        ),
-      );
+      const matches = this.identityBindings(this.acceptLogicalCommIdentity(req.target), proj);
       if (matches.length === 0) throw new Error(`identity_absent: ${req.target}`);
       if (matches.length > 1) throw new Error(AMBIGUOUS_IDENTITY(req.target));
       const binding = matches[0]!;
@@ -2243,8 +2290,8 @@ export class Daemon {
       }
       if (!matched) throw new Error('message_target_mismatch');
       const proj = await this.projections();
-      const liveDeliveryTarget = proj.currentBindings.some((binding) =>
-        binding.registered && binding.agent_id === hook.agent_id);
+      const liveDeliveryTarget = routableBindings(proj).some((binding) =>
+        binding.agent_id === hook.agent_id);
       if (!liveDeliveryTarget) {
         const retired = proj.turnByAgent.get(hook.agent_id) === 'retired';
         const historicBinding = [...events].reverse().find((event) =>
@@ -2524,6 +2571,7 @@ export class Daemon {
           stopSeq: number;
           commanderIdentity: string;
           target: CommTarget;
+          targetBoundSeq: number;
           messageId: string;
         }
     > => {
@@ -2613,13 +2661,17 @@ export class Daemon {
         return { terminal: await terminalFact('act.commander_echo_suppressed', 'echo_loop_prevented') };
       }
 
-      let commanderIdentity: string;
+      let commanderLogicalIdentity: AcceptedCommIdentity;
       try {
-        commanderIdentity = acceptCommIdentity(source!.commander);
+        commanderLogicalIdentity = this.acceptLogicalCommIdentity(source!.commander);
       } catch {
         return { terminal: await terminalFact('act.commander_echo_refused', 'commander_identity_absent') };
       }
-      const targets = this.commTargets(commanderIdentity, buildProjections(events));
+      const commanderIdentity = commanderLogicalIdentity.kind === 'stable_seat'
+        ? commanderLogicalIdentity.seat_id
+        : commanderLogicalIdentity.identity;
+      const projections = buildProjections(events);
+      const targets = this.commTargets(commanderLogicalIdentity, projections);
       if (targets.length === 0) {
         return { terminal: await terminalFact('act.commander_echo_refused', 'commander_identity_absent', commanderIdentity) };
       }
@@ -2630,12 +2682,15 @@ export class Daemon {
       if (target.agent_id === agentId) {
         return { terminal: await terminalFact('act.commander_echo_refused', 'commander_self_target', commanderIdentity, target.agent_id) };
       }
+      const targetBinding = routableBindings(projections).find((binding) =>
+        binding.agent_id === target.agent_id && binding.seat_id === target.seat_id)!;
       return {
         source: source!,
         stopSeq,
         commanderIdentity,
         target,
-        messageId: stableUuid('txd-commander-echo', stopSeq, target.agent_id),
+        targetBoundSeq: targetBinding.bound_seq,
+        messageId: stableUuid('txd-commander-echo', stopSeq, commanderIdentity),
       };
     });
     if ('terminal' in prepared) return prepared.terminal;
@@ -2652,7 +2707,7 @@ export class Daemon {
       const accepted = await this.comm({
         schema_version: SCHEMA_VERSION,
         source_agent_id: prepared.source.agent_id!,
-        target: prepared.target.agent_id,
+        target: prepared.commanderIdentity,
         message: content!,
         ask: false,
         reply: false,
@@ -2660,6 +2715,8 @@ export class Daemon {
         messageId: prepared.messageId,
         sourceAgentIdInFrame: prepared.source.agent_id!,
         expectedSourceBoundSeq: prepared.source.bound_seq,
+        expectedTargetAgentId: prepared.target.agent_id,
+        expectedTargetBoundSeq: prepared.targetBoundSeq,
         commanderEcho: {
           source_stop_event_seq: prepared.stopSeq,
           commander_identity: prepared.commanderIdentity,
@@ -3084,7 +3141,8 @@ export class Daemon {
       // Closing is an overseer capability. The caller identity discipline is
       // comm's (source_agent_id must be a registered binding); the rank gate
       // reads the rank already recorded on that binding — no new auth scheme.
-      const source = proj.currentBindings.find((b) => b.registered && b.agent_id === req.source_agent_id);
+      const source = routableBindings(proj).find((binding) =>
+        binding.agent_id === req.source_agent_id);
       if (!source) return refused('source_not_registered: source_agent_id resolves to no registered binding');
       if (source.rank !== CLOSE_REQUIRED_RANK) {
         return refused(`not_authorized: close requires rank ${CLOSE_REQUIRED_RANK}; source ${req.source_agent_id} holds rank ${source.rank ?? 'none'}`);
@@ -3644,8 +3702,8 @@ export class Daemon {
         return refused(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}, request sent ${req.schema_version}`);
       }
       const proj = await this.projections();
-      const source = proj.currentBindings.find((binding) =>
-        binding.registered && binding.agent_id === req.source_agent_id);
+      const source = routableBindings(proj).find((binding) =>
+        binding.agent_id === req.source_agent_id);
       if (!source || source.rank !== CLOSE_REQUIRED_RANK) {
         return refused(`not_authorized: estate abandon requires rank ${CLOSE_REQUIRED_RANK}`);
       }

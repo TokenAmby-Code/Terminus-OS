@@ -22,11 +22,11 @@ const provenance = {
 
 type RigTmux = FakeTmux;
 
-function stableEchoMessageId(stopSeq: number, targetAgentId: string): string {
+function stableEchoMessageId(stopSeq: number, commanderIdentity: string): string {
   const bytes = createHash('sha256')
     .update('txd-commander-echo')
     .update('\0')
-    .update(`${stopSeq}\0${targetAgentId}`)
+    .update(`${stopSeq}\0${commanderIdentity}`)
     .digest()
     .subarray(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x50;
@@ -202,7 +202,7 @@ test('behavioral pin: restart after admission but before transport terminalizes 
   expect(stopped).toMatchObject({ ok: true, recorded: true });
   const stopEvent = (await store.readAll()).find((event) =>
     event.entity_id === 'source-agent' && event.event_type === 'act.stop_reported')!;
-  const messageId = stableEchoMessageId(stopEvent.seq, 'commander-agent');
+  const messageId = stableEchoMessageId(stopEvent.seq, 'council:orchestrator');
   const source = { persona: 'imperial-fists', seat_id: 'palace:W' };
   const target = { agent_id: 'commander-agent', seat_id: 'council:orchestrator', persona: 'orchestrator' };
   const frame = commanderEchoFrame(messageId, source, 'source-agent', 'admitted before crash');
