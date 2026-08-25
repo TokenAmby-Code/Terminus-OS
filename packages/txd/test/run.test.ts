@@ -12,7 +12,6 @@ import { makeServer } from '../src/server.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
-const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
 function estate() {
   const store = new MemoryEventStore();
@@ -272,7 +271,7 @@ test('a pane replaced mid-run fails that run loud instead of hanging on a dead s
 
 test('POST /agents/run refuses a multiline command at the membrane', async () => {
   const { d } = estate();
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/run`, {
       method: 'POST',
@@ -287,7 +286,7 @@ test('POST /agents/run refuses a multiline command at the membrane', async () =>
 
 test('POST /agents/run serves a typed refusal as a loud non-2xx', async () => {
   const { d } = estate();
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/run`, {
       method: 'POST',
@@ -304,7 +303,7 @@ test('POST /agents/run completes a pane run as a deferred body carrying the harv
   const { tmux, d } = estate();
   await tmux.createSeat('palace:E');
   tmux.setShellRunResult('palace:E', { exit_code: 0, stdout: 'proof\n', stderr: '', stdout_truncated: false, stderr_truncated: false });
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/run`, {
       method: 'POST',

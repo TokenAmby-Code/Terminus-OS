@@ -40,7 +40,7 @@ StartLimitBurst=5
 # that write is what completes the start job — so a caller's `systemctl restart
 # txd.service` returns on the serving edge instead of at fork. The estate rung
 # runs after the signal on purpose: txd must stay reachable while an estate is
-# unresolved, because /ctl/health is the surface that says so.
+# unresolved, because /health is the surface that says so.
 Type=notify
 NotifyAccess=main
 # The daemon executes from the installed generation apply-txd realizes with

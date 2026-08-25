@@ -3,23 +3,23 @@
 
 import { describeEndpoint } from '@terminus-os/db';
 import { notifyReady } from '@terminus-os/systemd';
+import { PostgresObservationStore } from '@tokenamby-code/stc-contract/observation';
 import { loadConfig } from './config.ts';
 import { PostgresEventStore } from './store.ts';
 import { RealTmux } from './tmux.ts';
 import { CommGateTransportFailure, Daemon, type CommWatchArmInput } from './core.ts';
-import { makeServer, type BuildInfo } from './server.ts';
-import { resolveGitSha } from './build.ts';
+import { makeServer } from './server.ts';
 import { ProcessEstateRotationBarrier } from './rotation-lock.ts';
 import { makeJournalPublisher } from './events.ts';
 import { createTxdEventJournal, createTxdJournalConnection } from './event-journal.ts';
 import { realRemoteEnvelopeLister } from './envelopes.ts';
 import { parseClipboardMachineRegistry } from './clipboard-origin.ts';
+import { SERVICE_VERSION } from './identity.ts';
+import { createTxdObservationSource, makeTxdObservationHandler } from './observation.ts';
 
-const build: BuildInfo = {
-  version: '0.1.0',
-  // Resolved from the checkout this file was loaded from (src/ → package dir);
-  // rev-parse walks up to the repo root, so the daemon subdir is sufficient.
-  git_sha: resolveGitSha(new URL('..', import.meta.url).pathname),
+const build = {
+  version: SERVICE_VERSION,
+  git_sha: process.env.GIT_SHA ?? 'unknown',
   bun: Bun.version,
 };
 
@@ -112,7 +112,29 @@ await eventJournal.consumer.initialize();
 await eventJournal.listener.start();
 await eventJournal.listener.registered();
 await eventJournal.consumer.requestDrain();
-const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, build, machine: cfg.machine });
+const observationStore = await PostgresObservationStore.connect({
+  socketDir: cfg.db.socket_dir,
+  port: cfg.db.port,
+  database: cfg.db.database,
+  schema: 'txd',
+  applicationName: 'txd-observations',
+  statementCeilingMs: 300_000,
+  statementCeilingDerivedFrom: 'fleet-wide 5-minute unit stop floor (Emperor ruling 2026-08-13)',
+});
+const observation = makeTxdObservationHandler({
+  source: createTxdObservationSource({
+    store,
+    tmux,
+    daemon,
+    journalSql: eventJournal.sql,
+    journalConsumer: eventJournal.consumer,
+    journalListener: eventJournal.listener,
+  }),
+  observationStore,
+  machine: cfg.machine,
+  version: SERVICE_VERSION,
+});
+const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, machine: cfg.machine, observation });
 
 console.log(
   JSON.stringify({
@@ -133,7 +155,7 @@ console.log(
 //
 // Deliberately BEFORE the estate rung below. Standing the estate reconciles
 // external tmux state, and txd's own availability must never be hostage to it:
-// a wedged estate has to find txd up and answering /ctl/health, which is the
+// a wedged estate has to find txd up and answering /health, which is the
 // surface an operator reads to see that the estate is what is wrong. The rung
 // below already treats an unresolved estate as a legitimate state rather than
 // a failure.
@@ -174,6 +196,7 @@ async function shutdown() {
     () => Promise.race([server.stop(), Bun.sleep(5_000)]),
     () => eventJournal.listener.stop(),
     () => eventJournal.consumer.settle(),
+    () => observationStore.close(),
     () => eventJournal.sql.close(),
     () => store.close(),
   ]) {

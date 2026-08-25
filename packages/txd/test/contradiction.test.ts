@@ -11,10 +11,9 @@ function setup() {
 
 // Spec §6 rung 5: an out-of-band pane kill (the retire/reap/clear chain never
 // ran) is a REAL contradiction. Reconcile observes tmux and emits a typed
-// contradiction_flagged — NEVER a synthesized lifecycle event. Bring-up mode:
-// any open contradiction is p0, fail loud, /ctl/health ok=false.
+// contradiction_flagged — NEVER a synthesized lifecycle event.
 
-test('out-of-band pane kill on a bound seat → contradiction_flagged, p0, health ok=false', async () => {
+test('out-of-band pane kill on a bound seat → contradiction_flagged and p0', async () => {
   const { tmux, store, d } = setup();
   await d.launch({ seat_id: 'palace:W', schema_version: 12, identity: 'i-1', persona: 'salamander', tint: '#302800' });
 
@@ -35,10 +34,6 @@ test('out-of-band pane kill on a bound seat → contradiction_flagged, p0, healt
   expect(types).not.toContain('reg.retired');
   expect(types).not.toContain('reg.seat_cleared');
 
-  // Honest health: ok=false while any contradiction is open.
-  const h = await d.health('k12-personal', { version: '0', git_sha: 'x', bun: 'y' });
-  expect(h.ok).toBe(false);
-  expect(h.open_contradictions).toBeGreaterThan(0);
 });
 
 test('re-reconcile does not double-flag an already-open contradiction', async () => {

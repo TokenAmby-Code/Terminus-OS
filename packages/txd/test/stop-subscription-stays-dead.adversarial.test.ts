@@ -11,7 +11,6 @@ import { Daemon } from '../src/core.ts';
 import { buildProjections } from '../src/projections.ts';
 import { makeServer } from '../src/server.ts';
 
-const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
 const FULL = { schema_version: SCHEMA_VERSION, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
 
@@ -28,7 +27,7 @@ test('the daemon exposes no subscribe surface', () => {
 
 test('POST /agents/subscribe is not a route', async () => {
   const { d } = setup();
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/subscribe`, {
       method: 'POST',

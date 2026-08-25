@@ -9,15 +9,26 @@ function harness(response: unknown = { ok: true }) {
     request: async (method, path, body) => { calls.push({ method, path, ...(body === undefined ? {} : { body }) }); return response; },
     stdout: (line) => stdout.push(line),
     stderr: (line) => stderr.push(line),
+    observation: {
+      health: async () => response as never,
+      inspect: async () => response as never,
+    },
   };
   return { deps, stdout, stderr, calls };
 }
 
-test('health is a registered command, not hard-coded parser behavior', async () => {
-  const h = harness({ ok: true, service: 'txd' });
-  expect(await runCli(['health'], h.deps)).toBe(0);
-  expect(h.calls).toEqual([{ method: 'GET', path: '/ctl/health' }]);
-  expect(JSON.parse(h.stdout[0]!)).toEqual({ ok: true, service: 'txd' });
+test('health, inspect, and version use the STC observation client', async () => {
+  const calls: string[] = [];
+  const observation = {
+    health: async () => { calls.push('health'); return { ok: true }; },
+    inspect: async () => { calls.push('inspect'); return { holdings: [] }; },
+  } as never;
+  const version = () => ({ service: 'txd', daemon: 'txd', cli: 'tx', version: '0.1.0', stc_version: '1.3.0' });
+  for (const operation of ['health', 'inspect', 'version']) {
+    const h = harness();
+    expect(await runCli([operation], { ...h.deps, observation, version })).toBe(0);
+  }
+  expect(calls).toEqual(['health', 'inspect']);
 });
 
 test('the shared router supports nested subcommands', async () => {

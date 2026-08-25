@@ -18,7 +18,6 @@ import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 
-const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
 const HOOK_REQUEST_ID = '3f1c2a5e-9d4b-4c6a-8e2f-1a7b9c0d3e5f';
 
@@ -26,7 +25,7 @@ function setup(physicalRegistration: ConstructorParameters<typeof Daemon>[4] = n
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux, undefined, undefined, physicalRegistration);
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   const post = (body: unknown) =>
     fetch(`http://127.0.0.1:${srv.port}/ingress/lifecycle`, { method: 'POST', body: JSON.stringify(body) });
   return { store, tmux, d, srv, post };

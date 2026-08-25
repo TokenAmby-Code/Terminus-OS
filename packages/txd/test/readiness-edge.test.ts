@@ -17,7 +17,7 @@ describe('txd readiness edge', () => {
 
   // Standing the estate reconciles external tmux state. Gating txd's own
   // readiness on it would make a wedged estate able to hold the control plane
-  // down — and /ctl/health is the surface that says the estate is what is
+  // down — and /health is the surface that says the estate is what is
   // wrong, so it has to be answering precisely then.
   test('availability is not hostage to the estate rung', () => {
     const signal = daemon.indexOf('notifyReady()');

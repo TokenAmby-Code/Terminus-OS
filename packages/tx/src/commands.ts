@@ -287,11 +287,6 @@ export const COMMANDS: readonly Command[] = [
     },
   },
   {
-    path: ['health'],
-    summary: 'Show txd and estate health',
-    run: async ({ request, write }) => { write(await request('GET', '/ctl/health')); return 0; },
-  },
-  {
     path: ['estate', 'compact-events'],
     summary: 'Archive-attested compaction through a reset journal head',
     run: async ({ args, request, write }) => {

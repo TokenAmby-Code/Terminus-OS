@@ -12,7 +12,6 @@ import {
   ESTATE_EVENT_NAMES,
   EventInputSchema,
   EventTypeSchema,
-  HealthSchema,
   ModeTransitionRequestSchema,
   REG_EVENT_NAMES,
   SCHEMA_VERSION,
@@ -246,30 +245,6 @@ describe("txd lifecycle vocabulary", () => {
         failure_reason: "delivery_target_closed",
       }],
     }).phase).toBe("delivery_failed");
-  });
-
-  test("health names the service txd — nothing k12-named survives of the daemon", () => {
-    const health = {
-      ok: true,
-      service: "txd",
-      schema_version: SCHEMA_VERSION,
-      version: "0.1.0",
-      git_sha: "deadbeef",
-      bun: "1.3.14",
-      machine: "k12-personal",
-      events: 0,
-      open_contradictions: 0,
-      tmux_reachable: true,
-      hooks: { state: "ready", pane_died: true, pane_exited: true },
-      estate_generation: "canonical",
-      estate_divergence: [],
-      activation_pending: false,
-      tints: [],
-      comm_transport: { state: "ready", unresolved_target_agent_ids: [] },
-    };
-    expect(HealthSchema.parse(health).service).toBe("txd");
-    expect(HealthSchema.parse(health).activation_pending).toBe(false);
-    expect(() => HealthSchema.parse({ ...health, service: "k12_daemon" })).toThrow();
   });
 
   test("close requires exactly one selector and pins the overseer rank", () => {
