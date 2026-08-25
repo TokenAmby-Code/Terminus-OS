@@ -1,2 +1,8 @@
+# Every `bun test` run asks whether this checkout's declared dependency closure
+# is installed, before any test file loads. Without it bun aborts each file at
+# module load and the run reports a partial suite as a whole one.
+[test]
+preload = ["./test/workspace-closure-preload.ts"]
+
 [install.scopes]
 "@tokenamby-code" = { url = "https://npm.pkg.github.com", token = "$CIVIC_PACKAGES_READ" }
