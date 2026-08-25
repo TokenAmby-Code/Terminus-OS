@@ -28,7 +28,7 @@ if (!(OPERATIONS as readonly string[]).includes(requested ?? "")) refuse(USAGE);
 const operation = { data: requested as Operation };
 
 if (operation.data === "version") {
-  console.log(JSON.stringify({ ...SERVICE_IDENTITY, version: SERVICE_VERSION, stc_version: runningRuntimeMarker().version }));
+  process.stdout.write(`${JSON.stringify({ ...SERVICE_IDENTITY, version: SERVICE_VERSION, stc_version: runningRuntimeMarker().version })}\n`);
   process.exit(0);
 }
 
@@ -40,9 +40,9 @@ if (agentId) request.headers = { "x-agent-id": agentId };
 const client = createObservationClient({ baseUrl: process.env.TM_URL ?? "http://127.0.0.1:7784", request });
 
 if (operation.data === "inspect") {
-  console.log(JSON.stringify(await client.inspect()));
+  process.stdout.write(`${JSON.stringify(await client.inspect())}\n`);
   process.exit(0);
 }
 const report = await client.health();
-console.log(JSON.stringify(report));
+process.stdout.write(`${JSON.stringify(report)}\n`);
 process.exit(report.ok ? 0 : 1);
