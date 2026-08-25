@@ -8,6 +8,7 @@ import {
   CommReceiptWaitRequestSchema,
   CommRequestSchema,
   CommTargetSchema,
+  LifecycleCommEffectRequestSchema,
   EVENT_TYPES,
   ESTATE_EVENT_NAMES,
   EventInputSchema,
@@ -23,19 +24,37 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 13 (commander echo outcomes are typed)", () => {
+  test("schema_version pins at 13 (lifecycle comm effects have a typed actuator)", () => {
     expect(SCHEMA_VERSION).toBe(13);
   });
 
+  test('lifecycle comm actuator requests pin one stable effect and two exact generations', () => {
+    const request = {
+      schema_version: SCHEMA_VERSION,
+      effect_id: '11111111-1111-4111-8111-111111111111',
+      source: {
+        agent_id: '22222222-2222-4222-8222-222222222222', seat_id: 'palace:W', persona: 'worker',
+        birth_generation: '33333333-3333-4333-8333-333333333333',
+        pane_generation: '44444444-4444-4444-8444-444444444444',
+      },
+      target: {
+        agent_id: '55555555-5555-4555-8555-555555555555', seat_id: 'council:orchestrator',
+        birth_generation: '66666666-6666-4666-8666-666666666666',
+        pane_generation: '77777777-7777-4777-8777-777777777777',
+      },
+      message: 'opaque',
+    };
+    expect(LifecycleCommEffectRequestSchema.parse(request)).toEqual(request);
+    expect(() => LifecycleCommEffectRequestSchema.parse({ ...request, commander: 'someone' })).toThrow();
+  });
+
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(47);
+    expect(EVENT_TYPES).toHaveLength(45);
     expect(EVENT_TYPES).toContain('act.comm_submit_driven');
     expect(EVENT_TYPES).toContain('act.agent_input_injected');
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('reg.placement_attested');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
-    expect(EVENT_TYPES).toContain('act.commander_echo_suppressed');
-    expect(EVENT_TYPES).toContain('act.commander_echo_refused');
     expect(EVENT_TYPES).toContain('act.comm_delivery_failed');
     expect(EVENT_TYPES).toContain('act.comm_delivery_confirmation_dead_lettered');
     expect(EVENT_TYPES).toContain('act.comm_watch_unarmed');
@@ -47,7 +66,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(EVENT_TYPES).toContain('reg.journal_publication_dropped');
     expect(EVENT_TYPES).toContain('estate.compaction_checkpoint');
     expect(REG_EVENT_NAMES).toHaveLength(21);
-    expect(ACT_EVENT_NAMES).toHaveLength(17);
+    expect(ACT_EVENT_NAMES).toHaveLength(15);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
       'scoped_reset_refused', 'scoped_reset_requested', 'scoped_reset_completed', 'scoped_reset_failed',
@@ -268,7 +287,6 @@ describe("txd lifecycle vocabulary", () => {
       activation_pending: false,
       tints: [],
       comm_transport: { state: "ready", unresolved_target_agent_ids: [] },
-      commander_echo: { state: "ready", unresolved: [], refusals: [] },
     };
     expect(HealthSchema.parse(health).service).toBe("txd");
     expect(HealthSchema.parse(health).activation_pending).toBe(false);

@@ -31,7 +31,7 @@ export function commFrame(
   return `[tx comm from ${source.persona} at ${source.seat_id} #${commTokenForMessageId(messageId)}]\n${message}`;
 }
 
-export function commanderEchoFrame(
+export function attributedCommFrame(
   messageId: string,
   source: CommFrameSource,
   sourceAgentId: string,

@@ -48,16 +48,6 @@ export type Projections = {
   // Latest wrapper transport claim per seat, recorded at pane attestation and
   // audited at Door 1 against the launch composition.
   transportClaims: Map<string, TransportClaim>;
-  commanderEchoRefusals: Map<string, CommanderEchoRefusalProjection>;
-};
-
-export type CommanderEchoRefusalProjection = {
-  event_id: number;
-  source_agent_id: string;
-  source_stop_event_seq: number | null;
-  commander_identity: string | null;
-  target_agent_id: string | null;
-  reason: string;
 };
 
 // A current binding is replay topology, not routing authority by itself: the
@@ -132,7 +122,6 @@ export function buildProjections(events: EventRecord[]): Projections {
   const abandonedSeats = new Set<string>();
   const launchCompositions = new Map<string, LaunchComposition>();
   const transportClaims = new Map<string, TransportClaim>();
-  const commanderEchoRefusals = new Map<string, CommanderEchoRefusalProjection>();
 
   for (const e of events) {
     lastSeqByEntity.set(entityKey(e.entity_type, e.entity_id), e.seq);
@@ -158,7 +147,6 @@ export function buildProjections(events: EventRecord[]): Projections {
         abandonedSeats.clear();
         launchCompositions.clear();
         transportClaims.clear();
-        commanderEchoRefusals.clear();
         for (const row of payload.seat_board as SeatBoardRow[]) {
           if (!row.seat_id) throw new Error('invalid_estate_compaction_checkpoint');
           paneBySeat.set(row.seat_id, row.pane);
@@ -177,12 +165,6 @@ export function buildProjections(events: EventRecord[]): Projections {
           launchCompositions.set(composition.seat_id, composition);
         }
         for (const claim of payload.transport_claims as TransportClaim[]) transportClaims.set(claim.seat_id, claim);
-        const checkpointEchoRefusals = Array.isArray(payload.commander_echo_refusals)
-          ? payload.commander_echo_refusals as CommanderEchoRefusalProjection[]
-          : [];
-        for (const refusal of checkpointEchoRefusals) {
-          commanderEchoRefusals.set(refusal.source_agent_id, refusal);
-        }
         for (const contradiction of payload.open_contradictions as OpenContradiction[]) {
           contradictions.push(contradiction);
           lastSeqByEntity.set(entityKey(contradiction.entity_type, contradiction.entity_id), contradiction.seq);
@@ -275,11 +257,6 @@ export function buildProjections(events: EventRecord[]): Projections {
         physicalDeclarations.delete(e.entity_id);
         break;
       }
-      case 'reg.comm_accepted':
-        if (e.payload.effect === 'commander_echo' && str(e.payload.source_agent_id)) {
-          commanderEchoRefusals.delete(str(e.payload.source_agent_id)!);
-        }
-        break;
       case 'reg.seat_cleared':
         bindingBySeat.delete(e.entity_id);
         launchCompositions.delete(e.entity_id);
@@ -309,22 +286,6 @@ export function buildProjections(events: EventRecord[]): Projections {
       case 'act.stop_reported':
         turnByAgent.set(e.entity_id, 'awaiting_input');
         break;
-      case 'act.commander_echo_refused': {
-        const sourceAgentId = str(e.payload.source_agent_id);
-        if (sourceAgentId) {
-          commanderEchoRefusals.set(sourceAgentId, {
-            event_id: e.seq,
-            source_agent_id: sourceAgentId,
-            source_stop_event_seq: typeof e.payload.source_stop_event_seq === 'number'
-              ? e.payload.source_stop_event_seq
-              : null,
-            commander_identity: str(e.payload.commander_identity),
-            target_agent_id: str(e.payload.target_agent_id),
-            reason: str(e.payload.reason) ?? 'unknown',
-          });
-        }
-        break;
-      }
       case 'reg.retired':
         turnByAgent.set(e.entity_id, 'retired');
         break;
@@ -390,6 +351,5 @@ export function buildProjections(events: EventRecord[]): Projections {
     abandonedSeats,
     launchCompositions,
     transportClaims,
-    commanderEchoRefusals,
   };
 }

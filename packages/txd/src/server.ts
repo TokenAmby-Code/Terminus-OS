@@ -31,6 +31,7 @@ import {
   ClipboardPushRequestSchema,
   ClipboardSelectionRequestSchema,
   CommRequestSchema,
+  LifecycleCommEffectRequestSchema,
   CommHookSchema,
   CommReceiptWaitRequestSchema,
   AgentInjectRequestSchema,
@@ -335,6 +336,21 @@ export function buildRoutes(
     },
     {
       method: 'POST',
+      match: exact('/agents/comm/lifecycle-effect'),
+      label: 'POST /agents/comm/lifecycle-effect',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, LifecycleCommEffectRequestSchema, 'invalid_lifecycle_comm_effect_request');
+        if (parsed instanceof Response) return parsed;
+        try {
+          return json(await daemon.lifecycleCommEffect(parsed, receipt(req)));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return json({ ok: false, error: 'lifecycle_comm_effect_refused', detail }, 409);
+        }
+      },
+    },
+    {
+      method: 'POST',
       match: exact('/agents/comm/receipt'),
       label: 'POST /agents/comm/receipt',
       handler: async (req) => {
@@ -405,8 +421,7 @@ export function buildRoutes(
         if (parsed.data.content !== undefined) {
           await daemon.commStop(parsed.data.agent_id, parsed.data.content, parsed.data.stop_event_id ?? null, receipt(req));
         }
-        const commanderEcho = await daemon.commanderEcho(parsed.data.agent_id, parsed.data.content, receipt(req));
-        return json({ ok: true, consumed: true, receipt: stopped, commander_echo: commanderEcho });
+        return json({ ok: true, consumed: true, receipt: stopped });
       },
     },
     {

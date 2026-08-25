@@ -31,7 +31,7 @@ import { z } from 'zod';
 //      close-on-stop subscription vocabulary is gone, and plan approval gains
 //      its mechanical intent (approve_plan, dialog_accept).
 // v12: breaking — absent dynamic seats use the estate's abandon vocabulary.
-// v13: additive — commander stop echoes carry typed suppression/refusal facts.
+// v13: additive — lifecycle-owned effects gain one generation-fenced comm actuator.
 export const SCHEMA_VERSION = 13;
 
 // A caller-supplied identifier: a canonical seat name (`somnium:NE`), an agent
@@ -224,8 +224,6 @@ export const ACT_EVENT_NAMES = [
   'comm_watch_unarmed',
   'composer_interactive_announced',
   'comm_callback_asserted',
-  'commander_echo_suppressed',
-  'commander_echo_refused',
   'mode_transition_requested',
   'mode_transition_attested',
   'mode_transition_failed',
@@ -278,8 +276,6 @@ export const EVENT_TYPES = [
   'act.comm_watch_unarmed',
   'act.composer_interactive_announced',
   'act.comm_callback_asserted',
-  'act.commander_echo_suppressed',
-  'act.commander_echo_refused',
   'act.mode_transition_requested',
   'act.mode_transition_attested',
   'act.mode_transition_failed',
@@ -465,25 +461,6 @@ export const HealthSchema = z.object({
     state: z.enum(['ready', 'degraded']),
     unresolved_target_agent_ids: z.array(CanonicalIdSchema),
   }),
-  commander_echo: z.object({
-    state: z.enum(['ready', 'degraded']),
-    unresolved: z.array(z.object({
-      event_id: z.number().int(),
-      source_agent_id: CanonicalIdSchema,
-      source_stop_event_seq: z.number().int().nullable(),
-      commander_identity: CanonicalIdSchema.nullable(),
-      target_agent_id: CanonicalIdSchema.nullable(),
-      reason: z.string().min(1),
-    })),
-    refusals: z.array(z.object({
-      event_id: z.number().int(),
-      source_agent_id: CanonicalIdSchema,
-      source_stop_event_seq: z.number().int().nullable(),
-      commander_identity: CanonicalIdSchema.nullable(),
-      target_agent_id: CanonicalIdSchema.nullable(),
-      reason: z.string().min(1),
-    })),
-  }),
 });
 export type Health = z.infer<typeof HealthSchema>;
 
@@ -612,37 +589,6 @@ export const StopRefusalSchema = z.object({
   agent_id: z.string(),
 });
 export type StopRefusal = z.infer<typeof StopRefusalSchema>;
-
-export const COMMANDER_ECHO_REFUSAL_REASONS = [
-  'source_not_current',
-  'source_identity_ambiguous',
-  'source_generation_stale',
-  'source_persona_unresolved',
-  'commander_absent',
-  'commander_identity_absent',
-  'commander_identity_ambiguous',
-  'commander_self_target',
-  'target_binding_changed',
-  'seat_unresolved',
-  'transport_failed',
-  'submit_failed',
-] as const;
-export const CommanderEchoRefusalReasonSchema = z.enum(COMMANDER_ECHO_REFUSAL_REASONS);
-export type CommanderEchoRefusalReason = z.infer<typeof CommanderEchoRefusalReasonSchema>;
-
-export const CommanderEchoResultSchema = z.object({
-  status: z.enum(['staged', 'deduped', 'suppressed', 'refused']),
-  reason: z.string().nullable(),
-  source_agent_id: CanonicalIdSchema,
-  source_seat_id: CanonicalIdSchema.nullable(),
-  source_persona: z.string().min(1).nullable(),
-  source_stop_event_seq: z.number().int().nullable(),
-  commander_identity: CanonicalIdSchema.nullable(),
-  target_agent_id: CanonicalIdSchema.nullable(),
-  message_id: z.string().uuid().nullable(),
-  event_ids: z.array(z.number().int()),
-});
-export type CommanderEchoResult = z.infer<typeof CommanderEchoResultSchema>;
 
 export const ReconcileResponseSchema = z.object({
   ok: z.boolean(),
@@ -813,6 +759,25 @@ export const CommRequestSchema = z.object({
   }
 });
 export type CommRequest = z.infer<typeof CommRequestSchema>;
+
+// lifecycled decides whether an effect is owed and supplies both exact agent
+// instances. txd only validates those generation witnesses, admits the stable
+// effect id as the comm message id, and runs the ordinary comm transport.
+const LifecycleCommEndpointSchema = z.object({
+  agent_id: CanonicalIdSchema,
+  seat_id: CanonicalIdSchema,
+  birth_generation: z.string().uuid(),
+  pane_generation: z.string().uuid(),
+}).strict();
+export const LifecycleCommEffectRequestSchema = z.object({
+  schema_version: z.number().int(),
+  effect_id: z.string().uuid(),
+  source: LifecycleCommEndpointSchema.extend({ persona: z.string().min(1) }).strict(),
+  target: LifecycleCommEndpointSchema,
+  message: z.string().min(1),
+}).strict();
+export type LifecycleCommEffectRequest = z.infer<typeof LifecycleCommEffectRequestSchema>;
+
 export const AgentInjectRequestSchema = z.object({
   schema_version: z.number().int(),
   target_agent_id: CanonicalIdSchema,
@@ -834,6 +799,16 @@ export const CommTargetSchema = z.object({
   logical_identity: CommLogicalIdentitySchema.optional(),
 });
 export type CommTarget = z.infer<typeof CommTargetSchema>;
+export const LifecycleCommEffectResponseSchema = z.object({
+  ok: z.literal(true),
+  message_id: z.string().uuid(),
+  source_agent_id: CanonicalIdSchema,
+  targets: z.array(CommTargetSchema).length(1),
+  staged: z.boolean(),
+  replayed: z.boolean(),
+  event_ids: z.array(z.number().int()),
+});
+export type LifecycleCommEffectResponse = z.infer<typeof LifecycleCommEffectResponseSchema>;
 // `staged` = this message's bytes were handed to the target pane and Enter was
 // pressed. Delivery is asserted later and separately by
 // `act.comm_delivery_asserted`, correlated to `message_id` — which is why the
