@@ -154,7 +154,8 @@ the emptied page — forward a page-less `pane-killed` event that makes txd
 sweep the estate. Either way txd retires exactly the faulted seat and repairs
 its pane in place; a page rebuild happens only when no tagged pane survives
 on the page. This holds for every pane kind, including future ssh-envelope
-panes.
+panes, and it holds at boot: a txd restart repairs faulted seats alone and
+attests page drift as a contradiction instead of rebuilding an occupied page.
 registrationd emits `agent.registration_compensated` or
 `agent.registration_failed` for terminal birth failures; post-birth it never
 initiates retirement. txd emits factual placement contradictions and, at every

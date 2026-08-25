@@ -34,8 +34,8 @@ function pin(exact: string): void {
 }
 
 describe('systemd/txd.service pins', () => {
-  test('WorkingDirectory targets the live/ checkout on the box', () => {
-    pin('WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd');
+  test('WorkingDirectory targets the installed txd generation', () => {
+    pin('WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd');
   });
 
   // Without these two lines the daemon's readiness datagram is written into a
@@ -111,7 +111,7 @@ describe('systemd/tx-estate.service boundary', () => {
     expect(tmuxLines).toContain('NoNewPrivileges=false');
     expect(tmuxLines).toContain('Environment=TXD_TMUX_SOCKET=k12');
     expect(tmuxLines).toContain('Type=simple');
-    expect(tmuxLines).toContain('ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf');
+    expect(tmuxLines).toContain('ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/.local/lib/terminus-os/txd/packages/txd/tmux/tx.conf');
     expect(tmuxLines).toContain('ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server');
     expect(tmuxLines).toContain('Restart=always');
     expect(tmuxLines).toContain('RestartSec=2');

@@ -12,7 +12,11 @@
 # The leg is one idempotent host pass over a githubd-realized Terminus target:
 #   1. Secrets contract: ensure ~/secrets/txd exists, mode 700. Contents are
 #      provisioning-time material and never touched here.
-#   2. Unit delivery: install validated units, but never stop or restart an
+#   2. Generations: txd and tx each execute from an installed generation, never
+#      from the checkout — terminus-install-generation builds and validates the
+#      candidate beside the running tree and only then makes it current, so a
+#      refusal anywhere in this leg leaves the serving generation as it was.
+#   3. Unit delivery: install validated units, but never stop or restart an
 #      active estate. Drift is installed for the next explicit rotation.
 set -euo pipefail
 
@@ -36,9 +40,9 @@ fi
 unit_dir="$terminus/packages/txd/systemd"
 txd_src="$unit_dir/txd.service"
 estate_src="$unit_dir/tx-estate.service"
-tx_src="$terminus/packages/tx/src/main.ts"
-tmux_conf="$terminus/packages/txd/tmux/tx.conf"
-if [[ ! -f "$txd_src" ]] || [[ ! -f "$estate_src" ]] || [[ ! -f "$tx_src" ]] || [[ ! -f "$tmux_conf" ]]; then
+tx_entry="$terminus/packages/tx/src/main.ts"
+tmux_conf_src="$terminus/packages/txd/tmux/tx.conf"
+if [[ ! -f "$txd_src" ]] || [[ ! -f "$estate_src" ]] || [[ ! -f "$tx_entry" ]] || [[ ! -f "$tmux_conf_src" ]]; then
   echo "apply($machine): txd leg PARKED — txd units, tx CLI, and tmux config are not all present in $terminus/packages; nothing installed"
   exit 0
 fi
@@ -61,10 +65,10 @@ grep -q '^ExecStart=%h/\.bun/bin/bun ' "$txd_src" || {
   exit 1
 }
 # Defect A (2026-07-20): a unit with a nonexistent WorkingDirectory sailed
-# through the pin set and got installed. The daemon runs from the live runtime
-# checkout's package dir — pin the exact value, not just the key's presence.
-grep -qx 'WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd' "$txd_src" || {
-  echo "apply($machine): txd unit must pin WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/txd (the live runtime checkout this leg propagates); refusing to install" >&2
+# through the pin set and got installed. The daemon runs from the installed
+# generation this leg realizes — pin the exact value, not just the key's presence.
+grep -qx 'WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd' "$txd_src" || {
+  echo "apply($machine): txd unit must pin WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd (the installed generation this leg realizes); refusing to install" >&2
   exit 1
 }
 grep -qx 'BindsTo=tx-estate.service' "$txd_src" || {
@@ -110,7 +114,7 @@ grep -qx 'NoNewPrivileges=false' "$estate_src" || {
   echo "apply($machine): estate unit must keep pane processes outside NoNewPrivileges; refusing to install" >&2
   exit 1
 }
-grep -Fqx 'ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf' "$estate_src" || {
+grep -Fqx 'ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/.local/lib/terminus-os/txd/packages/txd/tmux/tx.conf' "$estate_src" || {
   echo "apply($machine): estate unit must supervise foreground tmux with the pinned tx.conf; refusing to install" >&2
   exit 1
 }
@@ -119,32 +123,42 @@ grep -Fqx 'ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server' "$estate_sr
   exit 1
 }
 
-# ── 3. install the estate unit owners ────────────────────────────────────────
+# ── 2. realize the generations ───────────────────────────────────────────────
 install -d -m 700 "$HOME/secrets/txd"
 
 user_unit_dir="$HOME/.config/systemd/user"
 user_bin_dir="$HOME/.local/bin"
+install_root="${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}"
 txd_dst="$user_unit_dir/txd.service"
 estate_dst="$user_unit_dir/tx-estate.service"
+generation_dropin="$user_unit_dir/txd.service.d/generation.conf"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
 stamp="$state_dir/txd.applied.sha256"
 registration_env="$HOME/.config/token-fleet/txd-registration.env"
 sha="$(git -C "$terminus" rev-parse HEAD)"
-# Keyed on txd's real dependency set. This leg never hashed packages/txd/src at
-# all — repository HEAD was standing in for the daemon's own source as well as
-# for the @terminus-os/{contracts,db} closure it imports, so dropping HEAD
-# without this fingerprint would have left txd source changes unrestarted. The
-# fingerprint covers the whole txd package plus the allocation generation txd
-# actually loads from its systemd EnvironmentFile. Omitting that installed
-# configuration left txd serving an old allocation digest after registrationd
-# restarted into a new one. packages/tx is deliberately absent: the tx CLI is
-# symlinked, not copied, so it is current without a daemon restart.
 [[ -f "$registration_env" ]] || {
   echo "apply($machine): txd registration environment is absent at $registration_env" >&2
   exit 1
 }
+# txd and tx are separate closures realized as separate generations. The tx
+# generation never restarts txd: ~/.local/bin/tx links through the current
+# pointer, so the CLI is current the moment its generation is, and the tmux
+# estate reaches it by that link. The txd restart key is the txd generation
+# digest plus the allocation generation txd loads from its systemd
+# EnvironmentFile — omitting that installed configuration once left txd
+# serving a stale allocation digest after registrationd restarted into a new
+# one. The checkout SHA reaches the daemon as its build stamp through a drop-in
+# the key does not fold: an installed tree is not a git checkout and cannot
+# answer rev-parse, so without the stamp /ctl/health git_sha would read
+# unknown after every deploy.
+txd_generation="$("$terminus/bin/terminus-install-generation" "$terminus" txd src/daemon.ts)"
+tx_generation="$("$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts)"
+tx_main="$install_root/tx/packages/tx/src/main.ts"
+tmux_conf="$install_root/txd/packages/txd/tmux/tx.conf"
+[[ -f "$tx_main" ]] || { echo "apply($machine): tx generation ${tx_generation:0:12} does not carry src/main.ts" >&2; exit 1; }
+[[ -f "$tmux_conf" ]] || { echo "apply($machine): txd generation ${txd_generation:0:12} does not carry tmux/tx.conf" >&2; exit 1; }
 new_hash="$({
-  "$terminus/bin/terminus-package-fingerprint" "$terminus" txd
+  printf 'generation=%s\n' "$txd_generation"
   printf '\0'
   cat "$registration_env"
 } | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)"
@@ -154,10 +168,12 @@ if [[ -f "$estate_dst" ]] && cmp -s "$estate_src" "$estate_dst"; then
   estate_changed=0
 fi
 
-mkdir -p "$user_unit_dir" "$user_bin_dir" "$state_dir"
-ln -sfn "$tx_src" "$user_bin_dir/tx"
+# ── 3. install the estate unit owners ────────────────────────────────────────
+mkdir -p "$user_unit_dir" "$user_bin_dir" "$state_dir" "$(dirname "$generation_dropin")"
+ln -sfn "$tx_main" "$user_bin_dir/tx"
 cp -f "$txd_src" "$txd_dst"
 cp -f "$estate_src" "$estate_dst"
+printf '[Service]\nEnvironment=GIT_SHA=%s\n' "$sha" >"$generation_dropin"
 systemctl --user daemon-reload
 systemctl --user enable tx-estate.service txd.service
 if ! systemctl --user is-active --quiet tx-estate.service; then
@@ -252,4 +268,4 @@ echo "apply($machine): tmux configuration reloaded and verified without pane los
 
 systemctl --user daemon-reload
 echo "$new_hash" > "$stamp"
-echo "apply($machine): txd leg converged (terminus sha ${sha:0:9})"
+echo "apply($machine): txd leg converged (txd generation ${txd_generation:0:12}, tx generation ${tx_generation:0:12}, terminus sha ${sha:0:9})"

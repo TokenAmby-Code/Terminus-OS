@@ -207,21 +207,48 @@ describe('disposable canonical estate geometry', () => {
     const operatorPid = await tmux(socket, 'display-message', '-p', '-t', operator, '#{pane_pid}');
 
     expect(await adapter.estateGeneration()).toBe('canonical');
-    expect(await adapter.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
+    expect(await adapter.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [], diverged_pages: [] });
     expect(await tmux(socket, 'display-message', '-p', '-t', operator, '#{pane_pid}')).toBe(operatorPid);
 
     await tmux(socket, 'set-option', '-p', '-t', operator, '@canonical_id', 'foreign:operator');
     expect(await adapter.estateGeneration()).toBe('foreign');
   });
 
-  // Recovery enforces; it does not balk. Drift that `estateGeneration` itself
-  // classifies as `recoverable` must be driven back to canonical shape. The
-  // 2026-07-26/27 outage was exactly this contradiction: a drifted Council was
-  // called recoverable, never repaired — the repair trigger read seat liveness
-  // while the acceptance predicate also read geometry — and then rejected,
-  // taking the control plane down every two seconds for fifteen minutes.
-  test('a drifted Council layout is driven back to canonical instead of failing recovery', async () => {
+  // Recovery observes; it does not balk and it does not close a live pane.
+  // Drift that `estateGeneration` classifies as `recoverable` on a page that
+  // still holds live tagged panes is REPORTED with the clause it fails, never
+  // rebuilt over the people on it (Emperor ruling, 2026-08-25: closing panes
+  // is the sensitive operation, a restart is not). The 2026-07-26/27 crash
+  // loop — a drifted Council called recoverable, never repaired, then fatal
+  // every two seconds — is prevented by this call converging instead of
+  // throwing; the drift itself is red on health until an operator verb
+  // repairs it.
+  test('a drifted Council layout holding live panes is reported, not rebuilt, and recovery converges', async () => {
     const socket = `txd-geometry-layout-drift-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const adapter = new RealTmux(socket);
+    await adapter.ensureEstate();
+    const before = await tmux(socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}');
+
+    await tmux(socket, 'select-layout', '-t', 'main:council', 'even-horizontal');
+    expect(await adapter.estateGeneration()).toBe('recoverable');
+
+    expect(await adapter.ensureEstate()).toEqual({
+      state: 'existing',
+      rebuilt_pages: [],
+      diverged_pages: [{ page: 'council', clause: 'geometry', detail: expect.stringContaining('council:custodes@') }],
+    });
+    expect(await adapter.estateDivergences()).toMatchObject([{ page: 'council', clause: 'geometry' }]);
+    expect(await adapter.estateGeneration()).toBe('recoverable');
+    expect(await tmux(socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
+  });
+
+  // A page nobody occupies is the one class recovery reconstructs; a
+  // reconstruction that provably cannot converge still fails — once, loud,
+  // naming the page and the exact divergence.
+  test('a Council with no live tagged pane is rebuilt, and an impossible rebuild names the page', async () => {
+    const socket = `txd-geometry-unconvergeable-${process.pid}`;
     sockets.push(socket);
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const adapter = new RealTmux(socket);
@@ -230,36 +257,21 @@ describe('disposable canonical estate geometry', () => {
       socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
     )).split('\n').map((row) => row.split('\t') as [string, string]));
 
-    await tmux(socket, 'select-layout', '-t', 'main:council', 'even-horizontal');
+    await tmux(socket, 'kill-window', '-t', 'main:council');
     expect(await adapter.estateGeneration()).toBe('recoverable');
-
-    expect(await adapter.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: ['council'] });
+    expect(await adapter.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: ['council'], diverged_pages: [] });
     expect(await adapter.estateGeneration()).toBe('canonical');
-
-    // Structural drift earns the destructive rebuild, and only on its own page.
     const after = new Map((await tmux(
       socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
     )).split('\n').map((row) => row.split('\t') as [string, string]));
-    for (const seat of TXD_WINDOWS.council) expect(after.get(seat)).not.toBe(before.get(seat));
     for (const seat of Object.values(TXD_WINDOWS).flat().filter((seat) => !seat.startsWith('council:'))) {
       expect(after.get(seat)).toBe(before.get(seat));
     }
-  });
 
-  // Enforcement that provably cannot converge still fails — once, and loud, and
-  // naming the page and the exact divergence, so the operator has something to
-  // act on instead of an anonymous postcondition and a restart loop.
-  test('an estate that cannot be driven to canonical names the page and the exact divergence', async () => {
-    const socket = `txd-geometry-unconvergeable-${process.pid}`;
-    sockets.push(socket);
-    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
-    const adapter = new RealTmux(socket);
-    await adapter.ensureEstate();
-    await tmux(socket, 'select-layout', '-t', 'main:council', 'even-horizontal');
+    await tmux(socket, 'kill-window', '-t', 'main:council');
     // Reconstruction respawns every page pane from default-shell; a shell that
     // exits immediately makes the repair provably impossible to complete.
     await tmux(socket, 'set-option', '-g', 'default-shell', '/bin/false');
-
     const failure = await adapter.ensureEstate().then(
       (result) => { throw new Error(`recovery unexpectedly converged: ${JSON.stringify(result)}`); },
       (error: unknown) => String(error),
@@ -431,7 +443,7 @@ describe('disposable canonical estate geometry', () => {
       // Neither the estate ensure that runs at every boot nor an explicit
       // reconcile is a request to change what the operator is looking at.
       expect(await control.estateGeneration()).toBe('canonical');
-      expect(await control.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
+      expect(await control.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [], diverged_pages: [] });
       expect(await zoomed()).toBe('1');
 
       await daemon.reconcile();

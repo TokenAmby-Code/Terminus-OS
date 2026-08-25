@@ -98,7 +98,7 @@ test('stack recovery revives one dead allocation pane without replacing a live w
   await tmux.createStackSeat('palace_fleet', 'palace_fleet:worker-1');
   tmux.killOutOfBand('palace_fleet:new');
 
-  expect(await tmux.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [] });
+  expect(await tmux.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [], diverged_pages: [] });
   expect(tmux.resetSeats()).toContain('palace_fleet:new');
   expect(tmux.estateShape().windows.palace_fleet).toEqual([
     'palace_fleet:new',
@@ -135,7 +135,7 @@ test('boot defers a foreign pre-rotation shape without mutating or resolving it'
   });
 });
 
-test('boot constructor reconstructs a damaged canonical page and retires bindings whose processes were wiped', async () => {
+test('boot repairs a seat deleted while txd was down alone, in place, without rebuilding its page', async () => {
   const { store, tmux, d } = setup();
   await d.constructEstate();
   await d.launch({
@@ -145,20 +145,95 @@ test('boot constructor reconstructs a damaged canonical page and retires binding
     persona: 'astartes',
     tint: '#1',
   });
+  await d.launch({
+    seat_id: 'palace:W',
+    schema_version: SCHEMA_VERSION,
+    identity: 'boot-survivor',
+    persona: 'astartes',
+    tint: '#2',
+  });
   tmux.deleteOutOfBand('palace:E');
   const result = await d.constructEstate();
   expect(result.failed).toEqual([]);
-  expect(tmux.rebuiltPages()).toEqual(['palace']);
-  expect(tmux.estateShape().windows.palace).toEqual(['palace:W', 'palace:N', 'palace:S', 'palace:E']);
-  expect((await d.estateRows()).find((row) => row.seat_id === 'palace:E')).toMatchObject({
-    binding: 'unbound',
-    pane: 'live',
-  });
-  expect((await store.readAll()).slice(-3).map((event) => event.event_type)).toEqual([
-    'reg.retired',
-    'reg.process_reaped',
-    'reg.seat_cleared',
+  // The faulted seat is the fault scope; its live siblings keep their processes.
+  expect(tmux.rebuiltPages()).toEqual([]);
+  expect(tmux.resetSeats()).toEqual(['palace:E']);
+  expect([...tmux.estateShape().windows.palace ?? []].sort()).toEqual(['palace:E', 'palace:N', 'palace:S', 'palace:W']);
+  const rows = await d.estateRows();
+  expect(rows.find((row) => row.seat_id === 'palace:E')).toMatchObject({ binding: 'unbound', pane: 'live' });
+  expect(rows.find((row) => row.seat_id === 'palace:W')).toMatchObject({ binding: 'bound', pane: 'live' });
+  const events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'reg.retired').map((event) => event.entity_id)).toEqual(['boot-wiped']);
+  expect(events.filter((event) => event.event_type === 'estate.scoped_reset_requested')).toMatchObject([
+    { payload: { scope: 'pane', seats: ['palace:E'], trigger: 'boot' } },
   ]);
+  const health = await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version });
+  expect(health).toMatchObject({ ok: true, estate_generation: 'canonical', estate_divergence: [], open_contradictions: 0 });
+});
+
+// RULING (Emperor, 2026-08-25): a restart is not the sensitive operation;
+// closing panes is. A txd restart arrives with every merge in its closure, so
+// boot never rebuilds a page that still holds live workloads to correct drift.
+test('a drifted Council carrying live bound workloads survives boot; health goes red naming the page and clause', async () => {
+  const { store, tmux, d } = setup();
+  await d.constructEstate();
+  for (const [seat, identity] of [['council:custodes', 'overseer-a'], ['council:pax', 'overseer-b']] as const) {
+    await d.launch({ seat_id: seat, schema_version: SCHEMA_VERSION, identity, persona: 'astartes', tint: '#3' });
+  }
+  const generations = new Map(await Promise.all(
+    ['council:custodes', 'council:pax', 'council:fabricator-general', 'council:orchestrator']
+      .map(async (seat) => [seat, await tmux.seatGeneration(seat)] as const),
+  ));
+  tmux.driftPageGeometry('council');
+  expect(await tmux.estateGeneration()).toBe('recoverable');
+  const retiredBefore = (await store.readAll()).filter((event) => event.event_type === 'reg.retired').length;
+
+  const result = await d.constructEstate();
+  expect(result.failed).toEqual([]);
+  expect(tmux.rebuiltPages()).toEqual([]);
+  expect(tmux.resetSeats()).toEqual([]);
+  for (const [seat, generation] of generations) expect(await tmux.seatGeneration(seat)).toBe(generation);
+  const events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'reg.retired').length).toBe(retiredBefore);
+  expect(events.filter((event) => event.event_type === 'estate.scoped_reset_requested')).toEqual([]);
+  expect((await d.estateRows()).filter((row) => row.seat_id?.startsWith('council:') && row.binding === 'bound').map((row) => row.seat_id).sort())
+    .toEqual(['council:custodes', 'council:pax']);
+
+  const health = await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version });
+  expect(health).toMatchObject({
+    ok: false,
+    estate_generation: 'recoverable',
+    estate_divergence: [{ page: 'council', clause: 'geometry' }],
+    open_contradictions: 1,
+  });
+  const flagged = events.filter((event) => event.event_type === 'reg.contradiction_flagged');
+  expect(flagged).toMatchObject([{ entity_type: 'estate', entity_id: 'council', payload: { kind: 'page_drift', clause: 'geometry' } }]);
+
+  // A second boot over the same drift re-flags nothing; an operator repair
+  // that makes the page canonical again closes the contradiction.
+  await d.constructEstate();
+  expect((await store.readAll()).filter((event) => event.event_type === 'reg.contradiction_flagged')).toHaveLength(1);
+  expect(await d.resetEstateScope({ schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: 'council' })).toMatchObject({ ok: true });
+  await d.reconcile();
+  expect((await store.readAll()).filter((event) => event.event_type === 'estate.page_canonical_observed')).toMatchObject([{ entity_id: 'council' }]);
+  expect(await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version })).toMatchObject({
+    ok: true, estate_generation: 'canonical', estate_divergence: [], open_contradictions: 0,
+  });
+});
+
+test('boot still rebuilds a page with no live tagged pane left', async () => {
+  const { store, tmux, d } = setup();
+  await d.constructEstate();
+  await d.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'page-lost', persona: 'astartes', tint: '#4' });
+  for (const seat of ['somnium:W', 'somnium:N', 'somnium:S', 'somnium:NE', 'somnium:SE']) tmux.deleteOutOfBand(seat);
+
+  const result = await d.constructEstate();
+  expect(result.failed).toEqual([]);
+  expect(tmux.rebuiltPages()).toEqual(['somnium']);
+  expect([...tmux.estateShape().windows.somnium ?? []].sort()).toEqual(['somnium:N', 'somnium:NE', 'somnium:S', 'somnium:SE', 'somnium:W']);
+  expect((await d.estateRows()).find((row) => row.seat_id === 'somnium:NE')).toMatchObject({ binding: 'unbound', pane: 'live' });
+  expect((await store.readAll()).filter((event) => event.event_type === 'reg.retired').map((event) => event.entity_id)).toEqual(['page-lost']);
+  expect(await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version })).toMatchObject({ ok: true, estate_divergence: [] });
 });
 
 test('boot constructor clears all old bindings when a fresh estate server rebuilds every page', async () => {

@@ -11,7 +11,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readlinkSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -111,6 +111,53 @@ describe("an installed generation", () => {
     } finally {
       resident.kill();
     }
+  });
+
+  // The digest is what the daemon loads, so a change to a workspace member
+  // outside the closure — the case that restarted busd on every unrelated
+  // merge while HEAD was the key — leaves it alone, and a change inside the
+  // closure moves it. Both are held against a copy of this checkout with one
+  // file edited, realized into its own install root.
+  const realizeCopy = (edit: (checkout: string) => void): string => {
+    const checkout = mkdtempSync(join(scratch, "checkout-"));
+    const copy = spawnSync("bash", ["-c", `tar -C "$1" --exclude=./node_modules --exclude=./.git -cf - . | tar -C "$2" -xf -`, "_", root, checkout]);
+    expect(copy.status).toBe(0);
+    edit(checkout);
+    const isolated = mkdtempSync(join(scratch, "install-"));
+    try {
+      const pass = spawnSync(installer, [checkout, "telemetryd", "src/daemon.ts"], {
+        encoding: "utf8",
+        env: { ...process.env, TERMINUS_INSTALL_ROOT: isolated, FLEET_CHECKOUT: fleet },
+      });
+      expect(pass.stderr).toBe("");
+      expect(pass.status).toBe(0);
+      return pass.stdout.trim();
+    } finally {
+      // Each realization is a full checkout copy plus a production install;
+      // they are released as they are read so the suite's footprint on a
+      // shared tmpfs stays one generation, not four.
+      rmSync(checkout, { recursive: true, force: true });
+      rmSync(isolated, { recursive: true, force: true });
+    }
+  };
+
+  test("a change to a workspace member outside the closure does not move the digest", () => {
+    const unrelated = realizeCopy((checkout) => {
+      writeFileSync(join(checkout, "packages/txd/src/unrelated.ts"), "export const unrelated = true;\n");
+      const manifest = join(checkout, "packages/txd/package.json");
+      writeFileSync(manifest, JSON.stringify({
+        ...JSON.parse(readFileSync(manifest, "utf8")), description: "edited outside telemetryd's closure",
+      }));
+    });
+    expect(unrelated).toBe(digest);
+  });
+
+  test("a change inside the closure moves the digest", () => {
+    const changed = realizeCopy((checkout) => {
+      writeFileSync(join(checkout, "packages/db/src/generation-probe.ts"), "export const probe = true;\n");
+    });
+    expect(changed).not.toBe(digest);
+    expect(changed).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("refuses an entrypoint the package does not carry, before touching anything installed", () => {

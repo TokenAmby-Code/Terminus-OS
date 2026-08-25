@@ -17,18 +17,25 @@ import { spawnSync } from "node:child_process";
 
 const root = join(import.meta.dir, "..");
 
+// `proves` names how the leg observes the function rung after a restart.
+// telemetryd's unit returns at fork, so the leg probes the daemon's declared
+// function before stamping. txd is Type=notify: `systemctl restart` itself
+// blocks on the daemon's READY=1, written only once the control plane serves,
+// and the estate rung beneath it is deliberately a health verdict rather than
+// a restart failure (a drifted estate must find txd up and red, never
+// crash-looping) — so the restart returning IS the observed function edge.
 const SERVICES = [
-  { service: "txd", unit: "packages/txd/systemd/txd.service", leg: "bin/apply-txd" },
-  { service: "telemetryd", unit: "packages/telemetryd/systemd/telemetryd.service", leg: "bin/apply-telemetryd" },
-  { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "bin/apply-busd" },
+  { service: "txd", unit: "packages/txd/systemd/txd.service", leg: "bin/apply-txd", proves: "notify" },
+  { service: "telemetryd", unit: "packages/telemetryd/systemd/telemetryd.service", leg: "bin/apply-telemetryd", proves: "function-probe" },
+  { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "bin/apply-busd", proves: "none" },
 ] as const;
 
 // Services whose daemon executes from an installed generation: the leg's
 // restart key is the generation digest terminus-install-generation prints, and
 // the unit's WorkingDirectory is the current-generation pointer that installer
 // maintains. The rest still fingerprint the checkout they execute from.
-const INSTALLED = SERVICES.filter(({ service }) => service === "telemetryd");
-const CHECKOUT_EXECUTED = SERVICES.filter(({ service }) => service !== "telemetryd");
+const INSTALLED = SERVICES.filter(({ service }) => service === "telemetryd" || service === "txd");
+const CHECKOUT_EXECUTED = SERVICES.filter(({ service }) => service === "busd");
 
 const read = (relative: string) => readFileSync(join(root, relative), "utf8");
 
@@ -52,16 +59,40 @@ describe("apply leg and installed unit agree", () => {
     expect(source).not.toContain("shared/bin/terminus-package-fingerprint");
   });
 
-  test.each(INSTALLED)("$service: the leg realizes the generation its unit executes from", ({ service, unit, leg }) => {
+  test.each(INSTALLED)("$service: the leg realizes the generation its unit executes from", ({ service, unit, leg, proves }) => {
     const source = read(leg);
     expect(source).toContain(`"$terminus/bin/terminus-install-generation" "$terminus" ${service} src/daemon.ts`);
     expect(source).not.toContain("terminus-package-fingerprint");
     expect(read(unit)).toContain(
       `WorkingDirectory=%h/.local/lib/terminus-os/${service}/packages/${service}`,
     );
-    // Promotion is the function rung, and the stamp is written only after it.
-    expect(source.indexOf("prove-service-function-ready")).toBeGreaterThan(source.indexOf("systemctl --user restart"));
-    expect(source.indexOf('echo "$new_hash" > "$stamp"')).toBeGreaterThan(source.indexOf("prove-service-function-ready"));
+    // An installed tree cannot answer `git rev-parse`; the checkout SHA reaches
+    // the daemon as a drop-in the restart key does not fold.
+    expect(source).toContain(`printf '[Service]\\nEnvironment=GIT_SHA=%s\\n' "$sha" >"$generation_dropin"`);
+    if (proves === "function-probe") {
+      // Promotion is the function rung, and the stamp is written only after it.
+      expect(source.indexOf("prove-service-function-ready")).toBeGreaterThan(source.indexOf("systemctl --user restart"));
+      expect(source.indexOf('echo "$new_hash" > "$stamp"')).toBeGreaterThan(source.indexOf("prove-service-function-ready"));
+    } else {
+      expect(proves).toBe("notify");
+      expect(read(unit)).toContain("Type=notify");
+      expect(source).not.toContain("prove-service-function-ready");
+    }
+  });
+
+  test("txd: the tx CLI is its own generation, linked through the current pointer", () => {
+    const source = read("bin/apply-txd");
+    expect(source).toContain('"$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts');
+    expect(source).toContain('tx_main="$install_root/tx/packages/tx/src/main.ts"');
+    expect(source).toContain('ln -sfn "$tx_main" "$user_bin_dir/tx"');
+    // The tmux estate loads the same generation's configuration; nothing the
+    // estate or the CLI executes points back into the deploy checkout.
+    expect(source).toContain('tmux_conf="$install_root/txd/packages/txd/tmux/tx.conf"');
+    for (const surface of ["packages/txd/systemd/tx-estate.service", "packages/txd/tmux/tx.conf"]) {
+      expect(read(surface)).not.toContain("runtimes/Terminus-OS/live");
+    }
+    expect(read("packages/txd/systemd/tx-estate.service")).toContain("-f %h/.local/lib/terminus-os/txd/packages/txd/tmux/tx.conf");
+    expect(read("packages/txd/tmux/tx.conf")).toContain("$HOME/.local/lib/terminus-os/tx/packages/tx/bin/tx-selection");
   });
 
   test.each(SERVICES)("$service: the leg carries no restart-control branch", ({ leg }) => {
@@ -140,6 +171,6 @@ describe("leg invariants that travelled with the legs", () => {
     const leg = read("bin/apply-txd");
     expect(leg).toContain('registration_env="$HOME/.config/token-fleet/txd-registration.env"');
     expect(leg).toContain('cat "$registration_env"');
-    expect(leg).toContain("terminus-package-fingerprint");
+    expect(leg).toContain(`printf 'generation=%s\\n' "$txd_generation"`);
   });
 });
