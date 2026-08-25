@@ -1518,11 +1518,16 @@ export class Daemon {
       if (existing) {
         const snapshot = events.find((event) => event.event_type === 'reg.comm_target_snapshotted'
           && event.payload.message_id === messageId);
+        const persistedLifecycleEffect = existing.payload.lifecycle_effect as Record<string, unknown> | undefined;
         const sameEffect = internal
           && existing.payload.effect === 'lifecycle_comm'
           && existing.payload.source_agent_id === req.source_agent_id
           && existing.payload.message === req.message
-          && JSON.stringify(existing.payload.lifecycle_effect) === JSON.stringify(internal.lifecycleEffect)
+          && persistedLifecycleEffect?.effect_id === internal.lifecycleEffect.effect_id
+          && persistedLifecycleEffect?.source_birth_generation === internal.lifecycleEffect.source_birth_generation
+          && persistedLifecycleEffect?.source_pane_generation === internal.lifecycleEffect.source_pane_generation
+          && persistedLifecycleEffect?.target_birth_generation === internal.lifecycleEffect.target_birth_generation
+          && persistedLifecycleEffect?.target_pane_generation === internal.lifecycleEffect.target_pane_generation
           && JSON.stringify(existing.payload.target_agent_ids) === JSON.stringify(targets.map((target) => target.agent_id));
         if (!sameEffect) throw new Error('comm_message_id_conflict');
         if (!snapshot) throw new Error('comm_replay_snapshot_absent');

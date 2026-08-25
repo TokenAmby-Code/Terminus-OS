@@ -76,6 +76,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Remote close (`tx close`, overseer-gated): reap N processes individually, keep estate panes, seats → freelist; explicit stopped targets are intended closes, other live/unobservable targets refuse absent force |
 | POST   | `/agents/comm`          | Typed message or engine-neutral command/skill admission |
+| POST   | `/agents/comm/lifecycle-effect` | Generation-fenced, idempotent ordinary-comm actuator for a caller-owned lifecycle effect |
 | POST   | `/agents/comm/receipt`  | Event-driven, fixed 30-second delivery receipt rendezvous |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
