@@ -2612,64 +2612,19 @@ export class Daemon {
 
       await this.recoverScopedResets();
 
-      // Boot-observed Council damage must enter the same durable page-reset
-      // state machine as lifecycle ingress before any physical repair occurs.
-      // An empty estate is constructed below; there is no old page to retire.
-      if (generation !== 'empty') {
-        const expectedCouncil = [...TXD_WINDOWS.council].sort();
-        const liveCouncil = (await this.tmux.listSeats())
-          .filter((seat) => seat.seat_id.startsWith('council:') && seat.pane === 'live')
-          .map((seat) => seat.seat_id)
-          .sort();
-        const councilBindings = (await this.projections()).currentBindings
-          .filter((binding) => binding.seat_id.startsWith('council:'));
-        let bindingProjectionHealthy = true;
-        for (const binding of councilBindings) {
-          if (binding.pane_generation !== await this.tmux.seatGeneration(binding.seat_id)
-            || await this.tmux.seatTint(binding.seat_id) !== binding.tint) {
-            bindingProjectionHealthy = false;
-          }
-        }
-        for (const seat of TXD_WINDOWS.council) {
-          if (!councilBindings.some((binding) => binding.seat_id === seat)
-            && await this.tmux.seatTint(seat) !== null) {
-            bindingProjectionHealthy = false;
-          }
-        }
-        const councilHealthy = bindingProjectionHealthy
-          && liveCouncil.length === expectedCouncil.length
-          && liveCouncil.every((seat, index) => seat === expectedCouncil[index]);
-        if (!councilHealthy) {
-          const rotationId = crypto.randomUUID();
-          await this.store.append({
-            entity_type: 'estate',
-            entity_id: rotationId,
-            event_type: 'estate.scoped_reset_requested',
-            payload: {
-              scope: 'page',
-              seats: [...TXD_WINDOWS.council],
-              force: true,
-              bound_seats: (await this.projections()).currentBindings
-                .filter((binding) => binding.seat_id.startsWith('council:'))
-                .map((binding) => binding.seat_id)
-                .sort(),
-              bound_generations: councilBindings.map((binding) => ({
-                seat_id: binding.seat_id,
-                bound_seq: binding.bound_seq,
-                pane_generation: binding.pane_generation,
-              })),
-              foreground_workloads: [],
-              trigger: 'boot-observer',
-            },
-            provenance: this.prov('observer', null),
-            occurred_at: this.now(),
-          });
-        }
-      }
-      // The observer above may have opened a reset for a contradiction found
-      // during this same boot. Execute it through the same replayable path.
-      await this.recoverScopedResets();
-
+      // RULING (Emperor, 2026-08-25): restarts are not the sensitive operation;
+      // closing panes is. A txd restart arrives with sweeping expectation
+      // changes as often as every fleet merge — any merge in txd's workspace
+      // closure restarts this daemon — so aggressive reconciliation at THIS
+      // site risks dumping large swaths of the fleet to correct a one-row
+      // layout error. Boot therefore observes and attests: a page that still
+      // holds a live tagged pane is never rebuilt here, however far it has
+      // drifted. Its divergence is flagged as a contradiction below, named
+      // page-by-page on /ctl/health, and repaired only by an explicit operator
+      // verb that computes the page's foreground workloads and refuses when
+      // they are non-empty. A dead or missing seat is still repaired alone, in
+      // place, exactly as the runtime lifecycle ingress repairs it; a page
+      // with no live tagged pane left is the one class that is rebuilt.
       // Construction is all-or-nothing below the membrane: create on an empty
       // socket, accept the exact canonical shape, refuse every other estate.
       const estate = await this.tmux.ensureEstate();
@@ -2696,6 +2651,15 @@ export class Daemon {
         this.wakeCommDeliveryFailures(bootRetirements);
         await this.publishRetirements(bindings, 'estate_reset', bootRetiredAt);
       }
+      // Pane-scoped repair of seats that died while txd was down: each faulted
+      // seat retires alone and is respawned in place; siblings are untouched.
+      const repaired = await this.repairFaultedSeatsUnlocked(
+        Object.keys(TXD_WINDOWS) as TxdPage[], null, 'boot',
+      );
+      if (!repaired.ok && repaired.reason !== 'estate_already_canonical') {
+        console.error(JSON.stringify({ level: 'error', event: 'boot_seat_repair_incomplete', reason: repaired.reason, reset_seats: repaired.reset_seats }));
+      }
+      await this.attestEstateDivergenceUnlocked(null);
       // Seats that already carry a `reg.pane_created` fact. A prior boot could
       // have torn (createSeat committed, its append did not) — the pane persists
       // but the fact was lost. Presence WITHOUT attestation is that torn state.
@@ -3194,6 +3158,7 @@ export class Daemon {
     let councilRebuilt = false;
     const response = await this.locked(async () => {
       councilRebuilt = await this.recoverScopedResets();
+      await this.attestEstateDivergenceUnlocked(transportReceipt);
       const events = await this.store.readAll();
       const t0 = performance.now();
       const proj = buildProjections(events);
@@ -3570,7 +3535,7 @@ export class Daemon {
   private async resetEstateScopeUnlocked(
     req: EstateRotateRequest,
     transportReceipt: string | null,
-    trigger: 'operator' | 'pane-died' | 'pane-exited' | 'pane-killed' = 'operator',
+    trigger: 'operator' | 'pane-died' | 'pane-exited' | 'pane-killed' | 'boot' = 'operator',
   ): Promise<EstateRotateResponse> {
     const scope = req.scope;
     const empty = (reason: string): EstateRotateResponse => ({
@@ -3648,6 +3613,43 @@ export class Daemon {
     return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
   }
 
+  /**
+   * Every canonical page failing the acceptance predicate becomes one open
+   * contradiction on the page entity; a page observed canonical again closes
+   * its contradiction with a later fact on the same entity. Observation only:
+   * this never touches tmux.
+   */
+  private async attestEstateDivergenceUnlocked(transportReceipt: string | null): Promise<void> {
+    const divergences = await this.tmux.estateDivergences();
+    const open = new Map((await this.projections()).openContradictions
+      .filter((contradiction) => contradiction.entity_type === 'estate' && contradiction.kind === 'page_drift')
+      .map((contradiction) => [contradiction.entity_id, contradiction]));
+    for (const divergence of divergences) {
+      const detail = `${divergence.clause}: ${divergence.detail}`;
+      if (open.get(divergence.page)?.detail === detail) continue;
+      await this.store.append({
+        entity_type: 'estate',
+        entity_id: divergence.page,
+        event_type: 'reg.contradiction_flagged',
+        payload: { kind: 'page_drift', missing_attestation: null, detail, clause: divergence.clause },
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: this.now(),
+      });
+      console.error(JSON.stringify({ level: 'error', event: 'contradiction_flagged', p0: true, entity_id: divergence.page, kind: 'page_drift', detail }));
+    }
+    for (const page of open.keys()) {
+      if (divergences.some((divergence) => divergence.page === page)) continue;
+      await this.store.append({
+        entity_type: 'estate',
+        entity_id: page,
+        event_type: 'estate.page_canonical_observed',
+        payload: { page },
+        provenance: this.prov('observer', transportReceipt),
+        occurred_at: this.now(),
+      });
+    }
+  }
+
   async handleTmuxLifecycleEvent(
     req: TmuxLifecycleEventRequest,
     transportReceipt: string | null = null,
@@ -3670,6 +3672,25 @@ export class Daemon {
       } else {
         return refused('page_absent');
       }
+      const repaired = await this.repairFaultedSeatsUnlocked(pages, transportReceipt, req.event);
+      return { ...repaired, event: req.event, page };
+    });
+    if (result.ok && result.reconstructed) await this.announceVacantPerpetualSeats();
+    return result;
+  }
+
+  /**
+   * Repair every dead or missing seat on `pages` in place. Fault scope is the
+   * pane: the faulted seat retires loudly and alone while its siblings, which
+   * carry no fault, are never touched. Only a page with no tagged pane left
+   * has nothing to anchor a repair to; that class alone earns the page
+   * rebuild, and by then there is nobody left on the page to sacrifice.
+   */
+  private async repairFaultedSeatsUnlocked(
+    pages: TxdPage[],
+    transportReceipt: string | null,
+    trigger: 'pane-died' | 'pane-exited' | 'pane-killed' | 'boot',
+  ): Promise<Omit<TmuxLifecycleEventResponse, 'event' | 'page'>> {
       const observed = await this.tmux.listSeats();
       const reset_seats: string[] = [];
       const rotation_ids: string[] = [];
@@ -3691,19 +3712,14 @@ export class Daemon {
         const faulted = expected.filter((seat) => dead.has(seat) || missing.has(seat));
         if (faulted.length === 0) continue;
         faultedPages += 1;
-        // Fault scope is the pane. A dead pane is one faulted PROCESS whose
-        // remain-on-exit corpse is the respawn target; a missing pane is one
-        // killed TERMINAL whose surviving siblings anchor an in-place repair.
-        // Either way the seat retires loudly and alone — siblings, which
-        // carry no fault, are never touched. Only a page with no tagged pane
-        // left has nothing to anchor a repair to; that class alone earns the
-        // border-total page rebuild, and by then there is nobody left on the
-        // page for the rebuild to sacrifice.
+        // A dead pane is one faulted PROCESS whose remain-on-exit corpse is
+        // the respawn target; a missing pane is one killed TERMINAL whose
+        // surviving siblings anchor an in-place repair.
         if (pageObserved.length === 0) {
           const reset = await this.resetEstateScopeUnlocked(
             { schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: target },
             transportReceipt,
-            req.event,
+            trigger,
           );
           if (reset.rotation_id !== null) rotation_ids.push(reset.rotation_id);
           if (reset.accepted) reconstructed = true;
@@ -3719,7 +3735,7 @@ export class Daemon {
           const reset = await this.resetEstateScopeUnlocked(
             { schema_version: SCHEMA_VERSION, force: true, scope: 'pane', pane: seat },
             transportReceipt,
-            req.event,
+            trigger,
           );
           if (reset.rotation_id !== null) rotation_ids.push(reset.rotation_id);
           if (reset.accepted) reconstructed = true;
@@ -3735,14 +3751,11 @@ export class Daemon {
       }
       if (faultedPages === 0) {
         return {
-          ok: true, event: req.event, page, reconstructed: false, reset_seats: [], rotation_ids: [],
-          reason: page === null ? 'estate_already_canonical' : 'page_already_canonical',
+          ok: true, reconstructed: false, reset_seats: [], rotation_ids: [],
+          reason: pages.length > 1 ? 'estate_already_canonical' : 'page_already_canonical',
         };
       }
-      return { ok, event: req.event, page, reconstructed, reset_seats, rotation_ids, reason };
-    });
-    if (result.ok && result.reconstructed) await this.announceVacantPerpetualSeats();
-    return result;
+      return { ok, reconstructed, reset_seats, rotation_ids, reason };
   }
 
   /**
@@ -3885,6 +3898,9 @@ export class Daemon {
     // responding binary over a dead socket must not read healthy.
     const tmux_reachable = await this.tmux.reachable();
     const estate_generation = await this.tmux.estateGeneration();
+    const estate_divergence = estate_generation === 'foreign' || estate_generation === 'empty'
+      ? []
+      : await this.tmux.estateDivergences();
     const hooks = await this.tmux.lifecycleHookReadiness();
     const activation_pending = estate_generation === 'foreign';
     const open = proj.openContradictions.length;
@@ -3929,6 +3945,7 @@ export class Daemon {
       tmux_reachable,
       hooks,
       estate_generation,
+      estate_divergence,
       activation_pending,
       tints,
       comm_transport,
