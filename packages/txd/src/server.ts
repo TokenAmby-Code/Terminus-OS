@@ -405,7 +405,8 @@ export function buildRoutes(
         if (parsed.data.content !== undefined) {
           await daemon.commStop(parsed.data.agent_id, parsed.data.content, parsed.data.stop_event_id ?? null, receipt(req));
         }
-        return json({ ok: true, consumed: true, receipt: stopped });
+        const commanderEcho = await daemon.commanderEcho(parsed.data.agent_id, parsed.data.content, receipt(req));
+        return json({ ok: true, consumed: true, receipt: stopped, commander_echo: commanderEcho });
       },
     },
     {

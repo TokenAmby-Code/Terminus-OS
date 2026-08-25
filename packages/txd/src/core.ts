@@ -24,6 +24,8 @@ import {
   type ClipboardSelectionRequest,
   type CommAccepted,
   type CommCallback,
+  type CommanderEchoRefusalReason,
+  type CommanderEchoResult,
   type CommDeliveryReadResponse,
   COMM_DELIVERY_RECEIPT_TIMEOUT_MS,
   type CommHook,
@@ -96,7 +98,7 @@ import {
   type TxdStackPage,
 } from './estate.ts';
 import { acceptCommIdentity, sameIdentity } from './comm-identity.ts';
-import { commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
+import { commanderEchoFrame, commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
@@ -152,6 +154,17 @@ export type CommReceiptRuntime = {
 };
 export type CommAdmission = Pick<CommAccepted,
   'ok' | 'message_id' | 'ask_id' | 'source_agent_id' | 'targets' | 'event_ids'>;
+type CommanderEchoMetadata = {
+  source_stop_event_seq: number;
+  commander_identity: string;
+  target_agent_id: string;
+};
+type InternalComm = {
+  messageId: string;
+  sourceAgentIdInFrame: string;
+  expectedSourceBoundSeq: number;
+  commanderEcho: CommanderEchoMetadata;
+};
 const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
   now: () => Date.now(),
   schedule: (wake, delayMs) => {
@@ -225,6 +238,14 @@ function liveClaim(
 
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function stableUuid(namespace: string, ...parts: Array<string | number>): string {
+  const bytes = createHash('sha256').update(namespace).update('\0').update(parts.join('\0')).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
@@ -1379,7 +1400,8 @@ export class Daemon {
     req: CommRequest,
     transportReceipt: string | null = null,
     onAccepted?: (admission: CommAdmission) => void,
-  ): Promise<CommAccepted> {
+    internal?: InternalComm,
+  ): Promise<CommAccepted & { replayed?: boolean }> {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
@@ -1392,6 +1414,9 @@ export class Daemon {
       // refuses here rather than stage a frame that misattributes itself.
       if (sourceBindings.length !== 1) throw new Error('source_identity_ambiguous');
       const sourceBinding = sourceBindings[0]!;
+      if (internal && sourceBinding.bound_seq !== internal.expectedSourceBoundSeq) {
+        throw new Error('source_binding_changed');
+      }
       if (!sourceBinding.persona) throw new Error('source_persona_unresolved');
       const source: CommFrameSource = { persona: sourceBinding.persona, seat_id: sourceBinding.seat_id };
       const events = await this.store.readAll();
@@ -1429,22 +1454,83 @@ export class Daemon {
         : null;
       if (req.intent && !intentBinding?.engine) throw new Error(`target_engine_unresolved: ${targets[0]?.agent_id}`);
       const renderedIntent = req.intent ? renderCommIntent(req.intent, intentBinding!.engine!) : null;
-      const messageId = crypto.randomUUID();
+      const messageId = internal?.messageId ?? crypto.randomUUID();
       const askId = req.ask ? crypto.randomUUID() : null;
       const occurred_at = this.now();
+      const renderedMessageFrame = internal
+        ? commanderEchoFrame(messageId, source, internal.sourceAgentIdInFrame, req.message!)
+        : null;
+      const existing = events.find((event) => event.entity_id === messageId
+        && event.event_type === 'reg.comm_accepted');
+      if (existing) {
+        const snapshot = events.find((event) => event.event_type === 'reg.comm_target_snapshotted'
+          && event.payload.message_id === messageId);
+        const sameEcho = internal
+          && existing.payload.effect === 'commander_echo'
+          && existing.payload.source_agent_id === req.source_agent_id
+          && existing.payload.message === req.message
+          && JSON.stringify(existing.payload.commander_echo) === JSON.stringify(internal.commanderEcho)
+          && JSON.stringify(existing.payload.target_agent_ids) === JSON.stringify(targets.map((target) => target.agent_id));
+        if (!sameEcho) throw new Error('comm_message_id_conflict');
+        if (!snapshot) throw new Error('comm_replay_snapshot_absent');
+        const sent = events.filter((event) => event.entity_id === messageId
+          && event.event_type === 'act.comm_bytes_sent');
+        return {
+          messageId,
+          askId: null,
+          replyingToAsk: null,
+          source,
+          targets,
+          renderedIntent: null,
+          renderedMessageFrame,
+          eventIds: [existing.seq, snapshot.seq, ...sent.map((event) => event.seq)],
+          replayed: true,
+          replayComplete: sent.length === targets.length,
+          replayStaged: sent.length === targets.length
+            && sent.every((event) => event.payload.submit_verdict === 'staged'),
+        };
+      }
       const accepted = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted', payload: {
         source_agent_id: req.source_agent_id, source, target_agent_ids: targets.map((t) => t.agent_id), targets,
         ask_id: askId, reply_to_ask_id: replyingToAsk,
         kind: req.intent?.kind ?? 'message',
         name: req.intent?.name ?? null,
-        rendered_frame: renderedIntent?.frame ?? null,
+        rendered_frame: renderedIntent?.frame ?? renderedMessageFrame,
         message: req.message ?? renderedIntent!.frame,
         ...(req.intent ? { intent: req.intent } : {}),
+        ...(internal ? { effect: 'commander_echo', commander_echo: internal.commanderEcho } : {}),
       }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
       const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
-      return { messageId, askId, replyingToAsk, source, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
+      return {
+        messageId, askId, replyingToAsk, source, targets, renderedIntent, renderedMessageFrame,
+        eventIds: [accepted.seq, snapshot.seq], replayed: false, replayStaged: false,
+        replayComplete: false,
+      };
     });
+
+    if (prepared.replayed) {
+      if (!prepared.replayComplete) {
+        await this.terminalizeInactiveCommTransport(prepared.messageId);
+        const events = await this.store.readAll();
+        const sent = events.filter((event) => event.entity_id === prepared.messageId
+          && event.event_type === 'act.comm_bytes_sent');
+        prepared.eventIds.push(...sent.map((event) => event.seq)
+          .filter((seq) => !prepared.eventIds.includes(seq)));
+        prepared.replayStaged = sent.length === prepared.targets.length
+          && sent.every((event) => event.payload.submit_verdict === 'staged');
+      }
+      return {
+        ok: true,
+        message_id: prepared.messageId,
+        ask_id: null,
+        source_agent_id: req.source_agent_id,
+        targets: prepared.targets,
+        staged: prepared.replayStaged,
+        event_ids: prepared.eventIds,
+        replayed: true,
+      };
+    }
 
     // The journaled admission is the sender's durable correlation handle.
     // Expose it immediately after persistence: every later step is transport
@@ -1476,6 +1562,11 @@ export class Daemon {
       const plans = await this.locked(async () => {
         const proj = await this.projections();
         const events = await this.store.readAll();
+        if (internal && !proj.currentBindings.some((binding) => binding.registered
+          && binding.agent_id === req.source_agent_id
+          && binding.bound_seq === internal.expectedSourceBoundSeq)) {
+          throw new Error('source_binding_changed');
+        }
         const pendingResetSeats = this.pendingScopedResetSeats(events);
         for (const target of prepared.targets) {
           const binding = proj.currentBindings.find((row) => row.registered
@@ -1486,7 +1577,7 @@ export class Daemon {
         return prepared.targets.map((target) => {
           const binding = proj.currentBindings.find((row) => row.registered
             && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
-          const frame = prepared.renderedIntent?.frame
+          const frame = prepared.renderedIntent?.frame ?? prepared.renderedMessageFrame
             ?? commFrame(prepared.messageId, prepared.source, req.message!);
           // The target's turn state at send, stamped on the receipt: a frame
           // staged into a WORKING engine is queued into that turn, and only that
@@ -2377,6 +2468,249 @@ export class Daemon {
         && (e.payload.targets as CommTarget[]).some((t) => t.agent_id === agentId));
       for (const ask of asks) await this.assertCallback(ask.entity_id, agentId, content, 'stop', stopEventId, receipt);
     });
+  }
+
+  private async recordCommanderEchoFact(
+    eventType: 'act.commander_echo_suppressed' | 'act.commander_echo_refused',
+    input: {
+      source_agent_id: string;
+      source_stop_event_seq: number | null;
+      source_seat_id: string | null;
+      source_persona: string | null;
+      commander_identity: string | null;
+      target_agent_id: string | null;
+      reason: string;
+      message_id?: string | null;
+      bytes?: number;
+    },
+    receipt: string | null,
+  ): Promise<number> {
+    const factId = stableUuid(
+      eventType,
+      input.source_agent_id,
+      input.source_stop_event_seq ?? 'none',
+      input.commander_identity ?? 'none',
+      input.target_agent_id ?? 'none',
+      input.reason,
+    );
+    const entityId = `commander-echo:${factId}`;
+    const events = await this.store.readAll();
+    const existing = events.find((event) => event.entity_id === entityId && event.event_type === eventType);
+    if (existing) return existing.seq;
+    const event = await this.store.append({
+      entity_type: 'assertion',
+      entity_id: entityId,
+      event_type: eventType,
+      payload: {
+        ...input,
+        message_id: input.message_id ?? null,
+        bytes: input.bytes ?? 0,
+      },
+      provenance: this.prov('observer', receipt),
+      occurred_at: this.now(),
+    });
+    return event.seq;
+  }
+
+  async commanderEcho(
+    agentId: string,
+    content: string | undefined,
+    receipt: string | null,
+  ): Promise<CommanderEchoResult> {
+    const prepared = await this.locked(async (): Promise<
+      | { terminal: CommanderEchoResult }
+      | {
+          source: CurrentBinding;
+          stopSeq: number;
+          commanderIdentity: string;
+          target: CommTarget;
+          messageId: string;
+        }
+    > => {
+      const events = await this.store.readAll();
+      const stopEvent = [...events].reverse().find((event) =>
+        event.entity_id === agentId && event.event_type === 'act.stop_reported');
+      const stopSeq = stopEvent?.seq ?? null;
+      const current = buildProjections(events).currentBindings.filter((binding) =>
+        binding.registered && binding.agent_id === agentId);
+      const source = current.length === 1 ? current[0]! : null;
+      const result = (
+        status: CommanderEchoResult['status'],
+        reason: string | null,
+        eventIds: number[] = [],
+        commanderIdentity: string | null = source?.commander ?? null,
+        targetAgentId: string | null = null,
+        messageId: string | null = null,
+      ): CommanderEchoResult => ({
+        status,
+        reason,
+        source_agent_id: agentId,
+        source_seat_id: source?.seat_id ?? null,
+        source_persona: source?.persona ?? null,
+        source_stop_event_seq: stopSeq,
+        commander_identity: commanderIdentity,
+        target_agent_id: targetAgentId,
+        message_id: messageId,
+        event_ids: eventIds,
+      });
+      const terminalFact = async (
+        eventType: 'act.commander_echo_suppressed' | 'act.commander_echo_refused',
+        reason: string,
+        commanderIdentity: string | null = source?.commander ?? null,
+        targetAgentId: string | null = null,
+      ) => {
+        const eventId = await this.recordCommanderEchoFact(eventType, {
+          source_agent_id: agentId,
+          source_stop_event_seq: stopSeq,
+          source_seat_id: source?.seat_id ?? null,
+          source_persona: source?.persona ?? null,
+          commander_identity: commanderIdentity,
+          target_agent_id: targetAgentId,
+          reason,
+        }, receipt);
+        return result(eventType === 'act.commander_echo_refused' ? 'refused' : 'suppressed', reason, [eventId], commanderIdentity, targetAgentId);
+      };
+
+      if (content === undefined || content.length === 0) {
+        return { terminal: await terminalFact('act.commander_echo_suppressed', 'empty_output') };
+      }
+      if (current.length === 0) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'source_not_current', null) };
+      }
+      if (current.length > 1) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'source_identity_ambiguous', null) };
+      }
+      if (!source!.persona) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'source_persona_unresolved') };
+      }
+      const observedGeneration = await this.tmux.seatGeneration(source!.seat_id);
+      if (!source!.pane_generation || observedGeneration !== source!.pane_generation) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'source_generation_stale') };
+      }
+      if (!source!.commander) {
+        const root = source!.rank === 'overseer' || source!.rank === 'primarch';
+        return {
+          terminal: await terminalFact(
+            root ? 'act.commander_echo_suppressed' : 'act.commander_echo_refused',
+            root ? 'commander_root' : 'commander_absent',
+            null,
+          ),
+        };
+      }
+      if (stopSeq === null) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'source_not_current') };
+      }
+      const latestPrompt = [...events].reverse().find((event) =>
+        event.seq < stopSeq && event.entity_id === agentId && event.event_type === 'act.prompt_submitted');
+      const submittedMessageIds = Array.isArray(latestPrompt?.payload.message_ids)
+        ? latestPrompt.payload.message_ids
+        : [];
+      const echoInput = submittedMessageIds.some((messageId) => events.some((event) =>
+        event.entity_id === messageId
+        && event.event_type === 'reg.comm_accepted'
+        && event.payload.effect === 'commander_echo'));
+      if (echoInput) {
+        return { terminal: await terminalFact('act.commander_echo_suppressed', 'echo_loop_prevented') };
+      }
+
+      let commanderIdentity: string;
+      try {
+        commanderIdentity = acceptCommIdentity(source!.commander);
+      } catch {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'commander_identity_absent') };
+      }
+      const targets = this.commTargets(commanderIdentity, buildProjections(events));
+      if (targets.length === 0) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'commander_identity_absent', commanderIdentity) };
+      }
+      if (targets.length > 1) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'commander_identity_ambiguous', commanderIdentity) };
+      }
+      const target = targets[0]!;
+      if (target.agent_id === agentId) {
+        return { terminal: await terminalFact('act.commander_echo_refused', 'commander_self_target', commanderIdentity, target.agent_id) };
+      }
+      return {
+        source: source!,
+        stopSeq,
+        commanderIdentity,
+        target,
+        messageId: stableUuid('txd-commander-echo', stopSeq, target.agent_id),
+      };
+    });
+    if ('terminal' in prepared) return prepared.terminal;
+
+    const base = {
+      source_agent_id: prepared.source.agent_id!,
+      source_stop_event_seq: prepared.stopSeq,
+      source_seat_id: prepared.source.seat_id,
+      source_persona: prepared.source.persona,
+      commander_identity: prepared.commanderIdentity,
+      target_agent_id: prepared.target.agent_id,
+    };
+    try {
+      const accepted = await this.comm({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: prepared.source.agent_id!,
+        target: prepared.target.agent_id,
+        message: content!,
+        ask: false,
+        reply: false,
+      }, receipt, undefined, {
+        messageId: prepared.messageId,
+        sourceAgentIdInFrame: prepared.source.agent_id!,
+        expectedSourceBoundSeq: prepared.source.bound_seq,
+        commanderEcho: {
+          source_stop_event_seq: prepared.stopSeq,
+          commander_identity: prepared.commanderIdentity,
+          target_agent_id: prepared.target.agent_id,
+        },
+      });
+      if (accepted.replayed && accepted.staged) {
+        return {
+          status: 'deduped', reason: null, ...base,
+          message_id: accepted.message_id, event_ids: accepted.event_ids,
+        };
+      }
+      if (accepted.staged) {
+        return {
+          status: 'staged', reason: null, ...base,
+          message_id: accepted.message_id, event_ids: accepted.event_ids,
+        };
+      }
+      const events = await this.store.readAll();
+      const transport = [...events].reverse().find((event) =>
+        event.entity_id === accepted.message_id
+        && event.event_type === 'act.comm_bytes_sent'
+        && event.payload.target_agent_id === prepared.target.agent_id);
+      const reason = (transport?.payload.submit_verdict ?? 'transport_failed') as CommanderEchoRefusalReason;
+      const factId = await this.locked(() => this.recordCommanderEchoFact('act.commander_echo_refused', {
+        ...base,
+        reason,
+        message_id: accepted.message_id,
+        bytes: Number(transport?.payload.bytes ?? 0),
+      }, receipt));
+      return {
+        status: 'refused', reason, ...base,
+        message_id: accepted.message_id, event_ids: [...accepted.event_ids, factId],
+      };
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      const reason: CommanderEchoRefusalReason = raw === 'source_binding_changed'
+        || raw.startsWith('target_binding_changed:')
+        ? 'target_binding_changed'
+        : 'transport_failed';
+      const factId = await this.locked(() => this.recordCommanderEchoFact('act.commander_echo_refused', {
+        ...base,
+        reason,
+        message_id: prepared.messageId,
+        bytes: 0,
+      }, receipt));
+      return {
+        status: 'refused', reason, ...base,
+        message_id: prepared.messageId, event_ids: [factId],
+      };
+    }
   }
 
   async waitComm(req: CommWaitRequest): Promise<CommWaitResponse> {
@@ -3810,6 +4144,39 @@ export class Daemon {
         },
         provenance: prov, occurred_at,
       });
+      if (accepted.payload.effect === 'commander_echo') {
+        const echo = accepted.payload.commander_echo as Record<string, unknown> | undefined;
+        const echoFailureId = `commander-echo:${stableUuid(
+          'act.commander_echo_refused',
+          String(accepted.payload.source_agent_id),
+          Number(echo?.source_stop_event_seq ?? 0),
+          String(echo?.commander_identity ?? 'none'),
+          agentId,
+          reason,
+        )}`;
+        if (!events.some((event) => event.entity_id === echoFailureId
+          && event.event_type === 'act.commander_echo_refused')
+          && !inputs.some((input) => input.entity_id === echoFailureId)) {
+          inputs.push({
+            entity_type: 'assertion',
+            entity_id: echoFailureId,
+            event_type: 'act.commander_echo_refused',
+            payload: {
+              source_agent_id: accepted.payload.source_agent_id,
+              source_stop_event_seq: echo?.source_stop_event_seq ?? null,
+              source_seat_id: (accepted.payload.source as Record<string, unknown> | undefined)?.seat_id ?? null,
+              source_persona: (accepted.payload.source as Record<string, unknown> | undefined)?.persona ?? null,
+              commander_identity: echo?.commander_identity ?? null,
+              target_agent_id: agentId,
+              reason,
+              message_id: messageId,
+              bytes: receipt.payload.bytes ?? 0,
+            },
+            provenance: prov,
+            occurred_at,
+          });
+        }
+      }
     }
     return inputs;
   }
@@ -3931,12 +4298,22 @@ export class Daemon {
       state: unresolvedCommTransport.size === 0 ? 'ready' as const : 'degraded' as const,
       unresolved_target_agent_ids: [...unresolvedCommTransport.keys()].sort(),
     };
+    const refusals = [...proj.commanderEchoRefusals.values()].sort((a, b) => a.event_id - b.event_id);
+    const unresolvedEchoes = refusals.filter((refusal) =>
+      currentAgentIds.has(refusal.source_agent_id)
+      || (refusal.target_agent_id !== null && currentAgentIds.has(refusal.target_agent_id)));
+    const commander_echo = {
+      state: unresolvedEchoes.length === 0 ? 'ready' as const : 'degraded' as const,
+      unresolved: unresolvedEchoes,
+      refusals,
+    };
     return {
       ok: open === 0
         && tmux_reachable
         && hooks.state === 'ready'
         && estate_generation === 'canonical'
         && comm_transport.state === 'ready'
+        && commander_echo.state === 'ready'
         && tints.every((tint) => tint.state === 'ready'),
       service: 'txd' as const,
       schema_version: SCHEMA_VERSION,
@@ -3953,6 +4330,7 @@ export class Daemon {
       activation_pending,
       tints,
       comm_transport,
+      commander_echo,
     };
   }
 }

@@ -47,6 +47,7 @@ function checkpointPayload(projection: Projections, request: ResolvedEventLogCom
     abandoned_seats: [...projection.abandonedSeats],
     launch_compositions: [...projection.launchCompositions.values()],
     transport_claims: [...projection.transportClaims.values()],
+    commander_echo_refusals: [...projection.commanderEchoRefusals.values()],
   };
 }
 

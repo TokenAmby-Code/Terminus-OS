@@ -72,7 +72,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/clipboard/selection` | Commit bounded UTF-8 through txd to `tx-clipboard` and one validated attached client |
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` / page-less `pane-killed` ingress; repairs each faulted seat alone, rebuilding a page only when no tagged pane survives on it |
 | POST   | `/ingress/hooks/user_prompt_submit` | Receiving-engine delivery attestation for comm receipts |
-| POST   | `/ingress/hooks/stop`    | Receiving-engine stop fact for lifecycle and ask callbacks |
+| POST   | `/ingress/hooks/stop`    | Receiving-engine stop fact for lifecycle, ask callbacks, and commander echoes |
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Remote close (`tx close`, overseer-gated): reap N processes individually, keep estate panes, seats → freelist; explicit stopped targets are intended closes, other live/unobservable targets refuse absent force |
 | POST   | `/agents/comm`          | Typed message or engine-neutral command/skill admission |
@@ -97,6 +97,16 @@ each route is the ruled daemon behavior, unchanged.
   the CLI returns the bytes-sent receipt; a later hook stages the confirmation
   through the sender's ordinary agent input path and persists that follow-up's
   own `act.agent_input_injected` receipt. The wait has no delivery-state poll.
+- A fresh engine Stop with nonempty final output resolves the source's current
+  registered binding and its declared commander, re-attests the source pane
+  generation, and admits one ordinary comm to the commander's current agent.
+  Its frame names source persona, canonical seat, and agent id; bytes after the
+  frame boundary are the final output unchanged. The deterministic message id
+  joins source stop event and target commander agent, so hook replay and daemon
+  restart never repeat transport. Ask callbacks retain their own `ask_id` and
+  assertion: a commander echo is never an ask response. Suppressed loops/root
+  stops and typed refusals are durable; unresolved current-identity refusals
+  degrade the `commander_echo` health rung.
 - `tx comm <identity> command=<name> [-- args]` invokes the named slash
   command. `tx comm <identity> skill=<name> [-- args]` invokes a target skill.
   Callers never supply `/`, `$`, or an engine flag: txd resolves the target's

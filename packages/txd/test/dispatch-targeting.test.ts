@@ -147,7 +147,7 @@ test('a scoped reset releases an unbound composed birth for redispatch', async (
   await d.dispatch(request({ kind: 'seat', seat_id: 'palace:W' }));
 
   expect((await d.resetEstateScope({
-    schema_version: 12,
+    schema_version: 13,
     force: true,
     scope: 'pane',
     pane: 'palace:W',

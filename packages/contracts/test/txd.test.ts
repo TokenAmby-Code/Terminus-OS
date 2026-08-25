@@ -22,17 +22,19 @@ import {
 // The txd lifecycle vocabulary is CLOSED: these pins are the drift alarm.
 
 describe("txd lifecycle vocabulary", () => {
-  test("schema_version pins at 12 (seat abandonment vocabulary is singular)", () => {
-    expect(SCHEMA_VERSION).toBe(12);
+  test("schema_version pins at 13 (commander echo outcomes are typed)", () => {
+    expect(SCHEMA_VERSION).toBe(13);
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(45);
+    expect(EVENT_TYPES).toHaveLength(47);
     expect(EVENT_TYPES).toContain('act.comm_submit_driven');
     expect(EVENT_TYPES).toContain('act.agent_input_injected');
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
     expect(EVENT_TYPES).toContain('reg.placement_attested');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
+    expect(EVENT_TYPES).toContain('act.commander_echo_suppressed');
+    expect(EVENT_TYPES).toContain('act.commander_echo_refused');
     expect(EVENT_TYPES).toContain('act.comm_delivery_failed');
     expect(EVENT_TYPES).toContain('act.comm_delivery_confirmation_dead_lettered');
     expect(EVENT_TYPES).toContain('act.comm_watch_unarmed');
@@ -44,7 +46,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(EVENT_TYPES).toContain('reg.journal_publication_dropped');
     expect(EVENT_TYPES).toContain('estate.compaction_checkpoint');
     expect(REG_EVENT_NAMES).toHaveLength(21);
-    expect(ACT_EVENT_NAMES).toHaveLength(15);
+    expect(ACT_EVENT_NAMES).toHaveLength(17);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
       'scoped_reset_refused', 'scoped_reset_requested', 'scoped_reset_completed', 'scoped_reset_failed',
@@ -62,18 +64,18 @@ describe("txd lifecycle vocabulary", () => {
 
   test("mode transition input is semantic and logical, never raw tmux input", () => {
     expect(ModeTransitionRequestSchema.parse({
-      schema_version: 12,
+      schema_version: 13,
       target: "council:custodes",
       intent: "enter_plan",
       trigger: "preplan",
     })).toEqual({
-      schema_version: 12,
+      schema_version: 13,
       target: "council:custodes",
       intent: "enter_plan",
       trigger: "preplan",
     });
     expect(() => ModeTransitionRequestSchema.parse({
-      schema_version: 12,
+      schema_version: 13,
       target: "council:custodes",
       intent: "send_keys",
       trigger: "operator",
@@ -83,7 +85,7 @@ describe("txd lifecycle vocabulary", () => {
       { keys: ["BTab"] },
     ]) {
       expect(() => ModeTransitionRequestSchema.parse({
-        schema_version: 12,
+        schema_version: 13,
         target: "council:custodes",
         intent: "enter_plan",
         trigger: "preplan",
@@ -105,33 +107,33 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test('tmux lifecycle ingress accepts only typed pane events with canonical page input', () => {
-    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 12, event: 'pane-exited', page: 'palace' })).toEqual({
-      schema_version: 12, event: 'pane-exited', page: 'palace',
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 13, event: 'pane-exited', page: 'palace' })).toEqual({
+      schema_version: 13, event: 'pane-exited', page: 'palace',
     });
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 12, event: 'pane-vanished', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 13, event: 'pane-vanished', page: 'palace' })).toThrow();
   });
 
   test('pane-killed is the page-less kill-time event: tmux cannot name the page a kill emptied', () => {
-    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 12, event: 'pane-killed' })).toEqual({
-      schema_version: 12, event: 'pane-killed',
+    expect(TmuxLifecycleEventRequestSchema.parse({ schema_version: 13, event: 'pane-killed' })).toEqual({
+      schema_version: 13, event: 'pane-killed',
     });
     // A kill-time page claim is untrustworthy (hook context is the active
     // window) and a process-death event without its page is unscoped: both
     // shapes are refused, not silently accommodated.
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 12, event: 'pane-killed', page: 'palace' })).toThrow();
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 12, event: 'pane-died' })).toThrow();
-    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 12, event: 'pane-exited' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 13, event: 'pane-killed', page: 'palace' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 13, event: 'pane-died' })).toThrow();
+    expect(() => TmuxLifecycleEventRequestSchema.parse({ schema_version: 13, event: 'pane-exited' })).toThrow();
   });
 
   test("behavioral pin: comm payloads are opaque and have no caller-visible length boundary", () => {
-    const base = { schema_version: 12, source_agent_id: "source", target: "target", ask: false, reply: false };
+    const base = { schema_version: 13, source_agent_id: "source", target: "target", ask: false, reply: false };
     const large = `start\n${"λ quoted='yes' 🛡️\n".repeat(16_384)}end`;
     expect(CommRequestSchema.parse({ ...base, message: large }).message).toBe(large);
     expect(CommRequestSchema.parse({ ...base, message: "---\na: 1\n---\n{\"quoted\":true}" }).message).toContain('quoted');
   });
 
   test("behavioral pin: comm intent is exactly one engine-neutral command or skill", () => {
-    const base = { schema_version: 12, source_agent_id: "source", target: "target", ask: false, reply: false };
+    const base = { schema_version: 13, source_agent_id: "source", target: "target", ask: false, reply: false };
     expect(CommRequestSchema.parse({ ...base, intent: { kind: "command", name: "compact", args: ["hard"] } }).intent)
       .toEqual({ kind: "command", name: "compact", args: ["hard"] });
     expect(CommRequestSchema.parse({ ...base, intent: { kind: "skill", name: "openai-docs", args: [] } }).intent)
@@ -147,19 +149,19 @@ describe("txd lifecycle vocabulary", () => {
   test("behavioral pin: comm receipt wait has a fixed ceiling, two success tiers, and two typed refusals", () => {
     expect(COMM_DELIVERY_RECEIPT_TIMEOUT_MS).toBe(30_000);
     expect(CommReceiptWaitRequestSchema.parse({
-      schema_version: 12,
+      schema_version: 13,
       message_id: "message-1",
       source_agent_id: "source",
-    })).toEqual({ schema_version: 12, message_id: "message-1", source_agent_id: "source" });
+    })).toEqual({ schema_version: 13, message_id: "message-1", source_agent_id: "source" });
     expect(() => CommReceiptWaitRequestSchema.parse({
-      schema_version: 12,
+      schema_version: 13,
       message_id: "message-1",
       source_agent_id: "source",
       timeout_ms: 1,
     })).toThrow();
     expect(CommReceiptSchema.parse({
       ok: true,
-      schema_version: 12,
+      schema_version: 13,
       phase: "delivery_confirmed",
       message_id: "message-1",
       source_agent_id: "source",
@@ -176,7 +178,7 @@ describe("txd lifecycle vocabulary", () => {
     }).phase).toBe("delivery_confirmed");
     expect(CommReceiptSchema.parse({
       ok: true,
-      schema_version: 12,
+      schema_version: 13,
       phase: "bytes_sent",
       message_id: "message-2",
       source_agent_id: "source",
@@ -187,7 +189,7 @@ describe("txd lifecycle vocabulary", () => {
     }).phase).toBe("bytes_sent");
     const refused = {
       ok: false,
-      schema_version: 12,
+      schema_version: 13,
       phase: "transport_refused",
       message_id: "message-3",
       source_agent_id: "source",
@@ -209,7 +211,7 @@ describe("txd lifecycle vocabulary", () => {
     // comm as a delivered one, nor as one still in flight.
     expect(CommReceiptSchema.parse({
       ok: false,
-      schema_version: 12,
+      schema_version: 13,
       phase: "delivery_failed",
       message_id: "message-4",
       source_agent_id: "source",
@@ -244,6 +246,7 @@ describe("txd lifecycle vocabulary", () => {
       activation_pending: false,
       tints: [],
       comm_transport: { state: "ready", unresolved_target_agent_ids: [] },
+      commander_echo: { state: "ready", unresolved: [], refusals: [] },
     };
     expect(HealthSchema.parse(health).service).toBe("txd");
     expect(HealthSchema.parse(health).activation_pending).toBe(false);
@@ -252,7 +255,7 @@ describe("txd lifecycle vocabulary", () => {
 
   test("close requires exactly one selector and pins the overseer rank", () => {
     expect(CLOSE_REQUIRED_RANK).toBe('overseer');
-    const base = { schema_version: 12, source_agent_id: 'ov-1' };
+    const base = { schema_version: 13, source_agent_id: 'ov-1' };
     expect(CloseRequestSchema.parse({ ...base, targets: ['palace:W', 'w-2'], force: true }).targets).toHaveLength(2);
     expect(CloseRequestSchema.parse({ ...base, page: 'palace' }).page).toBe('palace');
     expect(CloseRequestSchema.parse({ ...base, all_idle: true }).all_idle).toBe(true);
@@ -265,6 +268,6 @@ describe("txd lifecycle vocabulary", () => {
     expect(() => CloseRequestSchema.parse({ ...base, page: 'palace', force: true })).toThrow();
     expect(() => CloseRequestSchema.parse({ ...base, all_idle: true, force: true })).toThrow();
     // The caller is named, always.
-    expect(() => CloseRequestSchema.parse({ schema_version: 12, targets: ['a'] })).toThrow();
+    expect(() => CloseRequestSchema.parse({ schema_version: 13, targets: ['a'] })).toThrow();
   });
 });
