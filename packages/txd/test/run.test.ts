@@ -152,6 +152,50 @@ test('a bare declared seat executes in the pane shell and returns the harvest', 
   expect(tmux.agentComposerRuns()).toEqual([]);
 });
 
+test('a bare stable seat accepts its page-less alias and runs only on the canonical seat', async () => {
+  const store = new MemoryEventStore();
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux);
+  await tmux.createSeat('council:custodes');
+  tmux.setShellRunResult('council:custodes', {
+    exit_code: 0,
+    stdout: 'alias proof\n',
+    stderr: '',
+    stdout_truncated: false,
+    stderr_truncated: false,
+  });
+
+  const result = await d.run({ schema_version: SCHEMA_VERSION, target: 'custodes', command: 'printf alias-proof' });
+
+  expect(result.mode).toBe('pane');
+  if (result.mode !== 'pane') throw new Error('unreachable');
+  await expect(result.pending).resolves.toMatchObject({
+    ok: true,
+    mode: 'pane',
+    seat_id: 'council:custodes',
+    stdout: 'alias proof\n',
+  });
+  expect(tmux.paneShellRuns()).toEqual([
+    { seat_id: 'council:custodes', run_id: expect.any(String), command: 'printf alias-proof' },
+  ]);
+});
+
+test('a bare stable seat accepts case variation and runs only on the canonical seat', async () => {
+  const store = new MemoryEventStore();
+  const tmux = new FakeTmux();
+  const d = new Daemon(store, tmux);
+  await tmux.createSeat('council:custodes');
+
+  const result = await d.run({ schema_version: SCHEMA_VERSION, target: 'COUNCIL:CUSTODES', command: 'echo case-proof' });
+
+  expect(result.mode).toBe('pane');
+  if (result.mode !== 'pane') throw new Error('unreachable');
+  await expect(result.pending).resolves.toMatchObject({ seat_id: 'council:custodes' });
+  expect(tmux.paneShellRuns()).toEqual([
+    { seat_id: 'council:custodes', run_id: expect.any(String), command: 'echo case-proof' },
+  ]);
+});
+
 test('an identity nothing answers to refuses loud', async () => {
   const { d } = estate();
   await expect(d.run({ schema_version: SCHEMA_VERSION, target: 'ghost-target', command: 'echo x' }))
