@@ -59,7 +59,10 @@ generation="$("$terminus/bin/terminus-install-generation" "$terminus" telemetryd
 new_hash="$({ cat "$unit_src"; printf 'generation=%s\n' "$generation"; } | sha256sum | cut -d' ' -f1)"
 old_hash="$(cat "$stamp" 2>/dev/null || true)"
 
-mkdir -p "$unit_dir" "$(dirname "$generation_dropin")" "$state_dir"
+mkdir -p "$unit_dir" "$(dirname "$generation_dropin")" "$state_dir" "$HOME/.local/bin"
+# tm links through the current-generation pointer, so the CLI is current the
+# moment its generation is, without a relink and without a daemon restart.
+ln -sfn "${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}/telemetryd/packages/telemetryd/src/cli.ts" "$HOME/.local/bin/tm"
 cp -f "$unit_src" "$unit_dst"
 printf '[Service]\nEnvironment=GIT_SHA=%s\n' "$sha" >"$generation_dropin"
 systemctl --user daemon-reload
