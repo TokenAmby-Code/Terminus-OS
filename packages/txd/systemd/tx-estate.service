@@ -18,7 +18,7 @@ Type=simple
 Environment=TXD_TMUX_SOCKET=k12
 # -D keeps the actual tmux server in the foreground and disables exit-empty.
 # systemd therefore supervises server liveness instead of a completed launcher.
-ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/runtimes/Terminus-OS/live/packages/txd/tmux/tx.conf
+ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/.local/lib/terminus-os/txd/packages/txd/tmux/tx.conf
 ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server
 Restart=always
 RestartSec=2
