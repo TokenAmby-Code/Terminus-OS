@@ -4,8 +4,13 @@
   "description": "Typed passive telemetry ingress for desktop and phone observations.",
   "type": "module",
   "private": true,
+  "bin": {
+    "telemetryd": "src/daemon.ts",
+    "tm": "src/cli.ts"
+  },
   "scripts": {
     "start": "bun src/daemon.ts",
+    "tm": "bun src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

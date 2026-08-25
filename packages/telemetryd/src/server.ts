@@ -15,6 +15,7 @@ import {
   type Probe,
 } from "@tokenamby-code/stc-contract/observation";
 import { runningRuntimeMarker } from "@tokenamby-code/stc-contract/version";
+import { SERVICE_IDENTITY } from "./identity.ts";
 import type { TelemetryStore } from "./store.ts";
 
 
@@ -80,7 +81,7 @@ export function makeServer(options: {
   ];
   assertProbeSet(probes);
   const observe = makeObservationHandler({
-    identity: { service: "telemetryd", daemon: "telemetryd", cli: null },
+    identity: SERVICE_IDENTITY,
     version: options.build.version,
     stcVersion: runningRuntimeMarker().version,
     machine: "k12-personal",

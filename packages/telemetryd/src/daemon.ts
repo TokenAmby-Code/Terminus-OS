@@ -1,6 +1,7 @@
 import { DEFAULT_DB_CONFIG, describeEndpoint } from "@terminus-os/db";
 import { notifyReady } from "@terminus-os/systemd";
 import { PostgresObservationStore } from "@tokenamby-code/stc-contract/observation";
+import { SERVICE_VERSION } from "./identity.ts";
 import { makeServer } from "./server.ts";
 import { PostgresTelemetryStore } from "./store.ts";
 
@@ -26,7 +27,7 @@ const observationStore = await PostgresObservationStore.connect({
   statementCeilingMs: 300_000,
   statementCeilingDerivedFrom: "fleet-wide 5-minute unit stop floor (Emperor ruling 2026-08-13)",
 });
-const build = { version: "0.1.0", git_sha: process.env.GIT_SHA ?? "unknown", bun: Bun.version };
+const build = { version: SERVICE_VERSION, git_sha: process.env.GIT_SHA ?? "unknown", bun: Bun.version };
 const server = makeServer({ store, observationStore, build, bind, port });
 
 console.log(JSON.stringify({ level: "info", event: "listening", service: "telemetryd", bind, port, db: describeEndpoint(db), build }));
