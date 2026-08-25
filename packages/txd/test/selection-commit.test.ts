@@ -89,6 +89,26 @@ test('selection failure reports byte count without content', async () => {
   expect(report).not.toContain(secret);
 });
 
+test('an empty selection is refused because tmux cannot emit an exact target-scoped clear', async () => {
+  const calls: Array<{ args: string[]; stdin?: Uint8Array }> = [];
+  const tmux = new RealTmux('test', {
+    run: async (_socket, args, stdin) => {
+      calls.push(stdin === undefined ? { args } : { args, stdin });
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    machineRegistry,
+    observeClipboardOrigin: async (tty) => observedWsl(tty),
+    audit: () => {},
+  });
+
+  await expect(tmux.commitClipboardSelection('', '/dev/pts/7')).resolves.toEqual({
+    outcome: 'transport_refused', origin: 'wsl', bytes: 0,
+  });
+  expect(calls).toEqual([{
+    args: ['display-message', '-c', '/dev/pts/7', 'clipboard transport_refused (0 bytes)'],
+  }]);
+});
+
 describe('real adapter selection path', () => {
   const socket = `tx-selection-${process.pid}`;
   const channel = `tx-selection-attached-${process.pid}`;
@@ -138,6 +158,7 @@ describe('real adapter selection path', () => {
     expect(await tmux.commitClipboardSelection(text, tty)).toEqual({ outcome: 'delivered', origin: 'wsl', bytes: bytes.byteLength });
     expect(Bun.spawnSync(['tmux', '-L', socket, 'save-buffer', '-b', 'tx-clipboard', '-']).stdout)
       .toEqual(Buffer.from(bytes));
+    expect(await tmux.commitClipboardSelection('', tty)).toEqual({ outcome: 'transport_refused', origin: 'wsl', bytes: 0 });
     Bun.spawnSync(['tmux', '-L', socket, 'kill-server']);
     await attached.exited;
     const rendered = await readFile(transcript);

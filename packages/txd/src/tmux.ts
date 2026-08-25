@@ -564,6 +564,10 @@ export class RealTmux implements TmuxControlPlane {
     this.binaryRunner = options.runBytes ?? runBytes;
     this.audit = options.audit ?? ((record) => console.info(JSON.stringify({ level: 'info', event: 'tmux_operation', ...record })));
     this.writeClient = options.writeClient ?? (async (target, data) => {
+      // tmux skips tty_set_selection for empty buffers. Refuse instead of
+      // claiming a clear that never reached the bound origin (or broadcasting
+      // a raw escape through a shared pane to every attached client).
+      if (data.byteLength === 0) throw new Error('clipboard origin transport refused');
       const loaded = await this.command(
         'clipboard_origin_transfer',
         'origin-client',

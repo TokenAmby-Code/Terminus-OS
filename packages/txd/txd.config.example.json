@@ -9,7 +9,6 @@
     "application_name": "txd"
   },
   "tmuxSocket": "k12",
-  "machineRegistryPath": "/home/tokenamby/runtimes/Token-Fleet/live/shared/generated/registry.json",
   "sshSeatTargets": {
     "pages": {
       "somnium": "k12-work",
