@@ -23,6 +23,13 @@ const SERVICES = [
   { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "bin/apply-busd" },
 ] as const;
 
+// Services whose daemon executes from an installed generation: the leg's
+// restart key is the generation digest terminus-install-generation prints, and
+// the unit's WorkingDirectory is the current-generation pointer that installer
+// maintains. The rest still fingerprint the checkout they execute from.
+const INSTALLED = SERVICES.filter(({ service }) => service === "telemetryd");
+const CHECKOUT_EXECUTED = SERVICES.filter(({ service }) => service !== "telemetryd");
+
 const read = (relative: string) => readFileSync(join(root, relative), "utf8");
 
 describe("apply leg and installed unit agree", () => {
@@ -37,12 +44,24 @@ describe("apply leg and installed unit agree", () => {
     expect(read(leg)).toContain(`grep -qx '${declared[0]}'`);
   });
 
-  test.each(SERVICES)("$service: the leg resolves the fingerprint helper inside this repository", ({ leg }) => {
+  test.each(CHECKOUT_EXECUTED)("$service: the leg resolves the fingerprint helper inside this repository", ({ leg }) => {
     const source = read(leg);
     expect(source).toContain('"$terminus/bin/terminus-package-fingerprint"');
     // The helper is no longer reachable through the fleet checkout: a leg that
     // still looked for it there would fail only on a live converge.
     expect(source).not.toContain("shared/bin/terminus-package-fingerprint");
+  });
+
+  test.each(INSTALLED)("$service: the leg realizes the generation its unit executes from", ({ service, unit, leg }) => {
+    const source = read(leg);
+    expect(source).toContain(`"$terminus/bin/terminus-install-generation" "$terminus" ${service} src/daemon.ts`);
+    expect(source).not.toContain("terminus-package-fingerprint");
+    expect(read(unit)).toContain(
+      `WorkingDirectory=%h/.local/lib/terminus-os/${service}/packages/${service}`,
+    );
+    // Promotion is the function rung, and the stamp is written only after it.
+    expect(source.indexOf("prove-service-function-ready")).toBeGreaterThan(source.indexOf("systemctl --user restart"));
+    expect(source.indexOf('echo "$new_hash" > "$stamp"')).toBeGreaterThan(source.indexOf("prove-service-function-ready"));
   });
 
   test.each(SERVICES)("$service: the leg carries no restart-control branch", ({ leg }) => {
@@ -63,9 +82,10 @@ describe("a service's restart key does not fold in its own installer", () => {
   // deliver a change the running process cannot observe.
   //
   // The legs live at the repository root instead, outside every package walk,
-  // so no prune rule is needed and none is added: this repository's helper stays
-  // byte-identical to the Token-Fleet copy it replaces, which is what makes
-  // "no stamp moves because of the move" checkable rather than argued.
+  // so no prune rule is needed and none is added. An installed generation
+  // carries the same set — its installer reads the closure from this helper
+  // and copies nothing from bin/ — which test/installed-generation.behavioral
+  // .test.ts holds directly against the realized tree.
   const fingerprint = (pkg: string) => {
     const result = spawnSync(join(root, "bin/terminus-package-fingerprint"), [root, pkg], {
       encoding: "utf8", maxBuffer: 1024 * 1024 * 256,

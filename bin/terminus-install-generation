@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# terminus-install-generation — realize one Terminus-OS package as an installed
+# generation: a frozen, production-only copy of everything it loads at runtime,
+# outside the deploy checkout, identified by the content of the tree.
+#
+#   terminus-install-generation <terminus-checkout> <package> <entrypoint>
+#
+# Prints the digest of the generation now current for <package>.
+#
+# Why a service runs from an installed tree and not from the checkout. The
+# checkout is a synchronization target: githubd advances it to every merged
+# candidate, and a dependency install there is a step that first destroys every
+# node_modules under it. A daemon executing from that tree is one refused step
+# away from a stripped runtime. An installed generation is built beside the
+# running one, validated whole, and only then made current — the running
+# process keeps its own tree until it is deliberately restarted into the new
+# one, and a refusal at any point leaves the current generation untouched.
+#
+# What a generation contains: the workspace root manifests (package.json,
+# bun.lock, bunfig.toml, tsconfig.json), the package plus its transitive
+# `workspace:*` closure with node_modules and test pruned, a manifest-only stub
+# for every other workspace member so the frozen lockfile still describes
+# exactly this workspace, and the production dependency install. Nothing under
+# the checkout's bin/ enters: an apply leg is not something a daemon loads.
+#
+# Identity is the tree itself. The digest folds file bytes, mode bits, directory
+# topology, and symlink targets, with mtimes and ownership normalized so a
+# re-copy of identical sources yields an identical digest. A leg that keys its
+# restart on that digest restarts exactly when the code a daemon would load
+# changed — never because the repository merged something else.
+set -euo pipefail
+export LC_ALL=C
+
+terminus="${1:?usage: terminus-install-generation <terminus-checkout> <package> <entrypoint>}"
+package="${2:?usage: terminus-install-generation <terminus-checkout> <package> <entrypoint>}"
+entrypoint="${3:?usage: terminus-install-generation <terminus-checkout> <package> <entrypoint>}"
+
+fleet="${FLEET_CHECKOUT:-$HOME/runtimes/Token-Fleet/live}"
+install_root="${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}"
+generations="$install_root/generations/$package"
+current="$install_root/$package"
+
+die() { echo "terminus-install-generation($package): $*" >&2; exit 1; }
+
+[[ -x "$fleet/shared/bin/fleet-packages" ]] \
+  || die "fleet-packages is not executable at $fleet/shared/bin/fleet-packages"
+bun="$HOME/.bun/bin/bun"
+[[ -x "$bun" ]] || die "canonical Bun missing or not executable: $bun"
+# fleet-packages hands the install to the bun on PATH; a realization unit's
+# PATH is not a login shell's, so the pinned runtime is put there by name.
+export PATH="$(dirname "$bun"):$PATH"
+for workspace_file in package.json bun.lock bunfig.toml tsconfig.json; do
+  [[ -f "$terminus/$workspace_file" ]] || die "workspace file $workspace_file is missing from $terminus"
+done
+[[ -f "$terminus/packages/$package/$entrypoint" ]] \
+  || die "entrypoint packages/$package/$entrypoint does not exist in $terminus"
+
+# The transitive `workspace:*` closure is the fingerprint helper's enumeration:
+# what a generation carries is exactly what a restart key walks.
+declare -A closure=()
+while IFS= read -r member; do
+  [[ -n "$member" ]] && closure["$member"]=1
+done < <("$terminus/bin/terminus-package-fingerprint" --closure "$terminus" "$package")
+((${#closure[@]})) || die "workspace closure of $package resolved empty"
+
+install -d "$generations"
+candidate="$(mktemp -d "$generations/.candidate.XXXXXXXX")"
+trap 'rm -rf "$candidate"' EXIT
+
+for workspace_file in package.json bun.lock bunfig.toml tsconfig.json; do
+  cp "$terminus/$workspace_file" "$candidate/$workspace_file"
+done
+for manifest in "$terminus"/packages/*/package.json; do
+  member="$(basename "$(dirname "$manifest")")"
+  install -d "$candidate/packages/$member"
+  if [[ -n "${closure[$member]:-}" ]]; then
+    # tar rather than cp -a: modes travel, the checkout's collaborative ACLs
+    # and ownership do not.
+    tar -C "$terminus/packages/$member" \
+      --exclude=./node_modules --exclude=./test -cf - . \
+      | tar -C "$candidate/packages/$member" -xf -
+  else
+    cp "$manifest" "$candidate/packages/$member/package.json"
+  fi
+done
+# Normalize what the daemon does not consume so a checkout whose modes drifted
+# under a shared worktree ACL cannot manufacture a new generation.
+find "$candidate" -type d -exec chmod 0755 {} +
+find "$candidate" -type f -perm /111 -exec chmod 0755 {} +
+find "$candidate" -type f ! -perm /111 -exec chmod 0644 {} +
+
+# The registry read credential is the machine's, projected for exactly this
+# install by fleet-packages; the install itself is frozen and production-only.
+"$fleet/shared/bin/fleet-packages" install "$candidate" \
+  --frozen-lockfile --production --backend=copyfile >/dev/null \
+  || die "frozen production install of the candidate failed"
+
+# The candidate proves it resolves before anything installed is touched: a
+# bundle from the entrypoint walks every static import through the candidate's
+# own node_modules and fails loudly on anything the closure does not carry.
+resolve_output="$(mktemp -d)"
+if ! resolve_report="$(cd "$candidate/packages/$package" \
+  && "$bun" build "$entrypoint" --target=bun --outdir="$resolve_output" 2>&1)"; then
+  rm -rf "$resolve_output"
+  printf '%s\n' "$resolve_report" >&2
+  die "candidate entrypoint packages/$package/$entrypoint does not resolve from the installed closure"
+fi
+rm -rf "$resolve_output"
+
+digest="$(tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+  --format=gnu -cf - -C "$candidate" . | sha256sum | cut -d' ' -f1)"
+generation="$generations/$digest"
+if [[ -d "$generation" ]]; then
+  rm -rf "$candidate"
+else
+  mv "$candidate" "$generation"
+fi
+trap - EXIT
+
+# The current pointer swaps atomically; a process already running from the
+# previous generation keeps its tree (its cwd holds the directory) until the
+# leg that owns its restart decides to move it.
+if [[ "$(readlink "$current" 2>/dev/null || true)" != "generations/$package/$digest" ]]; then
+  pointer="$(mktemp -u "$install_root/.$package.XXXXXXXX")"
+  ln -s "generations/$package/$digest" "$pointer"
+  mv -T "$pointer" "$current"
+fi
+
+# Retire every generation that is neither current nor the working directory of
+# a live process — the one this user's daemons are still executing from stays
+# until that daemon is restarted out of it.
+declare -A occupied=()
+for proc in /proc/[0-9]*; do
+  cwd="$(readlink "$proc/cwd" 2>/dev/null || true)"
+  [[ "$cwd" == "$generations/"* ]] || continue
+  occupied["${cwd#"$generations/"}"]=1
+done
+for retired in "$generations"/*; do
+  [[ -d "$retired" ]] || continue
+  name="$(basename "$retired")"
+  [[ "$name" == "$digest" ]] && continue
+  held=0
+  for occupant in "${!occupied[@]}"; do
+    [[ "$occupant" == "$name" || "$occupant" == "$name/"* ]] && held=1
+  done
+  ((held)) || rm -rf "$retired"
+done
+
+printf '%s\n' "$digest"

@@ -16,8 +16,13 @@ test("telemetryd's start job completes on the daemon's own readiness edge", () =
   expect(unit).toMatch(/^NotifyAccess=main$/m);
 });
 
-test("telemetryd runs from the deploy-owned Terminus runtime with Fleet Bun", () => {
-  expect(unit).toContain("WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/telemetryd");
+// The daemon executes from the installed generation apply-telemetryd realizes,
+// never from the checkout githubd synchronizes: a dependency install there
+// first destroys every node_modules under it, and a daemon running out of that
+// tree is one refused realization step away from a stripped runtime.
+test("telemetryd runs from its installed generation with Fleet Bun", () => {
+  expect(unit).toContain("WorkingDirectory=%h/.local/lib/terminus-os/telemetryd/packages/telemetryd");
+  expect(unit).not.toContain("WorkingDirectory=%h/runtimes/");
   expect(unit).toContain("ExecStart=%h/.bun/bin/bun src/daemon.ts");
   expect(unit).toContain("Restart=on-failure");
 });

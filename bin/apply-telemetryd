@@ -3,6 +3,11 @@
 #
 # telemetryd is deployed on exactly one machine, so Terminus-OS owns it whole:
 # source, unit, and this leg. Every other machine is a loud no-op.
+#
+# The daemon executes from an installed generation, never from the checkout:
+# terminus-install-generation builds and validates the candidate beside the
+# running tree and only then makes it current, so a refusal anywhere in this
+# leg leaves the serving generation exactly as it was.
 set -euo pipefail
 
 machine="${1:?usage: apply-telemetryd <machine>}"
@@ -21,8 +26,8 @@ if [[ ! -f "$unit_src" ]] || [[ ! -d "$source_dir" ]]; then
   exit 0
 fi
 
-grep -qx 'WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/telemetryd' "$unit_src" || {
-  echo "apply($machine): telemetryd WorkingDirectory is not the deploy-owned runtime" >&2
+grep -qx 'WorkingDirectory=%h/.local/lib/terminus-os/telemetryd/packages/telemetryd' "$unit_src" || {
+  echo "apply($machine): telemetryd WorkingDirectory is not the installed generation this leg realizes" >&2
   exit 1
 }
 grep -qx 'ExecStart=%h/.bun/bin/bun src/daemon.ts' "$unit_src" || {
@@ -41,16 +46,22 @@ grep -qx 'Restart=on-failure' "$unit_src" || {
 unit_dir="$HOME/.config/systemd/user"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
 unit_dst="$unit_dir/telemetryd.service"
+generation_dropin="$unit_dir/telemetryd.service.d/generation.conf"
 stamp="$state_dir/telemetryd.applied.sha256"
 sha="$(git -C "$terminus" rev-parse HEAD)"
-# Keyed on telemetryd's real dependency set (its package plus the transitive
-# workspace closure it imports), never repository HEAD — the same over-broad
-# key that restarted busd on unrelated Terminus-OS merges lived here too.
-new_hash="$({ cat "$unit_src"; "$terminus/bin/terminus-package-fingerprint" "$terminus" telemetryd; } | sha256sum | cut -d' ' -f1)"
+
+# The generation digest is the restart key: it moves exactly when the tree the
+# daemon would load changed, and an unrelated Terminus-OS merge leaves it — and
+# the daemon — alone. The checkout SHA reaches the daemon as its build stamp
+# through a drop-in the digest does not fold, so /health names the checkout a
+# running generation was realized from without every merge forcing a restart.
+generation="$("$terminus/bin/terminus-install-generation" "$terminus" telemetryd src/daemon.ts)"
+new_hash="$({ cat "$unit_src"; printf 'generation=%s\n' "$generation"; } | sha256sum | cut -d' ' -f1)"
 old_hash="$(cat "$stamp" 2>/dev/null || true)"
 
-mkdir -p "$unit_dir" "$state_dir"
+mkdir -p "$unit_dir" "$(dirname "$generation_dropin")" "$state_dir"
 cp -f "$unit_src" "$unit_dst"
+printf '[Service]\nEnvironment=GIT_SHA=%s\n' "$sha" >"$generation_dropin"
 systemctl --user daemon-reload
 systemctl --user enable telemetryd.service
 if [[ "$new_hash" != "$old_hash" ]] || ! systemctl --user is-active --quiet telemetryd.service; then
@@ -58,5 +69,14 @@ if [[ "$new_hash" != "$old_hash" ]] || ! systemctl --user is-active --quiet tele
 else
   echo "apply($machine): telemetryd unchanged and active — no restart"
 fi
+
+# Promotion is the function rung, never the restart returning: the restart
+# blocked on the daemon's own readiness edge, so a probe that is not ready here
+# is a verdict. The stamp is withheld on refusal, so the generation is never
+# recorded as converged and the next converge restarts and re-reads it.
+"$fleet/shared/bin/prove-service-function-ready" telemetryd "$machine" || {
+  echo "apply($machine): telemetryd generation ${generation:0:12} did NOT promote; stamp withheld" >&2
+  exit 1
+}
 echo "$new_hash" > "$stamp"
-echo "apply($machine): telemetryd converged (terminus sha ${sha:0:9})"
+echo "apply($machine): telemetryd converged (generation ${generation:0:12}, terminus sha ${sha:0:9})"
