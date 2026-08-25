@@ -4,7 +4,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { RealTmux, type TmuxAuditRecord } from '../src/tmux.ts';
+import { FakeTmux, RealTmux, type TmuxAuditRecord } from '../src/tmux.ts';
 
 const machineRegistry = { machines: { wsl: { tailscaleIp: '100.66.10.74' } } };
 const observedWsl = (tty: string) => ({
@@ -107,6 +107,15 @@ test('an empty selection is refused because tmux cannot emit an exact target-sco
   expect(calls).toEqual([{
     args: ['display-message', '-c', '/dev/pts/7', 'clipboard transport_refused (0 bytes)'],
   }]);
+});
+
+test('the fake adapter cannot claim an empty selection was delivered', async () => {
+  const tmux = new FakeTmux();
+  tmux.attachClient('/dev/pts/7');
+  await expect(tmux.commitClipboardSelection('', '/dev/pts/7')).resolves.toEqual({
+    outcome: 'transport_refused', origin: 'wsl', bytes: 0,
+  });
+  expect(tmux.selectionDeliveries()).toEqual([]);
 });
 
 describe('real adapter selection path', () => {

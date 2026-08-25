@@ -107,6 +107,8 @@ describe('systemd/txd.service pins', () => {
 
   test('clipboard origin identity resolves through generated fleet machine configuration', () => {
     pin('Environment=TXD_MACHINE_REGISTRY=%h/runtimes/Token-Fleet/live/shared/generated/registry.json');
+    pin('AssertPathExists=%h/runtimes/Token-Fleet/live/shared/generated/registry.json');
+    pin('ExecStartPre=/usr/bin/test -r %h/runtimes/Token-Fleet/live/shared/generated/registry.json');
   });
 });
 

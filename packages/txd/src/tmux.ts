@@ -2428,6 +2428,7 @@ export class FakeTmux implements TmuxControlPlane {
   async commitClipboardSelection(text: string, clientTty: string): Promise<ClipboardOriginOutcome> {
     const bytes = new TextEncoder().encode(text).byteLength;
     if (!this.attachedClients.has(clientTty)) return { outcome: 'disconnected_origin', bytes };
+    if (bytes === 0) return { outcome: 'transport_refused', origin: 'wsl', bytes };
     await this.loadClipboard(text);
     this.deliveredSelections.push(clientTty);
     return { outcome: 'delivered', origin: 'wsl', bytes };
