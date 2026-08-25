@@ -4,6 +4,7 @@
   "description": "txd — the estate daemon for k12 boxes: authoritative, event-sourced tmux control plane (Bun/TypeScript). tmuxctld successor; tx is its rote auxiliary client.",
   "type": "module",
   "private": true,
+  "exports": { "./identity": "./src/identity.ts" },
   "scripts": {
     "start": "bun src/daemon.ts",
     "test": "bun test",
@@ -12,7 +13,8 @@
   "dependencies": {
     "@terminus-os/contracts": "workspace:*",
     "@terminus-os/db": "workspace:*",
-    "@terminus-os/systemd": "workspace:*"
+    "@terminus-os/systemd": "workspace:*",
+    "@tokenamby-code/stc-contract": "1.3.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

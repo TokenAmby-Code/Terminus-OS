@@ -93,7 +93,7 @@ test("health is the shared walk over the declared postgres and ingress probes", 
   expect(response.status).toBe(200);
   expect(body.ok).toBe(true);
   // The marker is the executing package's own version, not a manifest read.
-  expect(body.stc_version).toBe("1.2.1");
+  expect(body.stc_version).toBe("1.3.0");
   // Every walk lands in the STC durable observation store, one reading per probe.
   expect(observationStores.at(-1)?.walks.map((walk) => walk.map((reading) => reading.name))).toEqual([
     ["postgres", "telemetry-ingress"],

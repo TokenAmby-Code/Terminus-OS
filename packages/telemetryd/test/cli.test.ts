@@ -32,7 +32,7 @@ async function tm(args: string[], env: Record<string, string> = {}) {
 test("tm version names the identity and the executing STC package, touching no daemon", async () => {
   const result = await tm(["version"], { TM_URL: "http://127.0.0.1:1" });
   expect(result.code).toBe(0);
-  expect(JSON.parse(result.out)).toEqual({ service: "telemetryd", daemon: "telemetryd", cli: "tm", version: "0.1.0", stc_version: "1.2.1" });
+  expect(JSON.parse(result.out)).toEqual({ service: "telemetryd", daemon: "telemetryd", cli: "tm", version: "0.1.0", stc_version: "1.3.0" });
 });
 
 test("tm health exits 0 on a green daemon and 1 on a red one, printing the report", async () => {

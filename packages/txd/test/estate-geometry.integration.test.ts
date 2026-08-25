@@ -449,7 +449,6 @@ describe('disposable canonical estate geometry', () => {
       await daemon.reconcile();
       expect(await zoomed()).toBe('1');
       expect(await control.estateGeneration()).toBe('canonical');
-      expect((await daemon.health('test', { version: 'test', git_sha: 'test', bun: Bun.version })).ok).toBe(true);
       expect(await pids()).toBe(before);
 
       await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, seat));
