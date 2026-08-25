@@ -84,11 +84,42 @@ describe("a service's restart key does not fold in its own installer", () => {
     expect(paths.some((path) => path.startsWith(`packages/${service}/src/`))).toBe(true);
   });
 
-  test("no package carries a bin/ directory that a future leg could be filed into", () => {
+  test("no apply leg is filed under packages/ at all", () => {
+    // The first two tests only see the three services fingerprinted here. This
+    // one holds the convention itself, so a leg for a service added later
+    // cannot be filed into a package walk that nothing in this file inspects.
+    // packages/tx/bin/ is a legitimate CLI helper directory: the rule is about
+    // apply legs, not about bin/.
     const listed = spawnSync("git", ["ls-files", "-z", "--", "packages"], { cwd: root, encoding: "utf8" });
     expect(listed.status).toBe(0);
     const offenders = listed.stdout.split("\0").filter(Boolean)
-      .filter((path) => path.split("/").includes("bin"));
+      .filter((path) => (path.split("/").pop() ?? "").startsWith("apply-"));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("leg invariants that travelled with the legs", () => {
+  // These held in Token-Fleet against its copies of the same scripts. Their
+  // subject moved here, so they move here — a deleted pin is lost coverage, and
+  // a Token-Fleet test cannot read this repository (its CI has no checkout of
+  // it).
+
+  test("no leg re-implements the fleet Bun runtime pin", () => {
+    // Exactly one thing links the pinned Bun onto the command PATH: Token-Fleet's
+    // apply-fleet-runtime. A leg that did it too would silently take ownership of
+    // the fleet-wide version.
+    for (const { leg } of SERVICES) {
+      expect(read(leg)).not.toContain('ln -sfn "$HOME/.bun/bin/bun"');
+    }
+  });
+
+  test("txd's restart key includes the installed registration configuration", () => {
+    // txd loads its allocation generation from the systemd EnvironmentFile.
+    // Omitting it left txd serving a stale allocation digest after
+    // registrationd restarted into a new one.
+    const leg = read("bin/apply-txd");
+    expect(leg).toContain('registration_env="$HOME/.config/token-fleet/txd-registration.env"');
+    expect(leg).toContain('cat "$registration_env"');
+    expect(leg).toContain("terminus-package-fingerprint");
   });
 });
