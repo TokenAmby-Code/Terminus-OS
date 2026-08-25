@@ -2758,9 +2758,11 @@ export class Daemon {
 
       const verdicts: CloseVerdict[] = [];
       const closeOne = async (target: string, binding: CurrentBinding): Promise<void> => {
-        // Reap FIRST; attest only on a confirmed kill (executeClose is the SAME
-        // path the reflexive auto-close fires — one close mechanism, no bespoke
-        // variant).
+        // Reap FIRST; attest only on a confirmed kill. executeClose is the one
+        // close mechanism for bound seats: abortRegistration (which passes
+        // signalUnregistered=false) and the bound-seat branch of dead-stack-seat
+        // reconciliation take this same path; an unbound dead stack seat is
+        // killed and abandoned without it.
         const closed = await this.executeClose(binding, transportReceipt);
         verdicts.push({
           target,
@@ -2986,7 +2988,9 @@ export class Daemon {
     });
   }
 
-  // The generic close mechanism, shared by /agents/close and the reflexive auto-close.
+  // The generic close mechanism for a bound seat, shared by POST /agents/close,
+  // abortRegistration (signalUnregistered=false), and the bound-seat branch of
+  // reconcileDeadStackSeatsUnlocked.
   // Reap-first, attest-after: respawn-pane -k keeps the estate pane (bare shell)
   // so the seat survives and returns to the freelist. On a confirmed reap, ONE
   // transaction writes retired + process_reaped + seat_cleared (seat_cleared frees

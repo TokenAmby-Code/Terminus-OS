@@ -60,6 +60,10 @@ test('lifecycle hook commands shell-quote the tmux-supplied page name', async ()
   for (const command of installed) {
     expect(command).toContain('#{q:window_name}');
     expect(command).not.toContain('\\"#{window_name}\\"');
+    // `tx inspect hooks` reads the txd-tmux-hook journal identifier, so every
+    // installed hook captures through systemd-cat exactly as tx.conf's kill
+    // hooks do — otherwise a firing is invisible to the diagnostic.
+    expect(command).toContain('2>&1 | systemd-cat --identifier=txd-tmux-hook || true');
   }
 });
 
