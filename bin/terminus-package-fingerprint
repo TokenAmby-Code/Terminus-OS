@@ -37,7 +37,15 @@
 set -euo pipefail
 export LC_ALL=C
 
-terminus="${1:?usage: terminus-package-fingerprint <terminus-checkout> <package>...}"
+# `--closure` prints the resolved package set instead of the byte stream, one
+# name per line, sorted. terminus-install-generation reads it so the set a
+# generation carries is the set a fingerprint walks — one enumeration, not two.
+closure_only=0
+if [[ "${1:-}" == --closure ]]; then
+  closure_only=1
+  shift
+fi
+terminus="${1:?usage: terminus-package-fingerprint [--closure] <terminus-checkout> <package>...}"
 shift
 (($#)) || {
   echo "terminus-package-fingerprint: at least one package name is required" >&2
@@ -74,6 +82,11 @@ while ((${#queue[@]})); do
     | .key | sub("^@terminus-os/"; "")
   ' "$manifest")
 done
+
+if ((closure_only)); then
+  printf '%s\n' "${closure[@]}" | sort
+  exit 0
+fi
 
 emit() {
   local path="$1"
