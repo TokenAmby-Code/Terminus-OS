@@ -75,16 +75,22 @@ export async function runSelectionCommit(
       'POST',
       '/ctl/clipboard/selection',
       request.data,
-      { sensitive: true, maxResponseBytes: 4096 },
+      { sensitive: true, typedSensitiveRefusal: true, maxResponseBytes: 4096 },
     );
     const response = ClipboardSelectionResponseSchema.safeParse(raw);
     if (!response.success || response.data.bytes !== bytes.byteLength) {
       throw new Error('txd returned an invalid clipboard selection receipt');
     }
+    if (!response.data.ok) {
+      dependencies.stderr(`tx-selection: clipboard ${response.data.outcome}`);
+      return 1;
+    }
     dependencies.stdout(JSON.stringify({
       ok: true,
       target: response.data.target,
       direction: 'selection',
+      origin: response.data.origin,
+      outcome: response.data.outcome,
       bytes: response.data.bytes,
     }));
     return 0;

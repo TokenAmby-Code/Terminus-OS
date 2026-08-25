@@ -158,7 +158,32 @@ export const ClipboardPullResponseSchema = z.object({
 });
 export type ClipboardPullResponse = z.infer<typeof ClipboardPullResponseSchema>;
 
-export const ClipboardSelectionResponseSchema = ClipboardPullResponseSchema;
+const ClipboardSelectionBase = z.object({
+  target: z.string().min(1),
+  buffer_name: z.literal(CLIPBOARD_BUFFER_NAME),
+  bytes: z.number().int().nonnegative().max(MAX_CLIPBOARD_BYTES),
+});
+export const ClipboardSelectionResponseSchema = z.discriminatedUnion('outcome', [
+  ClipboardSelectionBase.extend({
+    ok: z.literal(true),
+    outcome: z.literal('delivered'),
+    origin: z.enum(['wsl', 'phone']),
+  }),
+  ClipboardSelectionBase.extend({
+    ok: z.literal(false),
+    outcome: z.literal('unsupported_origin'),
+    origin: z.string().min(1).optional(),
+  }),
+  ClipboardSelectionBase.extend({
+    ok: z.literal(false),
+    outcome: z.literal('disconnected_origin'),
+  }),
+  ClipboardSelectionBase.extend({
+    ok: z.literal(false),
+    outcome: z.literal('transport_refused'),
+    origin: z.enum(['wsl', 'phone']),
+  }),
+]);
 export type ClipboardSelectionResponse = z.infer<typeof ClipboardSelectionResponseSchema>;
 
 export const ClipboardPushResponseSchema = ClipboardPullResponseSchema.extend({

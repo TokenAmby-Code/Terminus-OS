@@ -18,6 +18,8 @@ test('selection commit is a sensitive typed txd request with no content output',
         target: 'k12-test',
         buffer_name: 'tx-clipboard',
         bytes: new TextEncoder().encode(content).byteLength,
+        outcome: 'delivered',
+        origin: 'wsl',
       };
     },
     stdout: (line) => stdout.push(line),
@@ -28,7 +30,7 @@ test('selection commit is a sensitive typed txd request with no content output',
     method: 'POST',
     path: '/ctl/clipboard/selection',
     body: { schema_version: 13, client_tty: '/dev/pts/7', content },
-    options: { sensitive: true, maxResponseBytes: 4096 },
+    options: { sensitive: true, typedSensitiveRefusal: true, maxResponseBytes: 4096 },
   }]);
   expect(stdout.join('\n')).not.toContain(content);
   expect(stderr).toEqual([]);

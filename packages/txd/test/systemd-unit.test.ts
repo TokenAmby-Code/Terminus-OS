@@ -104,6 +104,12 @@ describe('systemd/txd.service pins', () => {
   test('the generic agent wrapper resolves through the converged Fleet location', () => {
     pin('Environment=TXD_AGENT_WRAPPER=%h/runtimes/Token-Fleet/live/shared/bin/agent-wrapper');
   });
+
+  test('clipboard origin identity resolves through generated fleet machine configuration', () => {
+    pin('Environment=TXD_MACHINE_REGISTRY=%h/runtimes/Token-Fleet/live/shared/generated/registry.json');
+    pin('AssertPathExists=%h/runtimes/Token-Fleet/live/shared/generated/registry.json');
+    pin('ExecStartPre=/usr/bin/test -r %h/runtimes/Token-Fleet/live/shared/generated/registry.json');
+  });
 });
 
 describe('systemd/tx-estate.service boundary', () => {

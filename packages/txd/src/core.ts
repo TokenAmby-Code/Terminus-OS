@@ -116,6 +116,7 @@ import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
 import type { TmuxControlPlane } from './tmux.ts';
+import type { ClipboardOriginOutcome } from './clipboard-origin.ts';
 import type { TxdPublishedEventType } from './events.ts';
 
 // Reg-audit attestation set DEFINED SO FAR (door step 1). The refusal machinery
@@ -1259,11 +1260,11 @@ export class Daemon {
     });
   }
 
-  async clipboardSelection(req: ClipboardSelectionRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME; bytes: number }> {
+  async clipboardSelection(req: ClipboardSelectionRequest): Promise<{ buffer_name: typeof CLIPBOARD_BUFFER_NAME } & ClipboardOriginOutcome> {
     return this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
-      const bytes = await this.tmux.commitClipboardSelection(req.content, req.client_tty);
-      return { buffer_name: CLIPBOARD_BUFFER_NAME, bytes };
+      const result = await this.tmux.commitClipboardSelection(req.content, req.client_tty);
+      return { buffer_name: CLIPBOARD_BUFFER_NAME, ...result };
     });
   }
 
@@ -1917,19 +1918,22 @@ export class Daemon {
         if (!binding.agent_id || !binding.engine) throw new Error(`engine_unattested: ${req.target}`);
         return { kind: 'agent' as const, binding };
       }
+      const bareSeatId = logicalIdentity.kind === 'stable_seat'
+        ? logicalIdentity.seat_id
+        : req.target;
       // No registered binding answers to this identity, so the only reading
       // left is a bare declared seat. Anything else is absent — loud.
-      if (!TXD_ESTATE.includes(req.target)) throw new Error(`identity_absent: ${req.target}`);
-      if (proj.abandonedSeats.has(req.target)) throw new Error(`seat_abandoned: ${req.target}`);
+      if (!TXD_ESTATE.includes(bareSeatId)) throw new Error(`identity_absent: ${req.target}`);
+      if (proj.abandonedSeats.has(bareSeatId)) throw new Error(`seat_abandoned: ${bareSeatId}`);
       // A binding mid-birth is an agent arriving; racing its registration
       // with a shell line would type into its wrapper.
-      if (proj.currentBindings.some((binding) => binding.seat_id === req.target)) {
-        throw new Error(`seat_binding_pending: ${req.target}`);
+      if (proj.currentBindings.some((binding) => binding.seat_id === bareSeatId)) {
+        throw new Error(`seat_binding_pending: ${bareSeatId}`);
       }
-      if (pendingResetSeats.has(req.target)) throw new Error(`scoped_reset_pending: ${req.target}`);
-      const row = proj.seatBoard.find((entry) => entry.seat_id === req.target);
-      if (row && row.pane === 'dead') throw new Error(`pane_dead: ${req.target}`);
-      return { kind: 'pane' as const, seatId: req.target };
+      if (pendingResetSeats.has(bareSeatId)) throw new Error(`scoped_reset_pending: ${bareSeatId}`);
+      const row = proj.seatBoard.find((entry) => entry.seat_id === bareSeatId);
+      if (row && row.pane === 'dead') throw new Error(`pane_dead: ${bareSeatId}`);
+      return { kind: 'pane' as const, seatId: bareSeatId };
     });
 
     const runId = crypto.randomUUID();

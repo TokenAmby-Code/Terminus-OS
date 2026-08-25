@@ -4,7 +4,7 @@ import { buildRoutes } from '../src/server.ts';
 
 const source = await Bun.file(new URL('../src/tmux.ts', import.meta.url)).text();
 const outsideAdapter = await Promise.all(
-  ['core.ts', 'daemon.ts', 'osc52.ts', 'server.ts'].map((name) =>
+  ['core.ts', 'daemon.ts', 'server.ts'].map((name) =>
     Bun.file(new URL(`../src/${name}`, import.meta.url)).text()),
 ).then((parts) => parts.join('\n'));
 const selectionRuntime = await Promise.all([

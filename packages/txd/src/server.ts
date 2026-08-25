@@ -479,7 +479,9 @@ export function buildRoutes(
         const parsed = await parseSensitive(req, ClipboardSelectionRequestSchema, 'invalid_clipboard_selection_request');
         if (parsed instanceof Response) return parsed;
         try {
-          return json({ ok: true, target: machine, ...await daemon.clipboardSelection(parsed) });
+          const result = await daemon.clipboardSelection(parsed);
+          const delivered = result.outcome === 'delivered';
+          return json({ ok: delivered, target: machine, ...result }, delivered ? 200 : 409);
         } catch (error) {
           return clipboardFailure(error, 'selection');
         }
