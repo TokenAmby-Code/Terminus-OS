@@ -1,5 +1,5 @@
 export type RequestMethod = 'GET' | 'POST';
-export type RequestOptions = { sensitive?: boolean; maxResponseBytes?: number };
+export type RequestOptions = { sensitive?: boolean; typedSensitiveRefusal?: boolean; maxResponseBytes?: number };
 export type TxdRequest = (
   method: RequestMethod,
   path: string,
@@ -65,6 +65,7 @@ export function createClient(
     try { parsed = text ? JSON.parse(text) : null; }
     catch { throw new Error(`txd returned invalid JSON (${response.status})`); }
     if (!response.ok) {
+      if (options?.sensitive && options.typedSensitiveRefusal) return parsed;
       if (options?.sensitive) throw new Error(`txd sensitive request failed (${response.status})`);
       throw new Error(`txd request failed (${response.status}): ${JSON.stringify(parsed)}`);
     }

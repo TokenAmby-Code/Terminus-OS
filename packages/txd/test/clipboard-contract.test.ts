@@ -75,6 +75,8 @@ describe('clipboard payload contract', () => {
       target: 'test',
       buffer_name: 'tx-clipboard',
       bytes: 9,
+      outcome: 'delivered',
+      origin: 'wsl',
     }).success).toBe(true);
   });
 });

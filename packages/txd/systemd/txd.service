@@ -17,6 +17,10 @@ Wants=network-online.target
 # with a visible condition-failed status until ~/secrets/txd/txd.json is
 # seeded (see README "Config bootstrap"). Path matches TXD_CONFIG below.
 ConditionPathExists=%h/secrets/txd/txd.json
+# Machine identity is a boot prerequisite, not a daemon crash surprise. An
+# assertion fails activation loudly when the generated registry is absent;
+# ExecStartPre also proves the service user can read it before Bun starts.
+AssertPathExists=%h/runtimes/Token-Fleet/live/shared/generated/registry.json
 # A deterministic startup failure must fail loud ONCE, not every RestartSec
 # forever. systemd's default limit (5 starts / 10s) never trips here: RestartSec=2
 # plus a ~0.3s crash is a ~2.3s cycle, i.e. ~4.3 starts per 10s — which is how a
@@ -49,6 +53,8 @@ Environment=IMPERIUM_MACHINE=k12-personal
 Environment=TXD_ROTATION_LOCK_FILE=%h/.local/state/txd/estate-rotation.lock
 Environment=TXD_ROTATION_SIGNAL_FIFO=%h/.local/state/txd/estate-rotation.signal
 Environment=TXD_AGENT_WRAPPER=%h/runtimes/Token-Fleet/live/shared/bin/agent-wrapper
+Environment=TXD_MACHINE_REGISTRY=%h/runtimes/Token-Fleet/live/shared/generated/registry.json
+ExecStartPre=/usr/bin/test -r %h/runtimes/Token-Fleet/live/shared/generated/registry.json
 # Absolute bun path (pinned 1.3.14 on the fleet).
 ExecStart=%h/.bun/bin/bun src/daemon.ts
 Restart=on-failure

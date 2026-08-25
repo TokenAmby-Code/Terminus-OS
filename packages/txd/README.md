@@ -69,7 +69,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/ctl/estate/rotate`    | Explicit estate, border-total page, or pane reset |
 | POST   | `/ctl/clipboard/push`   | Read the transient `tx-clipboard` buffer for an explicit client-side push |
 | POST   | `/ctl/clipboard/pull`   | Load UTF-8 into the transient, non-executing `tx-clipboard` buffer |
-| POST   | `/ctl/clipboard/selection` | Commit bounded UTF-8 through txd to `tx-clipboard` and one validated attached client |
+| POST   | `/ctl/clipboard/selection` | Commit bounded UTF-8 through txd to `tx-clipboard` and the invoking client's transport-bound WSL or phone origin |
 | POST   | `/ingress/tmux`         | Typed `pane-died` / `pane-exited` / page-less `pane-killed` ingress; repairs each faulted seat alone, rebuilding a page only when no tagged pane survives on it |
 | POST   | `/ingress/hooks/user_prompt_submit` | Receiving-engine delivery attestation for comm receipts |
 | POST   | `/ingress/hooks/stop`    | Receiving-engine stop fact for lifecycle and ask callbacks |
