@@ -46,11 +46,24 @@ export const sameIdentity = (a: string, b: string): boolean =>
 
 const bareName = (seatId: string): string => seatId.slice(seatId.indexOf(':') + 1);
 
-export function acceptCommIdentity(raw: string, roster: readonly string[] = COUNCIL_ROSTER): string {
-  const seats = roster.filter((seatId) => sameIdentity(bareName(seatId), raw));
-  if (seats.length === 0) return raw;
+// A perpetual persona and the agent process currently wearing it are different
+// identity kinds. The stable identity is the estate-declared seat; the process
+// agent id is a rotating delivery instance resolved only after admission.
+// Keeping the distinction in the type prevents a caller label from falling
+// back through persona/agent matching after it has resolved to a stable seat.
+export type AcceptedCommIdentity =
+  | { kind: 'stable_seat'; seat_id: string }
+  | { kind: 'binding'; identity: string };
+
+export function acceptCommIdentity(
+  raw: string,
+  roster: readonly string[] = COUNCIL_ROSTER,
+): AcceptedCommIdentity {
+  const seats = roster.filter((seatId) =>
+    sameIdentity(seatId, raw) || sameIdentity(bareName(seatId), raw));
+  if (seats.length === 0) return { kind: 'binding', identity: raw };
   if (seats.length > 1) {
     throw new Error(`identity_ambiguous: ${raw} — names seats ${seats.join(', ')}; address one by its seat id`);
   }
-  return seats[0]!;
+  return { kind: 'stable_seat', seat_id: seats[0]! };
 }
