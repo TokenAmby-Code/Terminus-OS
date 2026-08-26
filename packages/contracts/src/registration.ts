@@ -69,7 +69,7 @@ export const PlacementSchema = z.object({
 }).strict();
 
 export const ResourceReceiptSchema = z.object({
-  kind: z.enum(["worktree", "session_document"]),
+  kind: z.literal("worktree"),
   authority: z.string().min(1),
   receipt_id: z.string().min(1),
   generation: z.string().min(1),
