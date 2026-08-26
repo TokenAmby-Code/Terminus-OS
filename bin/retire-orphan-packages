@@ -40,7 +40,7 @@ for dropin in "$unit_dir"/*.service.d/generation.conf; do
     unit_names+=("$(basename "$unit")")
   done
   if ((${#unit_names[@]})); then
-    "$systemctl" disable --now "${unit_names[@]}"
+    "$systemctl" --user disable --now "${unit_names[@]}"
   fi
   rm -f "${related[@]}" "$config_dir/$package.json" "$state_dir/$package.applied.sha256"
   rm -rf "$service_dir" "$install_root/$package" "$install_root/generations/$package"
@@ -50,7 +50,7 @@ for dropin in "$unit_dir"/*.service.d/generation.conf; do
 done
 
 if ((retired)); then
-  "$systemctl" daemon-reload
+  "$systemctl" --user daemon-reload
 else
   echo "retire-orphan-packages($machine): no orphan packages"
 fi

@@ -58,8 +58,9 @@ describe("orphan Terminus package retirement", () => {
     });
     expect(await proc.exited).toBe(0);
 
-    expect(await Bun.file(log).text()).toContain("disable --now orphan.service orphan-postgres.path");
-    expect(await Bun.file(log).text()).toContain("disable --now checkout-orphan.service");
+    expect(await Bun.file(log).text()).toContain("--user disable --now orphan.service orphan-postgres.path");
+    expect(await Bun.file(log).text()).toContain("--user disable --now checkout-orphan.service");
+    expect(await Bun.file(log).text()).toContain("--user daemon-reload");
     for (const path of [
       join(units, "orphan.service"),
       join(units, "orphan.service.d"),
