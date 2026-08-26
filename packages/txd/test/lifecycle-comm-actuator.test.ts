@@ -201,7 +201,7 @@ test('behavioral pin: a target rebind while the comm watch arms refuses before t
     event.entity_id === EFFECT_ID && event.event_type === 'reg.comm_accepted')).toHaveLength(1);
 });
 
-test('behavioral pin: restart after admission but before transport terminalizes without resending', async () => {
+test('behavioral pin: restart after acceptance but before target snapshot recovers and never resends', async () => {
   const { store, tmux, request } = await rig();
   const source = { persona: request.source.persona, seat_id: request.source.seat_id };
   const target = {
@@ -237,19 +237,12 @@ test('behavioral pin: restart after admission but before transport terminalizes 
     provenance,
     occurred_at: '2026-08-25T00:00:02.000Z',
   });
-  await store.append({
-    entity_type: 'message',
-    entity_id: EFFECT_ID,
-    event_type: 'reg.comm_target_snapshotted',
-    payload: { message_id: EFFECT_ID, targets: [target] },
-    provenance,
-    occurred_at: '2026-08-25T00:00:02.001Z',
-  });
-
   const restarted = new Daemon(store, tmux, undefined, undefined, null, null, async () => {});
   const response = await restarted.lifecycleCommEffect(request);
   expect(response).toMatchObject({ message_id: EFFECT_ID, staged: false, replayed: true });
   expect(tmux.sends('council:orchestrator')).toEqual([]);
+  expect((await store.readAll()).filter((event) =>
+    event.entity_id === EFFECT_ID && event.event_type === 'reg.comm_target_snapshotted')).toHaveLength(1);
   const receipt = (await store.readAll()).find((event) =>
     event.entity_id === EFFECT_ID && event.event_type === 'act.comm_bytes_sent');
   expect(receipt?.payload).toMatchObject({

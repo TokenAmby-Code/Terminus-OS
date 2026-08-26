@@ -1516,7 +1516,7 @@ export class Daemon {
       const existing = events.find((event) => event.entity_id === messageId
         && event.event_type === 'reg.comm_accepted');
       if (existing) {
-        const snapshot = events.find((event) => event.event_type === 'reg.comm_target_snapshotted'
+        let snapshot = events.find((event) => event.event_type === 'reg.comm_target_snapshotted'
           && event.payload.message_id === messageId);
         const persistedLifecycleEffect = existing.payload.lifecycle_effect as Record<string, unknown> | undefined;
         const sameEffect = internal
@@ -1530,7 +1530,16 @@ export class Daemon {
           && persistedLifecycleEffect?.target_pane_generation === internal.lifecycleEffect.target_pane_generation
           && JSON.stringify(existing.payload.target_agent_ids) === JSON.stringify(targets.map((target) => target.agent_id));
         if (!sameEffect) throw new Error('comm_message_id_conflict');
-        if (!snapshot) throw new Error('comm_replay_snapshot_absent');
+        if (!snapshot) {
+          snapshot = await this.store.append({
+            entity_type: 'message',
+            entity_id: messageId,
+            event_type: 'reg.comm_target_snapshotted',
+            payload: { message_id: messageId, targets: existing.payload.targets },
+            provenance: this.prov('observer', transportReceipt),
+            occurred_at: this.now(),
+          });
+        }
         const sent = events.filter((event) => event.entity_id === messageId
           && event.event_type === 'act.comm_bytes_sent');
         return {
