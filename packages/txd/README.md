@@ -32,7 +32,7 @@ contracts source, and the public route shape.
   merge in txd's closure, so boot is not a repair site. An existing page that
   still holds a live tagged pane is accepted as it stands however far it has
   drifted: the drift is flagged as a `page_drift` contradiction on the page
-  entity and named on `/ctl/health` `estate_divergence` (page + failed clause,
+  entity and named by the `/health` estate probe (page + failed clause,
   `seats` or `geometry`) while `estate_generation` reads `recoverable`. Boot
   repairs a dead or missing seat alone, in place, exactly as the lifecycle
   ingress does, and rebuilds only a page with no live tagged pane left.
@@ -63,7 +63,8 @@ each route is the ruled daemon behavior, unchanged.
 
 | Method | Path                    | Purpose                                          |
 |--------|-------------------------|--------------------------------------------------|
-| GET    | `/ctl/health`           | Honest liveness + build + tmux/tint attestation  |
+| GET    | `/health`               | Strict STC observation verdict and typed evidence |
+| GET    | `/inspect`              | Strict STC holdings walk without a verdict       |
 | POST   | `/ctl/reconcile`        | Replay-driven reconcile; p0 on contradiction     |
 | POST   | `/ctl/estate/abandon` | Overseer abandonment of exact noncanonical seats already proven unbound and physically absent |
 | POST   | `/ctl/estate/rotate`    | Explicit estate, border-total page, or pane reset |
@@ -335,5 +336,5 @@ in favor of the fleet leg that actually provisions it.
 
 ```bash
 systemctl --user enable --now tx-estate.service txd.service
-tx probes it by name: systemctl --user start txd; GET /ctl/health; POST /ctl/reconcile
+tx probes it by name: systemctl --user start txd; GET /health; POST /ctl/reconcile
 ```

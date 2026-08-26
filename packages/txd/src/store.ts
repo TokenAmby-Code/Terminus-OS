@@ -25,6 +25,7 @@ import {
   type EventRecord,
 } from '@terminus-os/contracts';
 import { assertNoTmuxIdInIdentifiers } from './ids.ts';
+import { buildProjections } from './projections.ts';
 import {
   archivedEventDigest,
   compactEventRecords,
@@ -42,9 +43,13 @@ export interface EventStore {
   /** Append many events in one transaction (single-writer batch). */
   appendAll(inputs: EventInput[]): Promise<EventRecord[]>;
   /** Full stream in seq order — the replay source. */
-  readAll(): Promise<EventRecord[]>;
+  readAll(signal?: AbortSignal): Promise<EventRecord[]>;
   readByEntity(entityId: string): Promise<EventRecord[]>;
-  count(): Promise<number>;
+  count(signal?: AbortSignal): Promise<number>;
+  /** Read-only dependency evidence for the observation contract. */
+  observePostgres(signal: AbortSignal): Promise<Record<string, unknown>>;
+  /** Bounded current-binding projection; never scans the event log in the health handler. */
+  unresolvedCommTransportTargets(signal: AbortSignal): Promise<string[]>;
   compact(request: EventLogCompactionRequest): Promise<EventLogCompactionResult>;
   close(): Promise<void>;
 }
@@ -59,6 +64,25 @@ type Row = {
   occurred_at: string;
   recorded_at: string;
 };
+
+type Cancellable<T> = PromiseLike<T> & { cancel(): unknown };
+
+async function queryWithSignal<T>(query: Cancellable<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return await query;
+  if (signal.aborted) {
+    query.cancel();
+    throw signal.reason ?? new Error('observation_aborted');
+  }
+  let abort!: () => void;
+  const aborted = new Promise<never>((_, reject) => {
+    abort = () => {
+      try { query.cancel(); } finally { reject(signal.reason ?? new Error('observation_aborted')); }
+    };
+    signal.addEventListener('abort', abort, { once: true });
+  });
+  try { return await Promise.race([Promise.resolve(query), aborted]); }
+  finally { signal.removeEventListener('abort', abort); }
+}
 
 // Parse-validated read boundary (the @terminus-os/db typedRows discipline):
 // seq (int8) is normalized to a number and jsonb columns are decoded before
@@ -125,10 +149,10 @@ export class PostgresEventStore implements EventStore {
     }) as Promise<EventRecord[]>;
   }
 
-  async readAll(): Promise<EventRecord[]> {
-    const rows = (await this.sql`
+  async readAll(signal?: AbortSignal): Promise<EventRecord[]> {
+    const rows = await queryWithSignal(this.sql`
       SELECT seq, entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at
-      FROM txd.events ORDER BY seq`) as Row[];
+      FROM txd.events ORDER BY seq` as Cancellable<Row[]>, signal);
     return rows.map(rowToRecord);
   }
 
@@ -139,9 +163,72 @@ export class PostgresEventStore implements EventStore {
     return rows.map(rowToRecord);
   }
 
-  async count(): Promise<number> {
-    const rows = (await this.sql`SELECT count(*)::int AS n FROM txd.events`) as { n: number }[];
+  async count(signal?: AbortSignal): Promise<number> {
+    const rows = await queryWithSignal(
+      this.sql`SELECT count(*)::int AS n FROM txd.events` as Cancellable<{ n: number }[]>,
+      signal,
+    );
     return rows[0]!.n;
+  }
+
+  async observePostgres(signal: AbortSignal): Promise<Record<string, unknown>> {
+    const rows = await queryWithSignal(this.sql`
+      SELECT 1::int AS select_1,
+             current_database() AS database,
+             current_user AS connection_identity,
+             current_setting('server_version') AS server_version
+    ` as Cancellable<Array<{ select_1: number; database: string; connection_identity: string; server_version: string }>>, signal);
+    if (rows[0]?.select_1 !== 1) throw new Error('postgres reachability query returned no row');
+    return rows[0];
+  }
+
+  async unresolvedCommTransportTargets(signal: AbortSignal): Promise<string[]> {
+    const rows = await queryWithSignal(this.sql`
+      WITH checkpoint AS (
+        SELECT seq, payload FROM txd.events
+        WHERE event_type = 'estate.compaction_checkpoint'
+        ORDER BY seq DESC LIMIT 1
+      ), base_bindings AS (
+        SELECT checkpoint.seq, binding->>'seat_id' AS seat_id,
+               binding->>'agent_id' AS agent_id, false AS cleared
+        FROM checkpoint,
+             jsonb_array_elements(checkpoint.payload->'current_bindings') binding
+      ), binding_events AS (
+        SELECT seq, entity_id AS seat_id, payload->>'agent_id' AS agent_id, false AS cleared
+        FROM txd.events
+        WHERE event_type = 'reg.bound'
+          AND seq > coalesce((SELECT seq FROM checkpoint), 0)
+        UNION ALL
+        SELECT seq, entity_id AS seat_id, NULL::text AS agent_id, true AS cleared
+        FROM txd.events
+        WHERE event_type IN ('reg.seat_cleared', 'reg.seat_abandoned')
+          AND seq > coalesce((SELECT seq FROM checkpoint), 0)
+        UNION ALL SELECT * FROM base_bindings
+      ), current_bindings AS (
+        SELECT DISTINCT ON (seat_id) seat_id, agent_id, cleared
+        FROM binding_events ORDER BY seat_id, seq DESC
+      ), transport AS (
+        SELECT payload->>'target_agent_id' AS agent_id,
+               max(seq) FILTER (
+                 WHERE event_type = 'act.comm_bytes_sent'
+                   AND payload->>'submit_verdict' = 'transport_failed'
+                   AND coalesce((payload->>'bytes')::int, 0) = 0
+               ) AS failure_seq,
+               max(seq) FILTER (WHERE event_type = 'act.comm_delivery_asserted') AS recovery_seq
+        FROM txd.events
+        WHERE event_type IN ('act.comm_bytes_sent', 'act.comm_delivery_asserted')
+          AND payload ? 'target_agent_id'
+        GROUP BY payload->>'target_agent_id'
+      )
+      SELECT transport.agent_id
+      FROM transport
+      JOIN current_bindings ON current_bindings.agent_id = transport.agent_id
+      WHERE NOT current_bindings.cleared
+        AND transport.failure_seq IS NOT NULL
+        AND transport.failure_seq > coalesce(transport.recovery_seq, 0)
+      ORDER BY transport.agent_id
+    ` as Cancellable<Array<{ agent_id: string }>>, signal);
+    return rows.map((row) => row.agent_id);
   }
 
   async compact(request: EventLogCompactionRequest): Promise<EventLogCompactionResult> {
@@ -232,7 +319,8 @@ export class MemoryEventStore implements EventStore {
     return parsed.map((p) => this.commit(p));
   }
 
-  async readAll(): Promise<EventRecord[]> {
+  async readAll(signal?: AbortSignal): Promise<EventRecord[]> {
+    if (signal?.aborted) throw signal.reason ?? new Error('observation_aborted');
     return [...this.events];
   }
 
@@ -240,8 +328,29 @@ export class MemoryEventStore implements EventStore {
     return this.events.filter((e) => e.entity_id === entityId);
   }
 
-  async count(): Promise<number> {
+  async count(signal?: AbortSignal): Promise<number> {
+    if (signal?.aborted) throw signal.reason ?? new Error('observation_aborted');
     return this.events.length;
+  }
+
+  async observePostgres(signal: AbortSignal): Promise<Record<string, unknown>> {
+    if (signal.aborted) throw signal.reason ?? new Error('observation_aborted');
+    return { select_1: 1, database: 'memory', connection_identity: 'memory', server_version: 'memory' };
+  }
+
+  async unresolvedCommTransportTargets(signal: AbortSignal): Promise<string[]> {
+    if (signal.aborted) throw signal.reason ?? new Error('observation_aborted');
+    const currentAgentIds = new Set(buildProjections(this.events).currentBindings
+      .map((binding) => binding.agent_id).filter((agent): agent is string => agent !== null));
+    const unresolved = new Map<string, number>();
+    for (const event of this.events) {
+      const target = typeof event.payload.target_agent_id === 'string' ? event.payload.target_agent_id : null;
+      if (!target || !currentAgentIds.has(target)) continue;
+      if (event.event_type === 'act.comm_bytes_sent'
+        && event.payload.submit_verdict === 'transport_failed' && event.payload.bytes === 0) unresolved.set(target, event.seq);
+      if (event.event_type === 'act.comm_delivery_asserted') unresolved.delete(target);
+    }
+    return [...unresolved.keys()].sort();
   }
 
   async compact(request: EventLogCompactionRequest): Promise<EventLogCompactionResult> {

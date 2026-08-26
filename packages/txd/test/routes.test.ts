@@ -14,12 +14,11 @@ import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 function daemon() {
   return new Daemon(new MemoryEventStore(), new FakeTmux());
 }
-const build = { version: '0.1.0', git_sha: 'test', bun: '1.0' };
 
 test('GET /tmux/read/estate serves the estate view including who is bound', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 13, identity: 'i1', persona: 'salamander', tint: '#302800' });
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'i1', persona: 'salamander', tint: '#302800' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`);
     expect(res.status).toBe(200);
@@ -54,7 +53,7 @@ test('POST /ctl/estate/compact-events carries the operator archive attestation t
     calls.push(request);
     return { ok: true, boundary_seq: 7, archived_events: 6, retained_events: 5 };
   };
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const body = {
       schema_version: SCHEMA_VERSION,
@@ -74,7 +73,7 @@ test('POST /ctl/estate/compact-events carries the operator archive attestation t
 });
 
 test('POST /ctl/estate/compact-events refuses a missing archive attestation', async () => {
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: daemon(), machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/compact-events`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -89,7 +88,7 @@ test('POST /ctl/estate/compact-events refuses a missing archive attestation', as
 test('GET /tmux/read/diagnostics/hooks serves a bounded typed journal view', async () => {
   const limits: number[] = [];
   const srv = makeServer({
-    bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test',
+    bind: '127.0.0.1', port: 0, daemon: daemon(), machine: 'test',
     hookDiagnostics: async (limit) => {
       limits.push(limit);
       return [{ recorded_at: '2026-08-17T17:00:00.000Z', priority: 3, message: 'Unable to connect' }];
@@ -130,7 +129,7 @@ test('GET /tmux/read/zombies translates envelope inventory failures', async () =
     },
     async () => { throw new EnvelopeInventoryError('k12-work', 'ssh failed'); },
   );
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/tmux/read/zombies`);
     expect(res.status).toBe(502);
@@ -145,7 +144,7 @@ test('comm ask sends response headers before the callback wait completes', async
   const pending = new Promise<unknown>((resolve) => { release = resolve; });
   const d = daemon();
   (d as unknown as { waitComm: () => Promise<unknown> }).waitComm = () => pending;
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const response = fetch(`http://127.0.0.1:${srv.port}/agents/comm/wait`, {
       method: 'POST',
@@ -196,7 +195,7 @@ test('comm admission returns its durable message id before pane delivery finishe
     return send(...args);
   };
 
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   let admissionResponse: Response | undefined;
   try {
     const admissionPending = fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
@@ -270,7 +269,7 @@ test('a pane transport exception after comm admission becomes a durable refusal 
     throw new Error('pane transport rejected');
   };
 
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const admission = await (await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
       method: 'POST',
@@ -329,7 +328,7 @@ test('comm ask remains connected beyond Bun default idle timeout', async () => {
   const pending = new Promise<unknown>((resolve) => { release = resolve; });
   const d = daemon();
   (d as unknown as { waitComm: () => Promise<unknown> }).waitComm = () => pending;
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/agents/comm/wait`, {
       method: 'POST',
@@ -359,7 +358,6 @@ test('clipboard pull/push preserves opaque UTF-8 without persistence or executio
     bind: '127.0.0.1',
     port: 0,
     daemon: new Daemon(store, tmux),
-    build,
     machine: 'k12-test',
   });
   try {
@@ -399,7 +397,6 @@ test('selection commit is routed through txd and redacts the sensitive body', as
     bind: '127.0.0.1',
     port: 0,
     daemon: new Daemon(store, tmux),
-    build,
     machine: 'k12-test',
   });
   try {
@@ -442,7 +439,6 @@ test('selection commit rejects an unrelated client before changing the buffer', 
     bind: '127.0.0.1',
     port: 0,
     daemon: new Daemon(new MemoryEventStore(), tmux),
-    build,
     machine: 'k12-test',
   });
   try {
@@ -500,7 +496,7 @@ test('clipboard RPC operations are serialized through the daemon writer lock', a
 
 test('clipboard validation errors redact sensitive payloads', async () => {
   const secret = 'never-log-this-secret';
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: daemon(), build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: daemon(), machine: 'test' });
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/clipboard/pull`, {
       method: 'POST',
@@ -517,7 +513,7 @@ test('clipboard validation errors redact sensitive payloads', async () => {
 });
 
 test('clipboard ingress rejects a declared oversized body before reading it', async () => {
-  const route = buildRoutes(daemon(), build, 'test').find((candidate) => candidate.label === 'POST /ctl/clipboard/pull')!;
+  const route = buildRoutes(daemon(), 'test').find((candidate) => candidate.label === 'POST /ctl/clipboard/pull')!;
   const request = new Request('http://localhost/ctl/clipboard/pull', {
     method: 'POST',
     headers: {
@@ -539,7 +535,7 @@ test('POST /ctl/estate/rotate resets a page in-process instead of killing the es
   const tmux = new FakeTmux();
   const d = new Daemon(new MemoryEventStore(), tmux);
   await d.constructEstate();
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/rotate`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -558,7 +554,7 @@ test('POST /ctl/estate/abandon routes the exact overseer abandonment request', a
     received = request;
     return { ok: true, abandoned: request.seats, reason: null };
   };
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/abandon`, {
       method: 'POST',
@@ -588,7 +584,7 @@ test('POST /ingress/tmux repairs the lost canonical seat after a pane exits', as
   const d = new Daemon(new MemoryEventStore(), tmux);
   await d.constructEstate();
   tmux.deleteOutOfBand('palace:E');
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -605,7 +601,7 @@ test('POST /ingress/tmux accepts the page-less kill-time event and sweeps the es
   const d = new Daemon(new MemoryEventStore(), tmux);
   await d.constructEstate();
   tmux.deleteOutOfBand('somnium:SE');
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const response = await fetch(`http://127.0.0.1:${srv.port}/ingress/tmux`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -639,8 +635,8 @@ const LEGACY = [
 
 test('adversarial: every legacy route is dead (404) — no shim, no alias', async () => {
   const d = daemon();
-  await d.launch({ seat_id: 'somnium:NE', schema_version: 13, identity: 'i1', persona: 'p', tint: '#1' });
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  await d.launch({ seat_id: 'somnium:NE', schema_version: SCHEMA_VERSION, identity: 'i1', persona: 'p', tint: '#1' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     for (const [method, path] of LEGACY) {
       const res = await fetch(`http://127.0.0.1:${srv.port}${encodeURI(path)}`, {
@@ -667,7 +663,7 @@ test('UserPromptSubmit enters txd directly and asserts the correlated comm deliv
     occurred_at: '2026-08-15T17:00:00.000Z',
   });
   const accepted = await d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'target', message: 'receipt me', ask: false, reply: false });
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/ingress/hooks/user_prompt_submit`, {
       method: 'POST', headers: { 'content-type': 'application/json', 'x-edge-proxy': 'hook-receipt-1' },
@@ -682,7 +678,7 @@ test('UserPromptSubmit enters txd directly and asserts the correlated comm deliv
 });
 
 test('adversarial: agent biography is not served — no route exposes per-entity event history', async () => {
-  const routes = buildRoutes(daemon(), build, 'test');
+  const routes = buildRoutes(daemon(), 'test');
   // No parameterized matcher resolves an event-history-shaped path, and no
   // label mentions the dead "entities" vocabulary.
   for (const r of routes) {

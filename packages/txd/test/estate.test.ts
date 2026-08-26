@@ -126,13 +126,6 @@ test('boot defers a foreign pre-rotation shape without mutating or resolving it'
   expect(await store.count()).toBe(0);
   expect(tmux.estateShape()).toEqual({ sessions: ['seat_palace_W'], windows: { seat_palace_W: ['palace:W'] } });
 
-  const health = await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version });
-  expect(health).toMatchObject({
-    ok: false,
-    estate_generation: 'foreign',
-    activation_pending: true,
-    tmux_reachable: true,
-  });
 });
 
 test('boot repairs a seat deleted while txd was down alone, in place, without rebuilding its page', async () => {
@@ -167,14 +160,12 @@ test('boot repairs a seat deleted while txd was down alone, in place, without re
   expect(events.filter((event) => event.event_type === 'estate.scoped_reset_requested')).toMatchObject([
     { payload: { scope: 'pane', seats: ['palace:E'], trigger: 'boot' } },
   ]);
-  const health = await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version });
-  expect(health).toMatchObject({ ok: true, estate_generation: 'canonical', estate_divergence: [], open_contradictions: 0 });
 });
 
 // RULING (Emperor, 2026-08-25): a restart is not the sensitive operation;
 // closing panes is. A txd restart arrives with every merge in its closure, so
 // boot never rebuilds a page that still holds live workloads to correct drift.
-test('a drifted Council carrying live bound workloads survives boot; health goes red naming the page and clause', async () => {
+test('a drifted Council carrying live bound workloads survives boot and names the page and clause', async () => {
   const { store, tmux, d } = setup();
   await d.constructEstate();
   for (const [seat, identity] of [['council:custodes', 'overseer-a'], ['council:pax', 'overseer-b']] as const) {
@@ -199,13 +190,7 @@ test('a drifted Council carrying live bound workloads survives boot; health goes
   expect((await d.estateRows()).filter((row) => row.seat_id?.startsWith('council:') && row.binding === 'bound').map((row) => row.seat_id).sort())
     .toEqual(['council:custodes', 'council:pax']);
 
-  const health = await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version });
-  expect(health).toMatchObject({
-    ok: false,
-    estate_generation: 'recoverable',
-    estate_divergence: [{ page: 'council', clause: 'geometry' }],
-    open_contradictions: 1,
-  });
+  expect(await tmux.estateDivergences()).toMatchObject([{ page: 'council', clause: 'geometry' }]);
   const flagged = events.filter((event) => event.event_type === 'reg.contradiction_flagged');
   expect(flagged).toMatchObject([{ entity_type: 'estate', entity_id: 'council', payload: { kind: 'page_drift', clause: 'geometry' } }]);
 
@@ -216,9 +201,7 @@ test('a drifted Council carrying live bound workloads survives boot; health goes
   expect(await d.resetEstateScope({ schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: 'council' })).toMatchObject({ ok: true });
   await d.reconcile();
   expect((await store.readAll()).filter((event) => event.event_type === 'estate.page_canonical_observed')).toMatchObject([{ entity_id: 'council' }]);
-  expect(await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version })).toMatchObject({
-    ok: true, estate_generation: 'canonical', estate_divergence: [], open_contradictions: 0,
-  });
+  expect(await tmux.estateDivergences()).toEqual([]);
 });
 
 test('boot still rebuilds a page with no live tagged pane left', async () => {
@@ -233,7 +216,6 @@ test('boot still rebuilds a page with no live tagged pane left', async () => {
   expect([...tmux.estateShape().windows.somnium ?? []].sort()).toEqual(['somnium:N', 'somnium:NE', 'somnium:S', 'somnium:SE', 'somnium:W']);
   expect((await d.estateRows()).find((row) => row.seat_id === 'somnium:NE')).toMatchObject({ binding: 'unbound', pane: 'live' });
   expect((await store.readAll()).filter((event) => event.event_type === 'reg.retired').map((event) => event.entity_id)).toEqual(['page-lost']);
-  expect(await d.health('k12-personal', { version: '0.1.0', git_sha: 'head', bun: Bun.version })).toMatchObject({ ok: true, estate_divergence: [] });
 });
 
 test('boot constructor clears all old bindings when a fresh estate server rebuilds every page', async () => {

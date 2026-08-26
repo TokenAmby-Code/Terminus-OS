@@ -453,42 +453,6 @@ export const EstatePageDivergenceSchema = z.object({
 });
 export type EstatePageDivergence = z.infer<typeof EstatePageDivergenceSchema>;
 
-export const HealthSchema = z.object({
-  ok: z.boolean(),
-  service: z.literal('txd'),
-  schema_version: z.number().int(),
-  version: z.string(),
-  git_sha: z.string(),
-  bun: z.string(),
-  machine: z.string(),
-  events: z.number().int(),
-  // Honest-only: bring-up mode reports ok=false while any contradiction is open.
-  open_contradictions: z.number().int(),
-  tmux_reachable: z.boolean(),
-  // Own-function readiness: both tmux witnesses must be physically observed.
-  hooks: z.object({
-    state: z.enum(['ready', 'degraded']),
-    pane_died: z.boolean(),
-    pane_exited: z.boolean(),
-  }),
-  estate_generation: z.enum(['empty', 'canonical', 'recoverable', 'foreign']),
-  // Every canonical page that fails the acceptance predicate, named with the
-  // clause it fails. A `recoverable` estate is red HERE, page by page: boot
-  // observes drift and attests it; it never closes a live pane to repair it.
-  estate_divergence: z.array(EstatePageDivergenceSchema),
-  // A foreign shape can be a deliberately unrotated predecessor topology.
-  // The daemon stays available without mutating it until the operator rotates.
-  activation_pending: z.boolean(),
-  tints: z.array(TintReadinessSchema),
-  // An observed zero-effect comm refusal remains unhealthy for the current
-  // receiver until that receiver produces a delivery assertion.
-  comm_transport: z.object({
-    state: z.enum(['ready', 'degraded']),
-    unresolved_target_agent_ids: z.array(CanonicalIdSchema),
-  }),
-});
-export type Health = z.infer<typeof HealthSchema>;
-
 export const LaunchRequestSchema = z.object({
   seat_id: CanonicalIdSchema,
   schema_version: z.number().int(),
@@ -641,7 +605,7 @@ export type ReconcileResponse = z.infer<typeof ReconcileResponseSchema>;
 export const EstateReadResponseSchema = z.object({
   schema_version: z.number().int(),
   rows: z.array(SeatBoardRowSchema),
-  tints: HealthSchema.shape.tints,
+  tints: z.array(TintReadinessSchema),
 });
 export type EstateReadResponse = z.infer<typeof EstateReadResponseSchema>;
 

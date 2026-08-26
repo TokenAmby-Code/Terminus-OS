@@ -54,8 +54,8 @@ import type { CommAdmission, Daemon } from './core.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 import { readHookDiagnostics } from './diagnostics.ts';
+import type { ObservationHandler } from '@tokenamby-code/stc-contract/observation';
 
-export type BuildInfo = { version: string; git_sha: string; bun: string };
 
 export type Route = {
   method: string;
@@ -246,21 +246,11 @@ function clipboardFailure(error: unknown, direction: 'pull' | 'push' | 'selectio
 // assert it.
 export function buildRoutes(
   daemon: Daemon,
-  build: BuildInfo,
   machine: string,
   hookDiagnostics: (limit: number) => Promise<HookDiagnostic[]> = readHookDiagnostics,
 ): Route[] {
   const routes: Route[] = [
     // ── /ctl/* — daemon ops ─────────────────────────────────────────────────
-    {
-      method: 'GET',
-      match: exact('/ctl/health'),
-      label: 'GET /ctl/health',
-      handler: async () => {
-        const h = await daemon.health(machine, build);
-        return json(h, h.ok ? 200 : 503);
-      },
-    },
     {
       method: 'POST',
       match: exact('/agents/inject'),
@@ -673,11 +663,11 @@ export function makeServer(opts: {
   bind: string;
   port: number;
   daemon: Daemon;
-  build: BuildInfo;
   machine: string;
+  observation?: ObservationHandler;
   hookDiagnostics?: (limit: number) => Promise<HookDiagnostic[]>;
 }): ReturnType<typeof Bun.serve> {
-  const routes = buildRoutes(opts.daemon, opts.build, opts.machine, opts.hookDiagnostics);
+  const routes = buildRoutes(opts.daemon, opts.machine, opts.hookDiagnostics);
   return Bun.serve({
     hostname: opts.bind,
     port: opts.port,
@@ -687,6 +677,8 @@ export function makeServer(opts: {
     // contradictory deadline.
     idleTimeout: 0,
     async fetch(req) {
+      const observation = await opts.observation?.(req);
+      if (observation) return observation;
       const url = new URL(req.url);
       for (const route of routes) {
         if (route.method !== req.method) continue;

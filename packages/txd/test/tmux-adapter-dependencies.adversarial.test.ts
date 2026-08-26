@@ -24,7 +24,7 @@ test('tmux adapter has one private argument-array binary runner and no alternate
 });
 
 test('attach and reconnect are not mutation or arbitrary-command routes', () => {
-  const routes = buildRoutes({} as never, { version: 'test', git_sha: 'test', bun: 'test' }, 'test');
+  const routes = buildRoutes({} as never, 'test');
   const labels = routes.map((route) => route.label);
   expect(labels.some((label) => /attach|reconnect|command|exec/i.test(label))).toBe(false);
   expect(routes.some((route) => route.match('/tmux/attach') !== null)).toBe(false);

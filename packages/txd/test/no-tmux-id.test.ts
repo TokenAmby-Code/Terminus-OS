@@ -59,7 +59,7 @@ test('mutation ingress refuses a raw tmux id IN AN IDENTIFIER FIELD, before tmux
       return (...args: unknown[]) => { tmuxCalls += 1; return value.apply(target, args); };
     },
   }) as TmuxControlPlane;
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(store, tmux), build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(store, tmux), machine: 'test' });
   try {
     for (const attack of attacks) {
       const res = await fetch(`http://127.0.0.1:${srv.port}${attack.path}`, {
@@ -83,7 +83,7 @@ test('mutation ingress refuses a raw tmux id IN AN IDENTIFIER FIELD, before tmux
 // pane id quoted in prose. Each is legitimate caller content and must pass.
 test('request CONTENT carrying tmux sigils is never refused', async () => {
   const store = new MemoryEventStore();
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(store, new FakeTmux()), build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(store, new FakeTmux()), machine: 'test' });
   try {
     for (const message of ['pin zod@4.4', 'the positional $1', 'it cost $20', 'attesting from pane %28']) {
       const res = await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
@@ -111,7 +111,7 @@ test('handler errors are sanitized before structured logging', async () => {
   const original = console.error;
   const lines: string[] = [];
   console.error = (...args: unknown[]) => lines.push(args.map(String).join(' '));
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(new MemoryEventStore(), tmux), build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: new Daemon(new MemoryEventStore(), tmux), machine: 'test' });
   try {
     // Force a below-membrane adapter error containing a raw id without putting
     // that id in the request (request ingress must remain independently clean).
@@ -129,7 +129,7 @@ test('handler errors are sanitized before structured logging', async () => {
 
 test('no tmux id appears in any /agents/*, /tmux/read, or /ctl response', async () => {
   const d = new Daemon(new MemoryEventStore(), new FakeTmux());
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const post = (p: string, body: unknown) => fetch(`http://127.0.0.1:${srv.port}${p}`, { method: 'POST', body: JSON.stringify(body) });
     const bodies: unknown[] = [];
@@ -137,7 +137,6 @@ test('no tmux id appears in any /agents/*, /tmux/read, or /ctl response', async 
     bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 13 })).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`)).json());
     bodies.push(await (await post('/ctl/reconcile', {})).json());
-    bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/ctl/health`)).json());
     for (const b of bodies) expect(findTmuxIdDeep(b)).toBeNull();
   } finally {
     srv.stop(true);
@@ -167,7 +166,7 @@ test('a comm-wait response carrying an agent reply that quotes a tmux id breache
     }],
     outstanding: [],
   });
-  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon, build: { version: '0.1.0', git_sha: 'test', bun: '1.0' }, machine: 'test' });
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/comm/wait`, {
       method: 'POST',

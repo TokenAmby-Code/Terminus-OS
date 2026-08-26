@@ -48,7 +48,6 @@ import {
   type EventInput,
   type EventLogCompactionRequest,
   type EventRecord,
-  type Health,
   type EstateRotateRequest,
   type EstateRotateResponse,
   type EstateAbandonRequest,
@@ -2830,7 +2829,7 @@ export class Daemon {
       // layout error. Boot therefore observes and attests: a page that still
       // holds a live tagged pane is never rebuilt here, however far it has
       // drifted. Its divergence is flagged as a contradiction below, named
-      // page-by-page on /ctl/health, and repaired only by an explicit operator
+      // page-by-page on /health, and repaired only by an explicit operator
       // verb that computes the page's foreground workloads and refuses when
       // they are non-empty. A dead or missing seat is still repaired alone, in
       // place, exactly as the runtime lifecycle ingress repairs it; a page
@@ -4106,66 +4105,6 @@ export class Daemon {
     });
   }
 
-  async health(machine: string, build: { version: string; git_sha: string; bun: string }): Promise<Health> {
-    const events = await this.store.readAll();
-    const proj = buildProjections(events);
-    // Probe the externally supervised estate socket, not just `tmux -V` — a
-    // responding binary over a dead socket must not read healthy.
-    const tmux_reachable = await this.tmux.reachable();
-    const estate_generation = await this.tmux.estateGeneration();
-    const estate_divergence = estate_generation === 'foreign' || estate_generation === 'empty'
-      ? []
-      : await this.tmux.estateDivergences();
-    const hooks = await this.tmux.lifecycleHookReadiness();
-    const activation_pending = estate_generation === 'foreign';
-    const open = proj.openContradictions.length;
-    const tints = await this.tintReadiness();
-    const currentAgentIds = new Set(proj.currentBindings
-      .filter((binding) => binding.agent_id)
-      .map((binding) => binding.agent_id!));
-    const unresolvedCommTransport = new Map<string, number>();
-    for (const event of events) {
-      const targetAgentId = typeof event.payload.target_agent_id === 'string'
-        ? event.payload.target_agent_id
-        : null;
-      if (!targetAgentId || !currentAgentIds.has(targetAgentId)) continue;
-      if (event.event_type === 'act.comm_bytes_sent'
-        && event.payload.submit_verdict === 'transport_failed'
-        && event.payload.bytes === 0) {
-        unresolvedCommTransport.set(targetAgentId, event.seq);
-      }
-      if (event.event_type === 'act.comm_delivery_asserted') {
-        unresolvedCommTransport.delete(targetAgentId);
-      }
-    }
-    const comm_transport = {
-      state: unresolvedCommTransport.size === 0 ? 'ready' as const : 'degraded' as const,
-      unresolved_target_agent_ids: [...unresolvedCommTransport.keys()].sort(),
-    };
-    return {
-      ok: open === 0
-        && tmux_reachable
-        && hooks.state === 'ready'
-        && estate_generation === 'canonical'
-        && comm_transport.state === 'ready'
-        && tints.every((tint) => tint.state === 'ready'),
-      service: 'txd' as const,
-      schema_version: SCHEMA_VERSION,
-      version: build.version,
-      git_sha: build.git_sha,
-      bun: build.bun,
-      machine,
-      events: await this.store.count(),
-      open_contradictions: open,
-      tmux_reachable,
-      hooks,
-      estate_generation,
-      estate_divergence,
-      activation_pending,
-      tints,
-      comm_transport,
-    };
-  }
 }
 
 export type { EventInput };
