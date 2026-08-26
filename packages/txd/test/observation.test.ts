@@ -48,13 +48,13 @@ function handler(observationSource = source()) {
   });
 }
 
-test('health and inspect are strict STC 1.3.0 envelopes with txd identity', async () => {
+test('health and inspect are strict STC 1.4.0 envelopes with txd identity and ring evidence', async () => {
   const observe = handler();
   const health = await observe(new Request('http://txd/health'));
   expect(health?.status).toBe(200);
   const healthBody = HealthResponseSchema.parse(await health!.json());
   expect(healthBody.identity).toEqual({ service: 'txd', daemon: 'txd', cli: 'tx' });
-  expect(healthBody.stc_version).toBe('1.3.0');
+  expect(healthBody.stc_version).toBe('1.4.0');
   expect(healthBody.probes.map((probe: { name: string; rung: string }) => [probe.name, probe.rung])).toEqual([
     ['postgres', 'dependency'],
     ['tmux-socket', 'dependency'],
@@ -68,6 +68,7 @@ test('health and inspect are strict STC 1.3.0 envelopes with txd identity', asyn
   const inspect = await observe(new Request('http://txd/inspect'));
   const inspectBody = InspectResponseSchema.parse(await inspect!.json());
   expect(inspectBody).not.toHaveProperty('ok');
+  expect(inspectBody.observation_ring.probes.map((probe) => probe.name)).toContain('comm-transport');
   expect(inspectBody.holdings.map((holding: { name: string }) => holding.name)).toEqual([
     'bindings', 'contradictions', 'divergence', 'events', 'freelist', 'zombies',
   ]);

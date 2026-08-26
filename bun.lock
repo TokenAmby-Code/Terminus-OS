@@ -39,7 +39,7 @@
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
         "@terminus-os/systemd": "workspace:*",
-        "@tokenamby-code/stc-contract": "1.3.0",
+        "@tokenamby-code/stc-contract": "1.4.0",
       },
     },
     "packages/tx": {
@@ -65,7 +65,7 @@
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
         "@terminus-os/systemd": "workspace:*",
-        "@tokenamby-code/stc-contract": "1.3.0",
+        "@tokenamby-code/stc-contract": "1.4.0",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
@@ -99,5 +99,9 @@
     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
 
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+
+    "@terminus-os/telemetryd/@tokenamby-code/stc-contract": ["@tokenamby-code/stc-contract@1.4.0", "https://npm.pkg.github.com/download/@tokenamby-code/stc-contract/1.4.0/e483b506da8f0f931e24300e725a3131d6c8a65a", { "dependencies": { "zod": "^4.4.3" } }, "sha512-aocTGPCnkMgPyoZeGvyq5Q83BIzaRc8c5y9skGxN1eieD/qE/hXllvBttdv6jqTh8iLHetgTAVG7So5jq1YZAg=="],
+
+    "@terminus-os/txd/@tokenamby-code/stc-contract": ["@tokenamby-code/stc-contract@1.4.0", "https://npm.pkg.github.com/download/@tokenamby-code/stc-contract/1.4.0/e483b506da8f0f931e24300e725a3131d6c8a65a", { "dependencies": { "zod": "^4.4.3" } }, "sha512-aocTGPCnkMgPyoZeGvyq5Q83BIzaRc8c5y9skGxN1eieD/qE/hXllvBttdv6jqTh8iLHetgTAVG7So5jq1YZAg=="],
   }
 }
