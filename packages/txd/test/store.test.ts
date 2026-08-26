@@ -190,7 +190,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
   });
 
   test('jsonb columns hold OBJECTS, not double-encoded JSON strings — the ruled psql surface works', async () => {
-    // Regression pin (busd #34 mirrored): `JSON.stringify(x)::jsonb` binds an
+    // Regression pin: `JSON.stringify(x)::jsonb` binds an
     // already-encoded parameter and stores jsonb *strings*, killing payload->>'k' in psql.
     const rows = (await raw`
       SELECT jsonb_typeof(payload) AS pay, jsonb_typeof(provenance) AS prov,

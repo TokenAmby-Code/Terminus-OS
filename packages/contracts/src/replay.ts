@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { BusEventTypeSchema } from "./bus.ts";
+
+const ReplayEventTypeSchema = z
+  .string()
+  .regex(
+    /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/,
+    "event_type must be dotted lowercase (`tenant.name`)",
+  );
 
 export const REPLAY_SCHEMA_VERSION = 1;
 
@@ -59,7 +65,7 @@ export const ReplayProvenanceSchema = SafeFactsSchema.and(z.object({
 export const ReplayEventInputSchema = z.object({
   replay_id: ReplayIdSchema,
   event_id: EventIdSchema,
-  event_type: BusEventTypeSchema,
+  event_type: ReplayEventTypeSchema,
   schema_version: z.literal(REPLAY_SCHEMA_VERSION),
   source: z.string().min(1),
   provenance: ReplayProvenanceSchema,

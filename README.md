@@ -24,7 +24,6 @@ packages/
     src/
     systemd/
     test/
-  busd/                PostgreSQL replay/event authority, signed ingress, and transactional publication
     src/
     systemd/
     test/

@@ -1,14 +1,8 @@
 // Vendor hook-type enumeration (`@terminus-os/contracts`).
 //
-// RULED cross-service architecture invariant (central-bus ruling, supersedes
-// [[txd-extraction-spec]] §6's per-consumer fan-out): hook fan-in TERMINATES at
-// busd. The per-box proxy broadcasts every inbound `/ingress/hooks/*` POST to
-// its declared hook consumers — on the ruled topology exactly one, busd — and
-// busd journals EVERY pinned vendor hook type as a `hook.<type>` bus event
-// (see bus.ts). No hook type evaporates: there is no 410 tail anywhere, so the
-// old HookNotConsumed vocabulary is dead. Services that care about a hook
-// (txd: stop / user_prompt_submit) consume it as a normal bus subscriber and
-// MUST 2xx-ack delivered events they do not consume (ack ≠ consume).
+// Vendor hook-type enumeration. Hooks are not events: consumers select the
+// facts that matter and append those facts directly to the journal. This list
+// pins only the vendor ingress vocabulary shared by wrappers and consumers.
 //
 // The enumeration below is PINNED from the actual vendor hook contracts — not
 // invented. Sources (verbatim enum extractions from the shipped binaries):
@@ -26,8 +20,7 @@
 //
 // Route ids are the snake_case forms (codex's own wire encoding; lowercase URL
 // segments). The union is therefore the 30 claude events. Re-pin this list when
-// a vendor contract adds an event: additions here are additive (a new busd
-// shim endpoint + `hook.<type>` journal id), never breaking.
+// a vendor contract adds an event.
 
 import { z } from "zod";
 

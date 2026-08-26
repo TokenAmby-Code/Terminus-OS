@@ -3,19 +3,15 @@
 # service actually loads at runtime, so an apply leg's restart stamp keys on
 # that service's real dependency set instead of the whole repository.
 #
-# Why this exists. apply-busd, apply-telemetryd, and apply-txd each folded
-# `git -C "$terminus" rev-parse HEAD` into their stamp. Repository HEAD is
-# not a dependency of any single service: a change touching four files under
-# packages/txd still moved the busd stamp, so the next converge restarted busd,
-# and the adjacent GitHub-webhook-ingress leg found the freshly forked busd not
-# yet listening and aborted the machine pass. Every merge burned one converge.
+# Why this exists. Service apply legs once folded repository HEAD into their
+# stamps. Repository HEAD is not a dependency of any single service, so an
+# unrelated package change restarted adjacent daemons and burned a converge.
 #
-# The stamps cannot simply drop HEAD. busd, telemetryd, and txd all
-# import @terminus-os/contracts and @terminus-os/db, which live OUTSIDE each
-# daemon's own package directory — apply-busd's `find "$source_dir"` term covered
-# packages/busd/src only. HEAD was an over-broad but genuinely load-bearing proxy
-# for "a package I import changed". Deleting it outright would have traded
-# spurious restarts for MISSED restarts, which is the strictly worse failure.
+# The stamps cannot simply drop HEAD. Services import @terminus-os/contracts
+# and @terminus-os/db, which live outside each daemon's own package directory.
+# HEAD was an over-broad but genuinely load-bearing proxy for "a package I
+# import changed". Deleting it outright would have traded spurious restarts for
+# missed restarts.
 #
 # So resolve the real dependency set: the transitive `workspace:*` closure of the
 # named package, hashed by file content.

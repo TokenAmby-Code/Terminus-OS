@@ -18,7 +18,7 @@ test("phone hook payload is bound as a jsonb object, never a JSON string", async
     hook_id: "390ff9d1-0335-4261-93e2-e3ffebac2fe9",
     event_type: "phone.application",
     source: "phone.macrodroid",
-    payload: { app: "busd-exterminatus-proof" },
+    payload: { app: "json-object-proof" },
     occurred_at: "2026-08-15T17:37:49.210Z",
   };
 

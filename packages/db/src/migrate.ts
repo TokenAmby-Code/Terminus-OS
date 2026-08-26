@@ -66,7 +66,7 @@ export function planMigrations(filenames: string[], appliedIds: number[]): Migra
 }
 
 // One fixed cluster-wide advisory key for the whole migrations home: every
-// daemon that runs `runMigrations` at boot (txd, busd, …) serializes on it.
+// daemon that runs `runMigrations` at boot serializes on it.
 // 0x7465726d = ASCII "term" — arbitrary but fixed and greppable.
 export const MIGRATION_LOCK_KEY = 0x7465726d;
 

@@ -125,7 +125,7 @@ export class PostgresEventStore implements EventStore {
     // old idiom (`JSON.stringify(x)::jsonb`) double-encodes: the cast
     // receives an already-JSON-encoded parameter and stores a jsonb *string*,
     // which poisons the ruled psql surface (payload->>'k' returns nothing).
-    // Same defect and fix as busd #34 (af8088e9); migration 0005 normalized
+    // Migration 0005 normalized
     // the historical string rows in place.
     const rows = (await sql`
       INSERT INTO txd.events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
