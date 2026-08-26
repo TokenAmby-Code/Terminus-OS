@@ -31,7 +31,8 @@ import { z } from 'zod';
 //      close-on-stop subscription vocabulary is gone, and plan approval gains
 //      its mechanical intent (approve_plan, dialog_accept).
 // v12: breaking — absent dynamic seats use the estate's abandon vocabulary.
-export const SCHEMA_VERSION = 12;
+// v13: additive — lifecycle-owned effects gain one generation-fenced comm actuator.
+export const SCHEMA_VERSION = 13;
 
 // A caller-supplied identifier: a canonical seat name (`somnium:NE`), an agent
 // id, or a page. Raw tmux ids — pane `%N`, window `@N`, session `$N` — live
@@ -747,6 +748,25 @@ export const CommRequestSchema = z.object({
   }
 });
 export type CommRequest = z.infer<typeof CommRequestSchema>;
+
+// lifecycled decides whether an effect is owed and supplies both exact agent
+// instances. txd only validates those generation witnesses, admits the stable
+// effect id as the comm message id, and runs the ordinary comm transport.
+const LifecycleCommEndpointSchema = z.object({
+  agent_id: CanonicalIdSchema,
+  seat_id: CanonicalIdSchema,
+  birth_generation: z.string().uuid(),
+  pane_generation: z.string().uuid(),
+}).strict();
+export const LifecycleCommEffectRequestSchema = z.object({
+  schema_version: z.number().int(),
+  effect_id: z.string().uuid(),
+  source: LifecycleCommEndpointSchema.extend({ persona: z.string().min(1) }).strict(),
+  target: LifecycleCommEndpointSchema,
+  message: z.string().min(1),
+}).strict();
+export type LifecycleCommEffectRequest = z.infer<typeof LifecycleCommEffectRequestSchema>;
+
 export const AgentInjectRequestSchema = z.object({
   schema_version: z.number().int(),
   target_agent_id: CanonicalIdSchema,
@@ -768,6 +788,16 @@ export const CommTargetSchema = z.object({
   logical_identity: CommLogicalIdentitySchema.optional(),
 });
 export type CommTarget = z.infer<typeof CommTargetSchema>;
+export const LifecycleCommEffectResponseSchema = z.object({
+  ok: z.literal(true),
+  message_id: z.string().uuid(),
+  source_agent_id: CanonicalIdSchema,
+  targets: z.array(CommTargetSchema).length(1),
+  staged: z.boolean(),
+  replayed: z.boolean(),
+  event_ids: z.array(z.number().int()),
+});
+export type LifecycleCommEffectResponse = z.infer<typeof LifecycleCommEffectResponseSchema>;
 // `staged` = this message's bytes were handed to the target pane and Enter was
 // pressed. Delivery is asserted later and separately by
 // `act.comm_delivery_asserted`, correlated to `message_id` — which is why the

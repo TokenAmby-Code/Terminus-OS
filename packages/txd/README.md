@@ -77,6 +77,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/launch`        | Atomic reg-audited seat bind / handover          |
 | POST   | `/agents/close`         | Remote close (`tx close`, overseer-gated): reap N processes individually, keep estate panes, seats → freelist; explicit stopped targets are intended closes, other live/unobservable targets refuse absent force |
 | POST   | `/agents/comm`          | Typed message or engine-neutral command/skill admission |
+| POST   | `/agents/comm/lifecycle-effect` | Generation-fenced, idempotent ordinary-comm actuator for a caller-owned lifecycle effect |
 | POST   | `/agents/comm/receipt`  | Event-driven, fixed 30-second delivery receipt rendezvous |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
@@ -98,6 +99,15 @@ each route is the ruled daemon behavior, unchanged.
   the CLI returns the bytes-sent receipt; a later hook stages the confirmation
   through the sender's ordinary agent input path and persists that follow-up's
   own `act.agent_input_injected` receipt. The wait has no delivery-state poll.
+- `POST /agents/comm/lifecycle-effect` is the narrow actuator for a lifecycle-
+  owned comm effect. The caller supplies its stable effect id and exact source
+  and target generation witnesses; txd validates them, admits that id through
+  the ordinary one-way comm pipeline, and reports its existing transport and
+  delivery/refusal facts. It does not decide why the effect exists or resolve
+  either endpoint from lifecycle policy. If txd restarts after admitting the
+  effect but before snapshotting its targets, replay reconstructs that one
+  snapshot from the admitted comm and terminalizes the interrupted transport;
+  later replays create neither another snapshot nor another send attempt.
 - `tx comm <identity> command=<name> [-- args]` invokes the named slash
   command. `tx comm <identity> skill=<name> [-- args]` invokes a target skill.
   Callers never supply `/`, `$`, or an engine flag: txd resolves the target's

@@ -31,6 +31,7 @@ import {
   ClipboardPushRequestSchema,
   ClipboardSelectionRequestSchema,
   CommRequestSchema,
+  LifecycleCommEffectRequestSchema,
   CommHookSchema,
   CommReceiptWaitRequestSchema,
   AgentInjectRequestSchema,
@@ -320,6 +321,21 @@ export function buildRoutes(
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
           return json({ ok: false, error: 'comm_refused', detail }, 422);
+        }
+      },
+    },
+    {
+      method: 'POST',
+      match: exact('/agents/comm/lifecycle-effect'),
+      label: 'POST /agents/comm/lifecycle-effect',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, LifecycleCommEffectRequestSchema, 'invalid_lifecycle_comm_effect_request');
+        if (parsed instanceof Response) return parsed;
+        try {
+          return json(await daemon.lifecycleCommEffect(parsed, receipt(req)));
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          return json({ ok: false, error: 'lifecycle_comm_effect_refused', detail }, 409);
         }
       },
     },

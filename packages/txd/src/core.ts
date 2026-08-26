@@ -30,6 +30,8 @@ import {
   type CommIntent,
   type CommLogicalIdentity,
   type CommRequest,
+  type LifecycleCommEffectRequest,
+  type LifecycleCommEffectResponse,
   type CommReceiptWaitRequest,
   type CommReceipt,
   type CommTarget,
@@ -108,7 +110,7 @@ import {
   sameIdentity,
   type AcceptedCommIdentity,
 } from './comm-identity.ts';
-import { commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
+import { attributedCommFrame, commFrame, commTokenForMessageId, type CommFrameSource } from './comm-frame.ts';
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
@@ -165,6 +167,20 @@ export type CommReceiptRuntime = {
 };
 export type CommAdmission = Pick<CommAccepted,
   'ok' | 'message_id' | 'ask_id' | 'source_agent_id' | 'targets' | 'event_ids'>;
+type InternalComm = {
+  messageId: string;
+  sourceAgentIdInFrame: string;
+  expectedSourceBoundSeq: number;
+  expectedTargetAgentId: string;
+  expectedTargetBoundSeq: number;
+  lifecycleEffect: {
+    effect_id: string;
+    source_birth_generation: string;
+    source_pane_generation: string;
+    target_birth_generation: string;
+    target_pane_generation: string;
+  };
+};
 type ResolvedCommTarget = CommTarget & { logical_identity: CommLogicalIdentity };
 const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
   now: () => Date.now(),
@@ -240,6 +256,7 @@ function liveClaim(
 function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
+
 
 function committedTransportBytes(outcome: { bytes: number; verdict: string }): number {
   return outcome.verdict === 'seat_unresolved' ? 0 : outcome.bytes;
@@ -1414,7 +1431,8 @@ export class Daemon {
     req: CommRequest,
     transportReceipt: string | null = null,
     onAccepted?: (admission: CommAdmission) => void,
-  ): Promise<CommAccepted> {
+    internal?: InternalComm,
+  ): Promise<CommAccepted & { replayed?: boolean }> {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
@@ -1427,6 +1445,9 @@ export class Daemon {
       // refuses here rather than stage a frame that misattributes itself.
       if (sourceBindings.length !== 1) throw new Error('source_identity_ambiguous');
       const sourceBinding = sourceBindings[0]!;
+      if (internal && sourceBinding.bound_seq !== internal.expectedSourceBoundSeq) {
+        throw new Error('source_binding_changed');
+      }
       if (!sourceBinding.persona) throw new Error('source_persona_unresolved');
       const source: CommFrameSource = { persona: sourceBinding.persona, seat_id: sourceBinding.seat_id };
       const events = await this.store.readAll();
@@ -1468,6 +1489,15 @@ export class Daemon {
         if (targets.length === 0) throw new Error(`identity_absent: ${canonicalIdentity}`);
         if (targets.length > 1) throw new Error(AMBIGUOUS_IDENTITY(canonicalIdentity));
       }
+      if (internal) {
+        const target = targets[0];
+        const targetBinding = target && routableBindings(proj).find((binding) =>
+          binding.agent_id === target.agent_id && binding.seat_id === target.seat_id);
+        if (target?.agent_id !== internal.expectedTargetAgentId
+          || targetBinding?.bound_seq !== internal.expectedTargetBoundSeq) {
+          throw new Error(`target_binding_changed: ${internal.expectedTargetAgentId}`);
+        }
+      }
       const pendingResetSeats = this.pendingScopedResetSeats(events);
       const fenced = targets.find((target) => pendingResetSeats.has(target.seat_id));
       if (fenced) throw new Error(`scoped_reset_pending: ${fenced.seat_id}`);
@@ -1476,22 +1506,97 @@ export class Daemon {
         : null;
       if (req.intent && !intentBinding?.engine) throw new Error(`target_engine_unresolved: ${targets[0]?.agent_id}`);
       const renderedIntent = req.intent ? renderCommIntent(req.intent, intentBinding!.engine!) : null;
-      const messageId = crypto.randomUUID();
+      const messageId = internal?.messageId ?? crypto.randomUUID();
       const askId = req.ask ? crypto.randomUUID() : null;
       const occurred_at = this.now();
+      const renderedMessageFrame = internal
+        ? attributedCommFrame(messageId, source, internal.sourceAgentIdInFrame, req.message!)
+        : null;
+      const existing = events.find((event) => event.entity_id === messageId
+        && event.event_type === 'reg.comm_accepted');
+      if (existing) {
+        let snapshot = events.find((event) => event.event_type === 'reg.comm_target_snapshotted'
+          && event.payload.message_id === messageId);
+        const persistedLifecycleEffect = existing.payload.lifecycle_effect as Record<string, unknown> | undefined;
+        const sameEffect = internal
+          && existing.payload.effect === 'lifecycle_comm'
+          && existing.payload.source_agent_id === req.source_agent_id
+          && existing.payload.message === req.message
+          && persistedLifecycleEffect?.effect_id === internal.lifecycleEffect.effect_id
+          && persistedLifecycleEffect?.source_birth_generation === internal.lifecycleEffect.source_birth_generation
+          && persistedLifecycleEffect?.source_pane_generation === internal.lifecycleEffect.source_pane_generation
+          && persistedLifecycleEffect?.target_birth_generation === internal.lifecycleEffect.target_birth_generation
+          && persistedLifecycleEffect?.target_pane_generation === internal.lifecycleEffect.target_pane_generation
+          && JSON.stringify(existing.payload.target_agent_ids) === JSON.stringify(targets.map((target) => target.agent_id));
+        if (!sameEffect) throw new Error('comm_message_id_conflict');
+        if (!snapshot) {
+          snapshot = await this.store.append({
+            entity_type: 'message',
+            entity_id: messageId,
+            event_type: 'reg.comm_target_snapshotted',
+            payload: { message_id: messageId, targets: existing.payload.targets },
+            provenance: this.prov('observer', transportReceipt),
+            occurred_at: this.now(),
+          });
+        }
+        const sent = events.filter((event) => event.entity_id === messageId
+          && event.event_type === 'act.comm_bytes_sent');
+        return {
+          messageId,
+          askId: null,
+          replyingToAsk: null,
+          source,
+          targets,
+          renderedIntent: null,
+          renderedMessageFrame,
+          eventIds: [existing.seq, snapshot.seq, ...sent.map((event) => event.seq)],
+          replayed: true,
+          replayComplete: sent.length === targets.length,
+          replayStaged: sent.length === targets.length
+            && sent.every((event) => event.payload.submit_verdict === 'staged'),
+        };
+      }
       const accepted = await this.store.append({ entity_type: 'message', entity_id: messageId, event_type: 'reg.comm_accepted', payload: {
         source_agent_id: req.source_agent_id, source, target_agent_ids: targets.map((t) => t.agent_id), targets,
         ask_id: askId, reply_to_ask_id: replyingToAsk,
         kind: req.intent?.kind ?? 'message',
         name: req.intent?.name ?? null,
-        rendered_frame: renderedIntent?.frame ?? null,
+        rendered_frame: renderedIntent?.frame ?? renderedMessageFrame,
         message: req.message ?? renderedIntent!.frame,
         ...(req.intent ? { intent: req.intent } : {}),
+        ...(internal ? { effect: 'lifecycle_comm', lifecycle_effect: internal.lifecycleEffect } : {}),
       }, provenance: this.prov('wrapper', transportReceipt), occurred_at });
       const snapshot = await this.store.append({ entity_type: askId ? 'ask' : 'message', entity_id: askId ?? messageId,
         event_type: 'reg.comm_target_snapshotted', payload: { message_id: messageId, targets }, provenance: this.prov('observer', transportReceipt), occurred_at });
-      return { messageId, askId, replyingToAsk, source, targets, renderedIntent, eventIds: [accepted.seq, snapshot.seq] };
+      return {
+        messageId, askId, replyingToAsk, source, targets, renderedIntent, renderedMessageFrame,
+        eventIds: [accepted.seq, snapshot.seq], replayed: false, replayStaged: false,
+        replayComplete: false,
+      };
     });
+
+    if (prepared.replayed) {
+      if (!prepared.replayComplete) {
+        await this.terminalizeInactiveCommTransport(prepared.messageId);
+        const events = await this.store.readAll();
+        const sent = events.filter((event) => event.entity_id === prepared.messageId
+          && event.event_type === 'act.comm_bytes_sent');
+        prepared.eventIds.push(...sent.map((event) => event.seq)
+          .filter((seq) => !prepared.eventIds.includes(seq)));
+        prepared.replayStaged = sent.length === prepared.targets.length
+          && sent.every((event) => event.payload.submit_verdict === 'staged');
+      }
+      return {
+        ok: true,
+        message_id: prepared.messageId,
+        ask_id: null,
+        source_agent_id: req.source_agent_id,
+        targets: prepared.targets,
+        staged: prepared.replayStaged,
+        event_ids: prepared.eventIds,
+        replayed: true,
+      };
+    }
 
     // The journaled admission is the sender's durable correlation handle.
     // Expose it immediately after persistence: every later step is transport
@@ -1523,17 +1628,26 @@ export class Daemon {
       const plans = await this.locked(async () => {
         const proj = await this.projections();
         const events = await this.store.readAll();
+        if (internal && !proj.currentBindings.some((binding) => binding.registered
+          && binding.agent_id === req.source_agent_id
+          && binding.bound_seq === internal.expectedSourceBoundSeq)) {
+          throw new Error('source_binding_changed');
+        }
         const pendingResetSeats = this.pendingScopedResetSeats(events);
         for (const target of prepared.targets) {
           const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
-            && row.agent_id === target.agent_id && row.seat_id === target.seat_id);
+            && row.agent_id === target.agent_id
+            && row.seat_id === target.seat_id
+            && (!internal || row.bound_seq === internal.expectedTargetBoundSeq));
           if (!binding) throw new Error(`target_binding_changed: ${target.agent_id}`);
           if (pendingResetSeats.has(target.seat_id)) throw new Error(`scoped_reset_pending: ${target.seat_id}`);
         }
         return prepared.targets.map((target) => {
           const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
-            && row.agent_id === target.agent_id && row.seat_id === target.seat_id)!;
-          const frame = prepared.renderedIntent?.frame
+            && row.agent_id === target.agent_id
+            && row.seat_id === target.seat_id
+            && (!internal || row.bound_seq === internal.expectedTargetBoundSeq))!;
+          const frame = prepared.renderedIntent?.frame ?? prepared.renderedMessageFrame
             ?? commFrame(prepared.messageId, prepared.source, req.message!);
           // The target's turn state at send, stamped on the receipt: a frame
           // staged into a WORKING engine is queued into that turn, and only that
@@ -2418,6 +2532,62 @@ export class Daemon {
     });
   }
 
+  async lifecycleCommEffect(
+    req: LifecycleCommEffectRequest,
+    transportReceipt: string | null = null,
+  ): Promise<LifecycleCommEffectResponse> {
+    const fenced = await this.locked(async () => {
+      if (req.schema_version !== SCHEMA_VERSION) {
+        throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
+      }
+      const projections = await this.projections();
+      const source = routableBindings(projections).find((binding) =>
+        binding.agent_id === req.source.agent_id
+        && binding.seat_id === req.source.seat_id
+        && binding.persona === req.source.persona
+        && binding.birth_generation === req.source.birth_generation
+        && binding.pane_generation === req.source.pane_generation);
+      if (!source) throw new Error('source_effect_binding_mismatch');
+      const target = routableBindings(projections).find((binding) =>
+        binding.agent_id === req.target.agent_id
+        && binding.seat_id === req.target.seat_id
+        && binding.birth_generation === req.target.birth_generation
+        && binding.pane_generation === req.target.pane_generation);
+      if (!target) throw new Error('target_effect_binding_mismatch');
+      return { sourceBoundSeq: source.bound_seq, targetBoundSeq: target.bound_seq };
+    });
+
+    const accepted = await this.comm({
+      schema_version: req.schema_version,
+      source_agent_id: req.source.agent_id,
+      target: req.target.agent_id,
+      message: req.message,
+      ask: false,
+      reply: false,
+    }, transportReceipt, undefined, {
+      messageId: req.effect_id,
+      sourceAgentIdInFrame: req.source.agent_id,
+      expectedSourceBoundSeq: fenced.sourceBoundSeq,
+      expectedTargetAgentId: req.target.agent_id,
+      expectedTargetBoundSeq: fenced.targetBoundSeq,
+      lifecycleEffect: {
+        effect_id: req.effect_id,
+        source_birth_generation: req.source.birth_generation,
+        source_pane_generation: req.source.pane_generation,
+        target_birth_generation: req.target.birth_generation,
+        target_pane_generation: req.target.pane_generation,
+      },
+    });
+    return {
+      ok: true,
+      message_id: accepted.message_id,
+      source_agent_id: accepted.source_agent_id,
+      targets: accepted.targets,
+      staged: accepted.staged,
+      replayed: accepted.replayed === true,
+      event_ids: accepted.event_ids,
+    };
+  }
   async waitComm(req: CommWaitRequest): Promise<CommWaitResponse> {
     if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
     const read = async (): Promise<CommWaitResponse> => {

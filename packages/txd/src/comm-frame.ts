@@ -13,7 +13,7 @@ export type CommFrameSource = {
 
 const COMM_TOKEN = '[A-Za-z0-9_-]{22}';
 const TX_COMM_FRAME = new RegExp(
-  `^\\[tx comm from [^\\]\\r\\n]+ at [^\\]\\r\\n]+ #(${COMM_TOKEN})\\]\\r?$`,
+  `^\\[tx comm from [^\\]\\r\\n]+ at [^\\]\\r\\n]+(?: agent [^\\]\\r\\n]+)? #(${COMM_TOKEN})\\]\\r?$`,
   'gm',
 );
 
@@ -29,6 +29,15 @@ export function commFrame(
   message: string,
 ): string {
   return `[tx comm from ${source.persona} at ${source.seat_id} #${commTokenForMessageId(messageId)}]\n${message}`;
+}
+
+export function attributedCommFrame(
+  messageId: string,
+  source: CommFrameSource,
+  sourceAgentId: string,
+  message: string,
+): string {
+  return `[tx comm from ${source.persona} at ${source.seat_id} agent ${sourceAgentId} #${commTokenForMessageId(messageId)}]\n${message}`;
 }
 
 // Every comm frame the flush carried, not just the one that happened to land
