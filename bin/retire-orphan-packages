@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Retire installed services whose owning Terminus package no longer exists.
+# A package deletion is an instruction to remove its runtime artifacts, not to
+# leave its last installed generation running forever.
+set -euo pipefail
+
+machine="${1:?usage: retire-orphan-packages <machine>}"
+if [[ "$machine" != "k12-personal" ]]; then
+  echo "retire-orphan-packages($machine): no Terminus services on this machine"
+  exit 0
+fi
+
+terminus="${TERMINUS_CHECKOUT:-$HOME/runtimes/Terminus-OS/live}"
+unit_dir="${TERMINUS_UNIT_DIR:-$HOME/.config/systemd/user}"
+config_dir="${TERMINUS_CONFIG_DIR:-$HOME/.config/token-fleet}"
+state_dir="${TERMINUS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet}"
+install_root="${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}"
+systemctl="${SYSTEMCTL:-systemctl}"
+retired=0
+
+shopt -s nullglob
+for dropin in "$unit_dir"/*.service.d/generation.conf; do
+  working_directory="$(sed -n 's/^WorkingDirectory=//p' "$dropin")"
+  [[ "$working_directory" == "$terminus/packages/"* ]] || continue
+  package="${working_directory#"$terminus/packages/"}"
+  [[ "$package" != */* && -n "$package" ]] || continue
+  [[ ! -e "$terminus/packages/$package" ]] || continue
+
+  service_dir="$(dirname "$dropin")"
+  service="$(basename "$service_dir" .service.d)"
+  related=("$unit_dir/$service.service" "$unit_dir/$package-"*.path)
+  unit_names=()
+  for unit in "${related[@]}"; do
+    [[ -e "$unit" ]] || continue
+    unit_names+=("$(basename "$unit")")
+  done
+  if ((${#unit_names[@]})); then
+    "$systemctl" disable --now "${unit_names[@]}"
+  fi
+  rm -f "${related[@]}" "$config_dir/$package.json" "$state_dir/$package.applied.sha256"
+  rm -rf "$service_dir" "$install_root/$package" "$install_root/generations/$package"
+  rmdir "$working_directory" 2>/dev/null || true
+  retired=$((retired + 1))
+  echo "retire-orphan-packages($machine): retired $package"
+done
+
+if ((retired)); then
+  "$systemctl" daemon-reload
+else
+  echo "retire-orphan-packages($machine): no orphan packages"
+fi
