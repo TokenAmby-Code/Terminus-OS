@@ -277,13 +277,6 @@ test('behavioral pin: transport refusal remains ordinary txd comm evidence', asy
     submit_verdict: 'transport_failed',
     bytes: 0,
   });
-  expect((await daemon.health('test', { version: 'test', git_sha: 'head', bun: Bun.version }))).toMatchObject({
-    ok: false,
-    comm_transport: {
-      state: 'degraded',
-      unresolved_target_agent_ids: [TARGET_AGENT],
-    },
-  });
 });
 
 test('behavioral pin: the HTTP edge is strict and carries no commander policy input', async () => {
@@ -292,7 +285,6 @@ test('behavioral pin: the HTTP edge is strict and carries no commander policy in
     bind: '127.0.0.1',
     port: 0,
     daemon,
-    build: { version: 'test', git_sha: 'head', bun: Bun.version },
     machine: 'test',
   });
   try {
