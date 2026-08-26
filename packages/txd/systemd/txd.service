@@ -46,8 +46,8 @@ NotifyAccess=main
 # The daemon executes from the installed generation apply-txd realizes with
 # terminus-install-generation, never from the deploy checkout: the checkout is a
 # synchronization target whose dependency install first destroys every
-# node_modules under it. GIT_SHA arrives through the leg's generation drop-in.
-WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd
+# node_modules under it. WorkingDirectory and GIT_SHA arrive through the leg's
+# generation drop-in.
 Environment=TXD_CONFIG=%h/secrets/txd/txd.json
 Environment=IMPERIUM_MACHINE=k12-personal
 Environment=TXD_ROTATION_LOCK_FILE=%h/.local/state/txd/estate-rotation.lock

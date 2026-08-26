@@ -26,10 +26,6 @@ if [[ ! -f "$unit_src" ]] || [[ ! -d "$source_dir" ]]; then
   exit 0
 fi
 
-grep -qx 'WorkingDirectory=%h/.local/lib/terminus-os/telemetryd/packages/telemetryd' "$unit_src" || {
-  echo "apply($machine): telemetryd WorkingDirectory is not the installed generation this leg realizes" >&2
-  exit 1
-}
 grep -qx 'ExecStart=%h/.bun/bin/bun src/daemon.ts' "$unit_src" || {
   echo "apply($machine): telemetryd must use the Fleet-pinned Bun" >&2
   exit 1
@@ -47,6 +43,8 @@ unit_dir="$HOME/.config/systemd/user"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
 unit_dst="$unit_dir/telemetryd.service"
 generation_dropin="$unit_dir/telemetryd.service.d/generation.conf"
+install_root="${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}"
+working_directory="$install_root/telemetryd/packages/telemetryd"
 stamp="$state_dir/telemetryd.applied.sha256"
 sha="$(git -C "$terminus" rev-parse HEAD)"
 
@@ -62,9 +60,9 @@ old_hash="$(cat "$stamp" 2>/dev/null || true)"
 mkdir -p "$unit_dir" "$(dirname "$generation_dropin")" "$state_dir" "$HOME/.local/bin"
 # tm links through the current-generation pointer, so the CLI is current the
 # moment its generation is, without a relink and without a daemon restart.
-ln -sfn "${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}/telemetryd/packages/telemetryd/src/cli.ts" "$HOME/.local/bin/tm"
+ln -sfn "$working_directory/src/cli.ts" "$HOME/.local/bin/tm"
 cp -f "$unit_src" "$unit_dst"
-printf '[Service]\nEnvironment=GIT_SHA=%s\n' "$sha" >"$generation_dropin"
+printf '[Service]\nEnvironment=GIT_SHA=%s\nWorkingDirectory=%s\n' "$sha" "$working_directory" >"$generation_dropin"
 systemctl --user daemon-reload
 systemctl --user enable telemetryd.service
 if [[ "$new_hash" != "$old_hash" ]] || ! systemctl --user is-active --quiet telemetryd.service; then

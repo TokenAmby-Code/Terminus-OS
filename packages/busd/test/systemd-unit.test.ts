@@ -4,8 +4,8 @@
 // apply-busd leg; a wrong line is a box outage, not a style nit. Each ruled
 // directive is pinned byte-exactly (txd's systemd-unit.test.ts precedent):
 //
-// - WorkingDirectory: the k12 box layout keeps the checkout under `live/`
-//   (txd Defect A: shipping the path without live/ produced a CHDIR crashloop).
+// - WorkingDirectory is absent: the apply leg owns the checkout root through
+//   its generation.conf drop-in.
 // - Postgres socket wait: user units cannot order After= the SYSTEM
 //   postgresql.service, so a path unit consumes the peer-socket appearance
 //   event. No poll loop or magic startup timeout is permitted.
@@ -26,8 +26,8 @@ function pin(exact: string): void {
 }
 
 describe('systemd/busd.service pins', () => {
-  test('WorkingDirectory targets the live/ checkout on the box', () => {
-    pin('WorkingDirectory=%h/runtimes/Terminus-OS/live/packages/busd');
+  test('WorkingDirectory belongs to the apply-leg drop-in', () => {
+    expect(lines.filter((line) => line.startsWith('WorkingDirectory='))).toEqual([]);
   });
 
   test('ExecStart runs the daemon via the pinned fleet bun', () => {
