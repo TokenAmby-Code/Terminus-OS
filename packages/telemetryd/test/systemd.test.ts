@@ -21,8 +21,7 @@ test("telemetryd's start job completes on the daemon's own readiness edge", () =
 // first destroys every node_modules under it, and a daemon running out of that
 // tree is one refused realization step away from a stripped runtime.
 test("telemetryd runs from its installed generation with Fleet Bun", () => {
-  expect(unit).toContain("WorkingDirectory=%h/.local/lib/terminus-os/telemetryd/packages/telemetryd");
-  expect(unit).not.toContain("WorkingDirectory=%h/runtimes/");
+  expect(unit).not.toMatch(/^WorkingDirectory=/m);
   expect(unit).toContain("ExecStart=%h/.bun/bin/bun src/daemon.ts");
   expect(unit).toContain("Restart=on-failure");
 });

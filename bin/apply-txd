@@ -64,13 +64,6 @@ grep -q '^ExecStart=%h/\.bun/bin/bun ' "$txd_src" || {
   echo "apply($machine): txd unit must ExecStart the pinned absolute bun (%h/.bun/bin/bun, apply-fleet-runtime pin); refusing to install" >&2
   exit 1
 }
-# Defect A (2026-07-20): a unit with a nonexistent WorkingDirectory sailed
-# through the pin set and got installed. The daemon runs from the installed
-# generation this leg realizes — pin the exact value, not just the key's presence.
-grep -qx 'WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd' "$txd_src" || {
-  echo "apply($machine): txd unit must pin WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd (the installed generation this leg realizes); refusing to install" >&2
-  exit 1
-}
 grep -qx 'BindsTo=tx-estate.service' "$txd_src" || {
   echo "apply($machine): txd unit must bind its lifecycle to tx-estate.service; refusing to install" >&2
   exit 1
@@ -155,6 +148,7 @@ txd_generation="$("$terminus/bin/terminus-install-generation" "$terminus" txd sr
 tx_generation="$("$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts)"
 tx_main="$install_root/tx/packages/tx/src/main.ts"
 tmux_conf="$install_root/txd/packages/txd/tmux/tx.conf"
+working_directory="$install_root/txd/packages/txd"
 [[ -f "$tx_main" ]] || { echo "apply($machine): tx generation ${tx_generation:0:12} does not carry src/main.ts" >&2; exit 1; }
 [[ -f "$tmux_conf" ]] || { echo "apply($machine): txd generation ${txd_generation:0:12} does not carry tmux/tx.conf" >&2; exit 1; }
 new_hash="$({
@@ -173,7 +167,7 @@ mkdir -p "$user_unit_dir" "$user_bin_dir" "$state_dir" "$(dirname "$generation_d
 ln -sfn "$tx_main" "$user_bin_dir/tx"
 cp -f "$txd_src" "$txd_dst"
 cp -f "$estate_src" "$estate_dst"
-printf '[Service]\nEnvironment=GIT_SHA=%s\n' "$sha" >"$generation_dropin"
+printf '[Service]\nEnvironment=GIT_SHA=%s\nWorkingDirectory=%s\n' "$sha" "$working_directory" >"$generation_dropin"
 systemctl --user daemon-reload
 systemctl --user enable tx-estate.service txd.service
 if ! systemctl --user is-active --quiet tx-estate.service; then
