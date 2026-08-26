@@ -68,7 +68,7 @@ test('health and inspect are strict STC 1.4.0 envelopes with txd identity and ri
   const inspect = await observe(new Request('http://txd/inspect'));
   const inspectBody = InspectResponseSchema.parse(await inspect!.json());
   expect(inspectBody).not.toHaveProperty('ok');
-  expect(inspectBody.observation_ring.probes.map((probe) => probe.name)).toContain('comm-transport');
+  expect(inspectBody.probes.map((probe: { name: string }) => probe.name)).toContain('comm-transport');
   expect(inspectBody.holdings.map((holding: { name: string }) => holding.name)).toEqual([
     'bindings', 'contradictions', 'divergence', 'events', 'freelist', 'zombies',
   ]);
