@@ -114,7 +114,7 @@ describe("an installed generation", () => {
   });
 
   // The digest is what the daemon loads, so a change to a workspace member
-  // outside the closure — the case that restarted busd on every unrelated
+  // outside the closure — the case that restarted a service on every unrelated
   // merge while HEAD was the key — leaves it alone, and a change inside the
   // closure moves it. Both are held against a copy of this checkout with one
   // file edited, realized into its own install root.

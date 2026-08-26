@@ -93,9 +93,3 @@ jobs:
 
       - name: txd PostgreSQL integration
         run: bun test packages/txd
-
-      - name: busd PostgreSQL integration
-        run: bun test packages/busd/test/store.test.ts
-
-      - name: Replay PostgreSQL integration
-        run: bun test packages/busd/test/replay-store.test.ts

@@ -18,7 +18,7 @@ placement signoff, and literal engine lifecycle hooks. It persists each input
 before acknowledging bus delivery and emits generation-bound readiness,
 stopping, inactivity, and retirement facts. It owns no identity allocation.
 
-edge-proxy and busd provide content-agnostic hook ingress and immutable event
+edge-proxy provides content-agnostic hook ingress and consumers append immutable event
 delivery. A bus event is always a one-way fact and never a return value.
 
 ## Identity and placement
@@ -89,7 +89,7 @@ The generic reply mechanism is proxy-held HTTP with a private control reply:
    one-shot reply mode and a configured deadline class. It does not mint the
    callback ID.
 2. edge-proxy mints a collision-resistant `hook_request_id`, adds it as hook
-   ingress metadata, forwards the hook to busd, and holds the original HTTP
+   ingress metadata, forwards the hook to its declared consumers, and holds the original HTTP
    response.
 3. Exactly one authorized service posts a strict reply envelope to the
    proxy-owned `/hooks/reply` control surface. The envelope carries the
@@ -130,7 +130,7 @@ The wrapper is the sole caller of raw Claude and Codex binaries:
 
 1. It posts `hook.wrapper_start` through edge-proxy and waits for the generic
    reply.
-2. busd journals the immutable hook. registrationd and txd consume it
+2. Each consumer appends the immutable facts it owns to the journal and advances its direct SQL cursor
    independently.
 3. registrationd admits an idempotent durable birth stream and mints
    `agent_id`.

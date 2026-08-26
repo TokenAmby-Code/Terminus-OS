@@ -20,7 +20,6 @@ const root = join(import.meta.dir, "..");
 const SERVICES = [
   { service: "txd", unit: "packages/txd/systemd/txd.service", leg: "bin/apply-txd", proves: "notify", root: '$install_root/txd/packages/txd' },
   { service: "telemetryd", unit: "packages/telemetryd/systemd/telemetryd.service", leg: "bin/apply-telemetryd", proves: "function-probe", root: '$install_root/telemetryd/packages/telemetryd' },
-  { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "bin/apply-busd", proves: "none", root: '$terminus/packages/busd' },
 ] as const;
 
 // Services whose daemon executes from an installed generation: the leg's
@@ -28,7 +27,7 @@ const SERVICES = [
 // the unit's WorkingDirectory is the current-generation pointer that installer
 // maintains. The rest still fingerprint the checkout they execute from.
 const INSTALLED = SERVICES.filter(({ service }) => service === "telemetryd" || service === "txd");
-const CHECKOUT_EXECUTED = SERVICES.filter(({ service }) => service === "busd");
+const CHECKOUT_EXECUTED: typeof SERVICES = [];
 
 const read = (relative: string) => readFileSync(join(root, relative), "utf8");
 

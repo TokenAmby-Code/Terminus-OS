@@ -30,7 +30,7 @@ const C = '4b470ef8-eee6-4a1e-9f0a-000000000001';
 
 test('a coalesced flush yields EVERY frame it carried, in order', () => {
   const prompt = [
-    frame(A), 'DISPATCH — busd pre/post-tool event spam. P0.', '',
+    frame(A), 'DISPATCH — pre/post-tool event spam. P0.', '',
     frame(B), 'STATUS REQUEST from council:custodes.',
   ].join('\n');
   expect(commFrameTokens(prompt)).toEqual(tokens([A, B]));
