@@ -25,7 +25,10 @@ describe("orphan Terminus package retirement", () => {
     for (const name of ["orphan", "keeper"]) {
       await mkdir(join(units, `${name}.service.d`), { recursive: true });
       await writeFile(join(units, `${name}.service`), "[Service]\n");
-      await writeFile(join(units, `${name}.service.d`, "generation.conf"), `[Service]\nWorkingDirectory=${terminus}/packages/${name}\n`);
+      const workingDirectory = name === "orphan"
+        ? join(installs, name, "packages", name)
+        : join(terminus, "packages", name);
+      await writeFile(join(units, `${name}.service.d`, "generation.conf"), `[Service]\nWorkingDirectory=${workingDirectory}\n`);
       await writeFile(join(config, `${name}.json`), "{}\n");
       await writeFile(join(state, `${name}.applied.sha256`), "digest\n");
       await mkdir(join(installs, "generations", name, "digest"), { recursive: true });
@@ -33,6 +36,7 @@ describe("orphan Terminus package retirement", () => {
     }
     await writeFile(join(units, "orphan-postgres.path"), "[Path]\n");
     await mkdir(join(terminus, "packages", "keeper"), { recursive: true });
+    await writeFile(join(terminus, "packages", "keeper", "package.json"), "{}\n");
 
     const systemctl = join(bin, "systemctl");
     const log = join(root, "systemctl.log");

@@ -21,10 +21,15 @@ retired=0
 shopt -s nullglob
 for dropin in "$unit_dir"/*.service.d/generation.conf; do
   working_directory="$(sed -n 's/^WorkingDirectory=//p' "$dropin")"
-  [[ "$working_directory" == "$terminus/packages/"* ]] || continue
-  package="${working_directory#"$terminus/packages/"}"
+  if [[ "$working_directory" == "$terminus/packages/"* ]]; then
+    package="${working_directory#"$terminus/packages/"}"
+  elif [[ "$working_directory" == "$install_root/"*/packages/* ]]; then
+    package="${working_directory##*/packages/}"
+  else
+    continue
+  fi
   [[ "$package" != */* && -n "$package" ]] || continue
-  [[ ! -e "$terminus/packages/$package" ]] || continue
+  [[ ! -f "$terminus/packages/$package/package.json" ]] || continue
 
   service_dir="$(dirname "$dropin")"
   service="$(basename "$service_dir" .service.d)"
