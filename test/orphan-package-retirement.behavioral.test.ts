@@ -22,7 +22,7 @@ describe("orphan Terminus package retirement", () => {
     const bin = join(root, "bin");
     await Promise.all([terminus, units, config, state, installs, bin].map((path) => mkdir(path, { recursive: true })));
 
-    for (const name of ["orphan", "keeper"]) {
+    for (const name of ["orphan", "checkout-orphan", "keeper"]) {
       await mkdir(join(units, `${name}.service.d`), { recursive: true });
       await writeFile(join(units, `${name}.service`), "[Service]\n");
       const workingDirectory = name === "orphan"
@@ -59,6 +59,7 @@ describe("orphan Terminus package retirement", () => {
     expect(await proc.exited).toBe(0);
 
     expect(await Bun.file(log).text()).toContain("disable --now orphan.service orphan-postgres.path");
+    expect(await Bun.file(log).text()).toContain("disable --now checkout-orphan.service");
     for (const path of [
       join(units, "orphan.service"),
       join(units, "orphan.service.d"),
@@ -67,6 +68,12 @@ describe("orphan Terminus package retirement", () => {
       join(state, "orphan.applied.sha256"),
       join(installs, "orphan"),
       join(installs, "generations", "orphan"),
+      join(units, "checkout-orphan.service"),
+      join(units, "checkout-orphan.service.d"),
+      join(config, "checkout-orphan.json"),
+      join(state, "checkout-orphan.applied.sha256"),
+      join(installs, "checkout-orphan"),
+      join(installs, "generations", "checkout-orphan"),
     ]) expect(await pathExists(path)).toBe(false);
 
     for (const path of [
