@@ -1,14 +1,7 @@
 // A service's apply leg and the unit it installs are one artifact.
 //
-// Each of these legs validates the unit it is about to install, and among the
-// pins is the unit's exact `WorkingDirectory`. While the leg lived in
-// Token-Fleet and the unit in Terminus-OS, the two repositories converged
-// independently, so that agreement was unenforceable and the path was unable to
-// change in either order: land the unit first and the leg refuses it, land the
-// leg first and it refuses the still-old unit.
-//
-// Now that both live here, the agreement is a property of one commit — which is
-// the whole reason the legs moved. These tests hold it that way.
+// Each leg owns the runtime root it realizes. The installed unit remains
+// uniform while generation.conf supplies the leg's exact WorkingDirectory.
 
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
@@ -25,9 +18,9 @@ const root = join(import.meta.dir, "..");
 // a restart failure (a drifted estate must find txd up and red, never
 // crash-looping) — so the restart returning IS the observed function edge.
 const SERVICES = [
-  { service: "txd", unit: "packages/txd/systemd/txd.service", leg: "bin/apply-txd", proves: "notify" },
-  { service: "telemetryd", unit: "packages/telemetryd/systemd/telemetryd.service", leg: "bin/apply-telemetryd", proves: "function-probe" },
-  { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "bin/apply-busd", proves: "none" },
+  { service: "txd", unit: "packages/txd/systemd/txd.service", leg: "bin/apply-txd", proves: "notify", root: '$install_root/txd/packages/txd' },
+  { service: "telemetryd", unit: "packages/telemetryd/systemd/telemetryd.service", leg: "bin/apply-telemetryd", proves: "function-probe", root: '$install_root/telemetryd/packages/telemetryd' },
+  { service: "busd", unit: "packages/busd/systemd/busd.service", leg: "bin/apply-busd", proves: "none", root: '$terminus/packages/busd' },
 ] as const;
 
 // Services whose daemon executes from an installed generation: the leg's
@@ -40,15 +33,17 @@ const CHECKOUT_EXECUTED = SERVICES.filter(({ service }) => service === "busd");
 const read = (relative: string) => readFileSync(join(root, relative), "utf8");
 
 describe("apply leg and installed unit agree", () => {
-  test.each(SERVICES)("$service: the leg pins the WorkingDirectory its unit declares", ({ unit, leg }) => {
+  test.each(SERVICES)("$service: the leg drop-in owns WorkingDirectory", ({ unit, leg, root: runtimeRoot }) => {
     const declared = read(unit)
       .split("\n")
       .filter((line) => line.startsWith("WorkingDirectory="));
-    expect(declared).toHaveLength(1);
+    expect(declared).toEqual([]);
 
-    // The leg asserts the literal with `grep -qx`, so the pinned string is the
-    // unit line verbatim. A drifting unit fails here instead of at converge.
-    expect(read(leg)).toContain(`grep -qx '${declared[0]}'`);
+    const source = read(leg);
+    expect(source).not.toMatch(/grep -qx 'WorkingDirectory=/);
+    expect(source).toContain(`working_directory="${runtimeRoot}"`);
+    expect(source).toContain("WorkingDirectory=%s\\n");
+    expect(source).toContain('"$sha" "$working_directory" >"$generation_dropin"');
   });
 
   test.each(CHECKOUT_EXECUTED)("$service: the leg resolves the fingerprint helper inside this repository", ({ leg }) => {
@@ -63,12 +58,10 @@ describe("apply leg and installed unit agree", () => {
     const source = read(leg);
     expect(source).toContain(`"$terminus/bin/terminus-install-generation" "$terminus" ${service} src/daemon.ts`);
     expect(source).not.toContain("terminus-package-fingerprint");
-    expect(read(unit)).toContain(
-      `WorkingDirectory=%h/.local/lib/terminus-os/${service}/packages/${service}`,
-    );
+    expect(read(unit)).not.toMatch(/^WorkingDirectory=/m);
     // An installed tree cannot answer `git rev-parse`; the checkout SHA reaches
     // the daemon as a drop-in the restart key does not fold.
-    expect(source).toContain(`printf '[Service]\\nEnvironment=GIT_SHA=%s\\n' "$sha" >"$generation_dropin"`);
+    expect(source).toContain(`printf '[Service]\\nEnvironment=GIT_SHA=%s\\nWorkingDirectory=%s\\n' "$sha"`);
     if (proves === "function-probe") {
       // Promotion is the function rung, and the stamp is written only after it.
       expect(source.indexOf("prove-service-function-ready")).toBeGreaterThan(source.indexOf("systemctl --user restart"));

@@ -4,11 +4,8 @@
 // apply leg; a wrong line is a box outage, not a style nit. Each ruled
 // directive is pinned byte-exactly:
 //
-// - WorkingDirectory: the k12 box layout is
-//   ~/runtimes/Terminus-OS/{live,battlefield,config,Terminus-OS.git} — the
-//   checkout lives under `live/`. The extraction PR shipped the path without
-//   `live/`, producing a status=200/CHDIR crashloop (2026-07-20 §5 acceptance
-//   FAIL, Defect A).
+// - WorkingDirectory is absent: the apply leg owns the realized generation
+//   root through its generation.conf drop-in.
 // - ConditionPathExists on TXD_CONFIG's path: a missing config must skip the
 //   unit cleanly with a visible condition-failed status, not crashloop every
 //   RestartSec (Defect B). The guard path must match the TXD_CONFIG env line.
@@ -34,8 +31,8 @@ function pin(exact: string): void {
 }
 
 describe('systemd/txd.service pins', () => {
-  test('WorkingDirectory targets the installed txd generation', () => {
-    pin('WorkingDirectory=%h/.local/lib/terminus-os/txd/packages/txd');
+  test('WorkingDirectory belongs to the apply-leg drop-in', () => {
+    expect(lines.filter((line) => line.startsWith('WorkingDirectory='))).toEqual([]);
   });
 
   // Without these two lines the daemon's readiness datagram is written into a

@@ -6,7 +6,6 @@ Wants=network-online.target
 [Service]
 Type=notify
 NotifyAccess=main
-WorkingDirectory=%h/.local/lib/terminus-os/telemetryd/packages/telemetryd
 Environment=TELEMETRYD_BIND=127.0.0.1
 Environment=TELEMETRYD_PORT=7784
 ExecStart=%h/.bun/bin/bun src/daemon.ts
