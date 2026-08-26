@@ -103,7 +103,10 @@ each route is the ruled daemon behavior, unchanged.
   and target generation witnesses; txd validates them, admits that id through
   the ordinary one-way comm pipeline, and reports its existing transport and
   delivery/refusal facts. It does not decide why the effect exists or resolve
-  either endpoint from lifecycle policy.
+  either endpoint from lifecycle policy. If txd restarts after admitting the
+  effect but before snapshotting its targets, replay reconstructs that one
+  snapshot from the admitted comm and terminalizes the interrupted transport;
+  later replays create neither another snapshot nor another send attempt.
 - `tx comm <identity> command=<name> [-- args]` invokes the named slash
   command. `tx comm <identity> skill=<name> [-- args]` invokes a target skill.
   Callers never supply `/`, `$`, or an engine flag: txd resolves the target's

@@ -239,12 +239,16 @@ test('behavioral pin: restart after acceptance but before target snapshot recove
   });
   const restarted = new Daemon(store, tmux, undefined, undefined, null, null, async () => {});
   const response = await restarted.lifecycleCommEffect(request);
+  const replay = await restarted.lifecycleCommEffect(request);
   expect(response).toMatchObject({ message_id: EFFECT_ID, staged: false, replayed: true });
+  expect(replay).toMatchObject({ message_id: EFFECT_ID, staged: false, replayed: true });
   expect(tmux.sends('council:orchestrator')).toEqual([]);
   expect((await store.readAll()).filter((event) =>
     event.entity_id === EFFECT_ID && event.event_type === 'reg.comm_target_snapshotted')).toHaveLength(1);
-  const receipt = (await store.readAll()).find((event) =>
+  const receipts = (await store.readAll()).filter((event) =>
     event.entity_id === EFFECT_ID && event.event_type === 'act.comm_bytes_sent');
+  expect(receipts).toHaveLength(1);
+  const receipt = receipts[0];
   expect(receipt?.payload).toMatchObject({
     target_agent_id: TARGET_AGENT,
     submit_verdict: 'transport_failed',
