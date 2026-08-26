@@ -44,7 +44,7 @@ for dropin in "$unit_dir"/*.service.d/generation.conf; do
   fi
   rm -f "${related[@]}" "$config_dir/$package.json" "$state_dir/$package.applied.sha256"
   rm -rf "$service_dir" "$install_root/$package" "$install_root/generations/$package"
-  rmdir "$working_directory" 2>/dev/null || true
+  rm -rf "$working_directory"
   retired=$((retired + 1))
   echo "retire-orphan-packages($machine): retired $package"
 done

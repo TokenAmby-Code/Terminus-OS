@@ -35,6 +35,8 @@ describe("orphan Terminus package retirement", () => {
       await symlink(`generations/${name}/digest`, join(installs, name));
     }
     await writeFile(join(units, "orphan-postgres.path"), "[Path]\n");
+    await mkdir(join(terminus, "packages", "checkout-orphan", "node_modules"), { recursive: true });
+    await writeFile(join(terminus, "packages", "checkout-orphan", "node_modules", "cache"), "residue\n");
     await mkdir(join(terminus, "packages", "keeper"), { recursive: true });
     await writeFile(join(terminus, "packages", "keeper", "package.json"), "{}\n");
 
@@ -75,6 +77,7 @@ describe("orphan Terminus package retirement", () => {
       join(state, "checkout-orphan.applied.sha256"),
       join(installs, "checkout-orphan"),
       join(installs, "generations", "checkout-orphan"),
+      join(terminus, "packages", "checkout-orphan"),
     ]) expect(await pathExists(path)).toBe(false);
 
     for (const path of [
