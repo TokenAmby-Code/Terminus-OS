@@ -2,12 +2,8 @@
 // its voice — a synth voice_identity for speaking personas, null for silent
 // ones — and the contract speaks schema 6.
 import { describe, expect, test } from "bun:test";
-import {
-  AGENT_SCHEMA_VERSION,
-  AgentRetiredSchema,
-  PersonaPackageSchema,
-  RegistrationAbortedSchema,
-} from "../src/registration.ts";
+import { AGENT_SCHEMA_VERSION, PersonaPackageSchema } from "@tokenamby-code/agent-contract/agent";
+import { AgentRetiredSchema, RegistrationAbortedSchema } from "@tokenamby-code/agent-contract/events";
 
 const AGENT_ID = "2ea2d049-0106-4957-8649-31f93bdc8c9a";
 const BIRTH_GENERATION = "1cc2112c-9c38-45a1-839f-831c33a1096a";
@@ -27,7 +23,7 @@ const personaPackage = (voice: string | null) => ({
   },
 });
 
-describe("persona voice in the mirrored contract", () => {
+describe("persona voice in the agent package", () => {
   test("a speaking persona carries its synth voice identity", () => {
     expect(PersonaPackageSchema.parse(personaPackage("fable")).voice).toBe("fable");
   });
@@ -42,7 +38,7 @@ describe("persona voice in the mirrored contract", () => {
   });
 });
 
-describe("agent schema version in the mirrored contract", () => {
+describe("agent schema version in the agent package", () => {
   test("the mirror speaks schema 6", () => {
     expect(AGENT_SCHEMA_VERSION).toBe(6);
   });

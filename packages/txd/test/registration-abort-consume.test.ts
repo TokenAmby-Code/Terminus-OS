@@ -7,13 +7,9 @@
 // `agent.placement_refused`, the evidence registrationd aborts on.
 
 import { expect, test } from 'bun:test';
-import {
-  AGENT_SCHEMA_VERSION,
-  PlacementRefusedSchema,
-  type Agent,
-  type PhysicalDeclaration,
-  type RegistrationAborted,
-} from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
+import { type Agent } from '@tokenamby-code/agent-contract/agent';
+import { PlacementRefusedSchema, type PhysicalDeclaration, type RegistrationAborted } from '@tokenamby-code/agent-contract/events';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -76,8 +72,8 @@ function abortEvent(overrides: Partial<RegistrationAborted> = {}): RegistrationA
 function registeredAgent(decl: PhysicalDeclaration): Agent {
   return {
     schema_version: AGENT_SCHEMA_VERSION,
-    agent_id: decl.agent_id,
-    birth_generation: decl.birth_generation,
+    identity: `astartes:black-shields:${decl.agent_id}`,
+    incarnation: { agent_id: decl.agent_id, birth_generation: decl.birth_generation },
     registered_at: '2026-08-01T12:00:00.000Z',
     engine: decl.engine,
     launch: { argv: [], requested_cwd: '/manual/work' },

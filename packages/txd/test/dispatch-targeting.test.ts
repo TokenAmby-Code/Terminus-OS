@@ -6,12 +6,9 @@
 // refusal names the seat-level truth.
 
 import { expect, test } from 'bun:test';
-import {
-  AGENT_SCHEMA_VERSION,
-  type DispatchRequested,
-  type DispatchTarget,
-  type PhysicalDeclaration,
-} from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
+import { type DispatchTarget } from '@tokenamby-code/agent-contract/agent';
+import { type DispatchRequested, type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';

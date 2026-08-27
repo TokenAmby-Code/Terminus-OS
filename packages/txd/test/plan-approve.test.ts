@@ -2,7 +2,10 @@
 // plan dialog and reads back the evidence; WHEN to approve is lifecycled's
 // correlation, arriving here only as a deliberate /agents/mode request.
 import { expect, test } from 'bun:test';
-import { AGENT_SCHEMA_VERSION, SCHEMA_VERSION, type Agent, type PhysicalDeclaration } from '@terminus-os/contracts';
+import { SCHEMA_VERSION } from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
+import { type Agent } from '@tokenamby-code/agent-contract/agent';
+import { type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux, RealTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -43,8 +46,8 @@ async function launched() {
   await d.recordPhysicalDeclaration(declaration);
   const agent: Agent = {
     schema_version: AGENT_SCHEMA_VERSION,
-    agent_id: AGENT_ID,
-    birth_generation: BIRTH_GENERATION,
+    identity: `astartes:black-shields:${AGENT_ID}`,
+    incarnation: { agent_id: AGENT_ID, birth_generation: BIRTH_GENERATION },
     registered_at: '2026-07-31T00:00:00.000Z',
     engine: 'claude',
     launch: { argv: [], requested_cwd: '/workspace' },

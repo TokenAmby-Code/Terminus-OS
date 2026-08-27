@@ -3,7 +3,9 @@
 // with a blank persona to be filled in later, both stay dead.
 
 import { expect, test } from 'bun:test';
-import { AGENT_SCHEMA_VERSION, type Agent, type PhysicalDeclaration } from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
+import { type Agent } from '@tokenamby-code/agent-contract/agent';
+import { type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -93,10 +95,13 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
     await d.recordPhysicalDeclaration(seatDeclaration);
     const agent: Agent = {
       schema_version: AGENT_SCHEMA_VERSION,
-      agent_id: agentId,
-      birth_generation: (await store.readAll())
-        .find((event) => event.event_type === 'reg.bound' && event.entity_id === seatId)!
-        .payload.birth_generation as string,
+      identity: `astartes:black-shields:${agentId}`,
+      incarnation: {
+        agent_id: agentId,
+        birth_generation: (await store.readAll())
+          .find((event) => event.event_type === 'reg.bound' && event.entity_id === seatId)!
+          .payload.birth_generation as string,
+      },
       registered_at: '2026-07-31T00:00:00.000Z',
       engine: 'claude',
       launch: { argv: [], requested_cwd: '/workspace' },

@@ -6,14 +6,7 @@
 // projection directly.
 
 import {
-  AGENT_SCHEMA_VERSION,
-  AgentRetiredSchema,
-  UnregisteredClosedSchema,
-  PLACEMENT_REFUSAL_REASONS,
-  PlacementRefusedSchema,
-  RegistrationAbortedSchema,
   SCHEMA_VERSION,
-  type RegistrationAborted,
   type SeatBoardRow,
   CLOSE_REQUIRED_RANK,
   type CloseRequest,
@@ -38,13 +31,6 @@ import {
   type CommWaitRequest,
   type CommWaitResponse,
   type CurrentBinding,
-  DispatchAttestedSchema,
-  PerpetualSeatVacantSchema,
-  EstateOccupancyCensusSchema,
-  DispatchRefusedSchema,
-  type DispatchRefused,
-  type DispatchRequested,
-  type SeatDisqualifier,
   type EventInput,
   type EventLogCompactionRequest,
   type EventRecord,
@@ -57,17 +43,9 @@ import {
   type ModeTransitionRequest,
   type ModeTransitionResponse,
   type OpenContradiction,
-  PaneAttestedSchema,
-  PaneRefusedSchema,
-  PhysicalDeclarationSchema,
-  PlacementAttestedSchema,
-  AgentSchema,
-  type Agent,
-  type PhysicalDeclaration,
   type Provenance,
   type ProvenanceSource,
   type ReconcileResponse,
-  type RetirementCause,
   type RunAgentResponse,
   type RunPaneResponse,
   type RunRequest,
@@ -78,10 +56,35 @@ import {
   type TmuxLifecycleEventRequest,
   type TmuxLifecycleEventResponse,
   type TintReadiness,
-  type WrapperStartHook,
   CLIPBOARD_BUFFER_NAME,
   MAX_CLIPBOARD_BYTES,
 } from '@terminus-os/contracts';
+import {
+  AGENT_SCHEMA_VERSION,
+  AgentSchema,
+  PLACEMENT_REFUSAL_REASONS,
+  type RetirementCause,
+  type SeatDisqualifier,
+  type WrapperStartHook,
+} from '@tokenamby-code/agent-contract/agent';
+import {
+  AgentRetiredSchema,
+  DispatchAttestedSchema,
+  DispatchRefusedSchema,
+  EstateOccupancyCensusSchema,
+  PaneAttestedSchema,
+  PaneRefusedSchema,
+  PerpetualSeatVacantSchema,
+  PhysicalDeclarationSchema,
+  PlacementAttestedSchema,
+  PlacementRefusedSchema,
+  RegistrationAbortedSchema,
+  UnregisteredClosedSchema,
+  type DispatchRefused,
+  type DispatchRequested,
+  type PhysicalDeclaration,
+  type RegistrationAborted,
+} from '@tokenamby-code/agent-contract/events';
 import { journalEventSeqFromReceipt } from './journal-receipt.ts';
 import { createHash } from 'node:crypto';
 import type { EventStore } from './store.ts';
@@ -914,16 +917,16 @@ export class Daemon {
     });
   }
 
-  activateRegisteredAgent(input: Agent): Promise<void> {
+  activateRegisteredAgent(input: unknown): Promise<void> {
     return this.locked(async () => {
       const agent = AgentSchema.parse(input);
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const projections = await this.projections();
       const binding = projections.currentBindings.find(
-        (candidate) => candidate.agent_id === agent.agent_id,
+        (candidate) => candidate.agent_id === agent.incarnation.agent_id,
       );
       if (!binding
-          || binding.birth_generation !== agent.birth_generation
+          || binding.birth_generation !== agent.incarnation.birth_generation
           || binding.seat_id !== agent.placement.pane_id
           || binding.pane_generation !== agent.placement.pane_generation
           || binding.wrapper_pid !== agent.placement.wrapper_pid
@@ -953,10 +956,10 @@ export class Daemon {
       }
       await this.store.append({
         entity_type: 'agent',
-        entity_id: agent.agent_id,
+        entity_id: agent.incarnation.agent_id,
         event_type: 'reg.agent_registered',
         payload: {
-          birth_generation: agent.birth_generation,
+          birth_generation: agent.incarnation.birth_generation,
           pane_id: agent.placement.pane_id,
           pane_generation: agent.placement.pane_generation,
           persona: agent.persona?.persona ?? null,

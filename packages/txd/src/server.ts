@@ -44,11 +44,11 @@ import {
   RunRequestSchema,
   StopRequestSchema,
   TmuxLifecycleEventRequestSchema,
-  WrapperStartHookSchema,
   LcdServiceDeliverySchema,
   type EstateReadResponse,
   type HookDiagnostic,
 } from '@terminus-os/contracts';
+import { WrapperStartHookSchema } from '@tokenamby-code/agent-contract/agent';
 import { commFrameTokens } from './comm-frame.ts';
 import type { CommAdmission, Daemon } from './core.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';

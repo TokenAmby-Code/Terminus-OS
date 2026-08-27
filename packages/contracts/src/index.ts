@@ -2,7 +2,6 @@
 //
 // Foundation first: registration → bind → ledger occupancy. The tmuxctld op envelopes
 // consume those foundation types. Ops-cockpit read-model converges here later.
-export * from "./registration.ts";
 export * from "./ephemeral.ts";
 export * from "./notification.ts";
 export * from "./txd.ts";

@@ -7,7 +7,8 @@
 // loud if any of it grows back.
 
 import { describe, expect, test } from 'bun:test';
-import { AgentSchema, PlacementAttestedSchema } from '@terminus-os/contracts';
+import { CanonicalAgentSchema } from '@tokenamby-code/agent-contract/agent';
+import { PlacementAttestedSchema } from '@tokenamby-code/agent-contract/events';
 import { Daemon } from '../src/core.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux, RealTmux } from '../src/tmux.ts';
@@ -38,9 +39,9 @@ describe('adversarial: the session_start registration leg stays dead', () => {
   });
 
   test('the agent record carries no engine-process identity', () => {
-    const launch = AgentSchema.shape.launch.shape as Record<string, unknown>;
+    const launch = CanonicalAgentSchema.shape.launch.shape as Record<string, unknown>;
     expect(launch['engine_binary']).toBeUndefined();
-    const placement = AgentSchema.shape.placement.shape as Record<string, unknown>;
+    const placement = CanonicalAgentSchema.shape.placement.shape as Record<string, unknown>;
     expect(placement['engine_pid']).toBeUndefined();
     expect(placement['cwd']).toBeUndefined();
   });

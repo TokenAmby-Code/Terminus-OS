@@ -1,17 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import {
-  AGENT_SCHEMA_VERSION,
-  AgentSchema,
-  RegistrationPreparedSchema,
-  WrapperStartHookSchema,
-} from "../src/registration.ts";
+import { AGENT_SCHEMA_VERSION, AgentSchema } from "@tokenamby-code/agent-contract/agent";
+import { WrapperStartHookSchema } from "@tokenamby-code/agent-contract/agent";
+import { RegistrationPreparedSchema } from "@tokenamby-code/agent-contract/events";
 
 const AGENT_ID = "2ea2d049-0106-4957-8649-31f93bdc8c9a";
 const BIRTH_GENERATION = "1cc2112c-9c38-45a1-839f-831c33a1096a";
 const PANE_GENERATION = "786b72b2-58d5-4294-8f95-928289984d6f";
 const DIGEST = "a".repeat(64);
 
-describe("registrationd Agent contract mirror", () => {
+describe("registrationd Agent package contract", () => {
   test("parses the complete authoritative snapshot", () => {
     const agent = AgentSchema.parse({
       schema_version: AGENT_SCHEMA_VERSION,
@@ -32,7 +29,7 @@ describe("registrationd Agent contract mirror", () => {
       persona: null,
       resources: [],
     });
-    expect(agent.agent_id).toBe(AGENT_ID);
+    expect(agent.incarnation.agent_id).toBe(AGENT_ID);
   });
 
   test("claims exist only in wrapper evidence, never the final Agent", () => {
