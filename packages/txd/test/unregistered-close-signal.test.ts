@@ -8,12 +8,9 @@
 // it publishes nothing.
 
 import { expect, test } from 'bun:test';
-import {
-  AGENT_SCHEMA_VERSION,
-  SCHEMA_VERSION,
-  UnregisteredClosedSchema,
-  type PhysicalDeclaration,
-} from '@terminus-os/contracts';
+import { SCHEMA_VERSION } from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
+import { UnregisteredClosedSchema, type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';

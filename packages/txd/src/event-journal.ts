@@ -1,11 +1,11 @@
 import { SQL } from 'bun';
 import { userInfo } from 'node:os';
+import { AgentSchema } from '@tokenamby-code/agent-contract/agent';
 import {
-  AgentSchema,
   DispatchRequestedSchema,
   PhysicalDeclarationSchema,
   RegistrationAbortedSchema,
-} from '@terminus-os/contracts';
+} from '@tokenamby-code/agent-contract/events';
 import type { DbEndpointT } from '@terminus-os/db';
 import type { Daemon } from './core.ts';
 import { makeJournalReceipt } from './journal-receipt.ts';

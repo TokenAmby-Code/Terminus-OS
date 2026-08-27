@@ -13,7 +13,9 @@
 //   reg.retired        (agent) turn → 'retired'
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
-import { PANE_STATES, PhysicalDeclarationSchema, WorktreeBindingSchema } from '@terminus-os/contracts';
+import { PANE_STATES } from '@terminus-os/contracts';
+import { WorktreeBindingSchema } from '@tokenamby-code/agent-contract/agent';
+import { PhysicalDeclarationSchema } from '@tokenamby-code/agent-contract/events';
 import type {
   SeatBoardRow,
   TurnState,
@@ -22,9 +24,9 @@ import type {
   FreelistEntry,
   OpenContradiction,
   PaneState,
-  PhysicalDeclaration,
-  WorktreeBinding,
 } from '@terminus-os/contracts';
+import type { WorktreeBinding } from '@tokenamby-code/agent-contract/agent';
+import type { PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
 
 export type Projections = {
   currentBindings: CurrentBinding[];

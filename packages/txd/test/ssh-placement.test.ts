@@ -10,13 +10,10 @@
 
 import { createHash } from 'node:crypto';
 import { expect, test } from 'bun:test';
-import {
-  AGENT_SCHEMA_VERSION,
-  type DispatchRequested,
-  type DispatchTarget,
-  type PhysicalDeclaration,
-  type Agent,
-} from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
+import { type Agent } from '@tokenamby-code/agent-contract/agent';
+import { type DispatchTarget } from '@tokenamby-code/agent-contract/agent';
+import { type DispatchRequested, type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -335,8 +332,8 @@ function registeredAgent(
 ): Agent {
   return {
     schema_version: AGENT_SCHEMA_VERSION,
-    agent_id: AGENT_ID,
-    birth_generation: BIRTH_GENERATION,
+    identity: `astartes:black-shields:${AGENT_ID}`,
+    incarnation: { agent_id: AGENT_ID, birth_generation: BIRTH_GENERATION },
     registered_at: new Date().toISOString(),
     engine: 'claude',
     launch: { argv: [], requested_cwd: '/home/tokenamby' },

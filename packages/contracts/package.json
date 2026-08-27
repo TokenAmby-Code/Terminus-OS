@@ -7,7 +7,6 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./registration": "./src/registration.ts",
     "./ledger": "./src/ledger.ts",
     "./bind": "./src/bind.ts",
     "./envelope": "./src/envelope.ts",
@@ -20,6 +19,7 @@
     "./replay": "./src/replay.ts"
   },
   "dependencies": {
+    "@tokenamby-code/agent-contract": "1.1.0",
     "zod": "^4.4.3"
   }
 }

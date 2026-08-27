@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
-import {
-  AGENT_SCHEMA_VERSION,
-  DispatchRequestedSchema,
-  PaneAttestedSchema,
-} from "../src/registration.ts";
+import { AGENT_SCHEMA_VERSION } from "@tokenamby-code/agent-contract/agent";
+import { DispatchRequestedSchema, PaneAttestedSchema } from "@tokenamby-code/agent-contract/events";
 
 const worktree = {
   repository: "token-fleet",

@@ -4,7 +4,10 @@
 // and everything else refuses loud and typed. Never a process-name sniff.
 import { expect, test } from 'bun:test';
 import { createHash } from 'node:crypto';
-import { AGENT_SCHEMA_VERSION, SCHEMA_VERSION, type Agent, type PhysicalDeclaration } from '@terminus-os/contracts';
+import { SCHEMA_VERSION } from '@terminus-os/contracts';
+import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
+import { type Agent } from '@tokenamby-code/agent-contract/agent';
+import { type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -49,8 +52,8 @@ function declaration(seat: string, paneGeneration: string, agentId: string, pers
 function registeredAgent(seat: string, paneGeneration: string, decl: PhysicalDeclaration): Agent {
   return {
     schema_version: AGENT_SCHEMA_VERSION,
-    agent_id: decl.agent_id,
-    birth_generation: decl.birth_generation,
+    identity: `astartes:${decl.persona}:${decl.agent_id}`,
+    incarnation: { agent_id: decl.agent_id, birth_generation: decl.birth_generation },
     registered_at: '2026-08-09T00:00:00.000Z',
     engine: decl.engine,
     launch: { argv: [], requested_cwd: '/workspace' },
