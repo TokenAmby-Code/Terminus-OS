@@ -1043,6 +1043,11 @@ export class Daemon {
     return this.maintainedProjection!;
   }
 
+  /** Read-only health/inspect access to the same fold every daemon reader uses. */
+  async observationProjection(): Promise<Projections> {
+    return this.projections();
+  }
+
   private pendingScopedResetSeats(): Set<string> {
     return new Set([...this.openScopedResets.values()].flat());
   }

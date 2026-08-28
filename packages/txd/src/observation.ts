@@ -12,7 +12,6 @@ import {
   type Probe,
 } from '@tokenamby-code/stc-contract/observation';
 import { runningRuntimeMarker } from '@tokenamby-code/stc-contract/version';
-import { buildProjections } from './projections.ts';
 import type { Daemon } from './core.ts';
 import type { EventStore } from './store.ts';
 import type { TmuxControlPlane } from './tmux.ts';
@@ -85,7 +84,7 @@ export function createTxdObservationSource(options: {
   journalConsumer: DurableJournalConsumer;
   journalListener: PgNotificationListener;
 }): TxdObservationSource {
-  const projection = async (signal: AbortSignal) => buildProjections(await options.store.readAll(signal));
+  const projection = (signal: AbortSignal) => abortable(options.daemon.observationProjection(), signal);
   const divergences = (signal: AbortSignal) => abortable(options.tmux.estateDivergences(), signal);
 
   async function journal(signal: AbortSignal): Promise<JournalRows> {
