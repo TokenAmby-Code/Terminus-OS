@@ -39,6 +39,10 @@ import {
 } from './clipboard-origin.ts';
 
 export type SeatObservation = { seat_id: string; pane: 'live' | 'dead' };
+export type SeatReadinessObservation = SeatObservation & {
+  tint: string | null | undefined;
+  generation: string | undefined;
+};
 export type SeatWorkload = { seat_id: string; command: string; idle: boolean };
 /**
  * One canonical page that fails the acceptance predicate while live tagged
@@ -183,6 +187,8 @@ export interface TmuxControlPlane {
   killServer(): Promise<boolean>;
   /** Live seats as canonical ids + pane liveness. Never exposes %id. */
   listSeats(): Promise<SeatObservation[]>;
+  /** One physical snapshot for estate tint/generation readiness. */
+  seatReadiness(): Promise<SeatReadinessObservation[]>;
   /**
    * Create the declared estate on an empty socket, or accept an existing one:
    * a page with no live tagged pane is reconstructed; a page that still holds
@@ -921,6 +927,31 @@ export class RealTmux implements TmuxControlPlane {
       out.push({ seat_id: canon, pane: dead === '1' ? 'dead' : 'live' });
     }
     return out;
+  }
+
+  async seatReadiness(): Promise<SeatReadinessObservation[]> {
+    const observed = await this.command('observe_seat_readiness', 'estate', [
+      'list-panes', '-a', '-F',
+      `#{${CANON_OPT}}\t#{pane_dead}\t#{window-style}\t#{window-active-style}\t#{${GENERATION_OPT}}`,
+    ]);
+    if (observed.code !== 0) return [];
+    return observed.stdout.split('\n').flatMap((line) => {
+      if (!line.trim()) return [];
+      const [seat_id, dead, inactive = '', active = '', generation = ''] = line.split('\t');
+      if (!seat_id) return [];
+      const styles = [inactive, active] as const;
+      const tint = styles.every((style) => style === '' || style === 'default')
+        ? null
+        : styles[0] === styles[1] && styles[0].startsWith('bg=')
+          ? styles[0].slice(3)
+          : styles.join('|');
+      return [{
+        seat_id,
+        pane: dead === '1' ? 'dead' as const : 'live' as const,
+        tint,
+        generation: generation || undefined,
+      }];
+    });
   }
 
   private async checked(args: string[], operation: string, target = 'estate'): Promise<string> {
@@ -2436,6 +2467,14 @@ export class FakeTmux implements TmuxControlPlane {
   setCommand(seatId: string, command: string): void { this.commands.set(seatId, command); }
   async listSeats(): Promise<SeatObservation[]> {
     return [...this.seats].map(([seat_id, s]) => ({ seat_id, pane: s.pane }));
+  }
+  async seatReadiness(): Promise<SeatReadinessObservation[]> {
+    return [...this.seats].map(([seat_id, seat]) => ({
+      seat_id,
+      pane: seat.pane,
+      tint: seat.pane === 'live' ? this.tints.get(seat_id) ?? null : undefined,
+      generation: seat.generation,
+    }));
   }
   private fakePageDivergence(page: TxdPage, expected: readonly string[]): PageDivergence | null {
     const shaped = this.shape.windows[page] ?? [];

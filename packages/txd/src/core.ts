@@ -3648,8 +3648,9 @@ export class Daemon {
 
   async tintReadiness(): Promise<TintReadiness[]> {
     const proj = await this.projections();
-    const observedSeats = await this.tmux.listSeats();
+    const observedSeats = await this.tmux.seatReadiness();
     const paneBySeat = new Map(observedSeats.map((seat) => [seat.seat_id, seat.pane]));
+    const readinessBySeat = new Map(observedSeats.map((seat) => [seat.seat_id, seat]));
     const bindingBySeat = new Map(proj.currentBindings.map((binding) => [binding.seat_id, binding]));
     const seats = new Set([
       ...TXD_ESTATE,
@@ -3660,9 +3661,10 @@ export class Daemon {
     for (const seat_id of [...seats].sort()) {
       const binding = bindingBySeat.get(seat_id);
       const expected = binding?.tint ?? null;
-      const observed = await this.tmux.seatTint(seat_id);
+      const physical = readinessBySeat.get(seat_id);
+      const observed = physical?.tint;
       const generationReady = !binding
-        || await this.tmux.seatGeneration(seat_id) === binding.pane_generation;
+        || physical?.generation === binding.pane_generation;
       const pane = paneBySeat.get(seat_id);
       rows.push({
         seat_id,
