@@ -275,7 +275,8 @@ cat > ~/secrets/txd/txd.json <<'EOF'
     "kind": "socket",
     "socket_dir": "/var/run/postgresql",
     "database": "terminus",
-    "application_name": "txd"
+    "application_name": "txd",
+    "max": 1
   },
   "tmuxSocket": "k12",
   "sshSeatTargets": {

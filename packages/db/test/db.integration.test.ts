@@ -23,6 +23,7 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
       database: env.TERMINUS_DB_TEST_DATABASE ?? "postgres",
       application_name: "terminus-db-integration",
+      max: 1,
     });
   }
   if (env.TERMINUS_DB_TEST_HOST) {
@@ -33,6 +34,7 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       database: env.TERMINUS_DB_TEST_DATABASE ?? "postgres",
       username: env.TERMINUS_DB_TEST_USERNAME ?? "postgres",
       application_name: "terminus-db-integration",
+      max: 1,
     });
   }
   return null;
@@ -117,6 +119,7 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
       socket_dir: "/nonexistent/terminus-db-test",
       database: "postgres",
       application_name: "terminus-db-integration",
+      max: 1,
     });
     await expect(connectDb(dead)).rejects.toThrow(/connect failed/);
   });

@@ -23,6 +23,7 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
       database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
       application_name: 'txd-journal-tolerance',
+      max: 1,
     });
   }
   if (env.TERMINUS_DB_TEST_HOST) {
@@ -33,6 +34,7 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
       username: env.TERMINUS_DB_TEST_USERNAME ?? 'postgres',
       application_name: 'txd-journal-tolerance',
+      max: 1,
     });
   }
   return null;

@@ -10,6 +10,10 @@ export const DB_EARMARKS = ["remote", "local"] as const;
 export const DbEarmark = z.enum(DB_EARMARKS);
 export type DbEarmarkT = z.infer<typeof DbEarmark>;
 
+// DEFAULT_DB_CONFIG backs telemetryd's one durable store domain. Bun queues
+// concurrent callers behind its one genuinely in-flight query connection.
+export const TERMINUS_DB_POOL_MAX = 1;
+
 /**
  * Unix-socket endpoint — the only sanctioned shape on fleet machines.
  * Peer auth over the socket is the contract: no password field exists,
@@ -22,6 +26,7 @@ export const SocketEndpoint = z.strictObject({
   port: z.number().int().min(1).max(65535).default(5432),
   database: z.string().min(1),
   application_name: z.string().min(1),
+  max: z.number().int().min(1),
 });
 export type SocketEndpointT = z.infer<typeof SocketEndpoint>;
 
@@ -36,6 +41,7 @@ export const TcpEndpoint = z.strictObject({
   database: z.string().min(1),
   username: z.string().min(1),
   application_name: z.string().min(1),
+  max: z.number().int().min(1),
 });
 export type TcpEndpointT = z.infer<typeof TcpEndpoint>;
 
@@ -67,12 +73,14 @@ export const DEFAULT_DB_CONFIG: DbConfigT = DbConfig.parse({
     socket_dir: "/var/run/postgresql",
     database: "terminus",
     application_name: "terminus-os",
+    max: TERMINUS_DB_POOL_MAX,
   },
   local: {
     kind: "socket",
     socket_dir: "/var/run/postgresql",
     database: "terminus",
     application_name: "terminus-os",
+    max: TERMINUS_DB_POOL_MAX,
   },
 });
 

@@ -14,6 +14,7 @@ const SOCKET = {
   socket_dir: "/var/run/postgresql",
   database: "terminus",
   application_name: "terminus-os",
+  max: 1,
 } as const;
 
 const TCP = {
@@ -22,6 +23,7 @@ const TCP = {
   database: "postgres",
   username: "postgres",
   application_name: "terminus-os-ci",
+  max: 1,
 } as const;
 
 describe("db endpoint config (foundation)", () => {
@@ -60,6 +62,11 @@ describe("db endpoint config (foundation)", () => {
     expect(() => DbEndpoint.parse({ ...SOCKET, kind: "url" })).toThrow();
   });
 
+  test("an endpoint without max is rejected instead of inheriting Bun's default", () => {
+    const { max: _max, ...withoutMax } = SOCKET;
+    expect(() => DbEndpoint.parse(withoutMax)).toThrow();
+  });
+
   test("describeEndpoint names the socket file and database", () => {
     const endpoint = DbEndpoint.parse(SOCKET);
     expect(describeEndpoint(endpoint)).toBe(
@@ -76,6 +83,7 @@ describe("sql options translation", () => {
       path: "/var/run/postgresql",
       database: "terminus",
       port: 5432,
+      max: 1,
     });
     expect("hostname" in options).toBe(false);
     expect("username" in options).toBe(false);
@@ -89,6 +97,7 @@ describe("sql options translation", () => {
       hostname: "127.0.0.1",
       username: "postgres",
       database: "postgres",
+      max: 1,
     });
     expect("path" in options).toBe(false);
     expect("password" in options).toBe(false);

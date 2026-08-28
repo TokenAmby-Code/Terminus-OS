@@ -64,6 +64,10 @@ type PartialConfig = {
   [K in Exclude<keyof DaemonConfig, 'sshSeatTargets'>]?: DaemonConfig[K] | undefined
 } & { sshSeatTargets?: SshSeatTargetConfig | SshSeatTargets | undefined };
 
+// txd has one serialized event/state store domain. Bun queues concurrent
+// callers behind its one genuinely in-flight query connection.
+export const TXD_DB_POOL_MAX = 1;
+
 const HARD_DEFAULTS = {
   bind: '127.0.0.1',
   port: 7781,
@@ -75,6 +79,7 @@ const HARD_DEFAULTS = {
     socket_dir: '/var/run/postgresql',
     database: 'terminus',
     application_name: 'txd',
+    max: TXD_DB_POOL_MAX,
   }),
   tmuxSocket: 'k12',
   machineRegistryPath: `${process.env.HOME}/runtimes/Token-Fleet/live/shared/generated/registry.json`,
