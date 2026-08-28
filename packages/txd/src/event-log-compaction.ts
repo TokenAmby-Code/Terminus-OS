@@ -20,6 +20,90 @@ export type EventLogCompactionResult = {
   reset_journal_head: number;
 };
 
+export type ProjectionDifference = {
+  path: string;
+  expected: unknown;
+  actual: unknown;
+};
+
+const missingProjectionValue = { type: 'missing' } as const;
+
+function diagnosticValue(value: unknown): unknown {
+  if (value === undefined) return { type: 'undefined' };
+  if (typeof value === 'bigint') return { type: 'bigint', value: String(value) };
+  return value;
+}
+
+function objectPath(path: string, key: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key) ? `${path}.${key}` : `${path}[${JSON.stringify(key)}]`;
+}
+
+/** Return the first concrete difference behind the compaction equality gate. */
+export function firstProjectionDifference(expected: unknown, actual: unknown, path = '$'): ProjectionDifference | null {
+  if (Bun.deepEquals(expected, actual)) return null;
+  if (Array.isArray(expected) && Array.isArray(actual)) {
+    const commonLength = Math.min(expected.length, actual.length);
+    for (let index = 0; index < commonLength; index += 1) {
+      const difference = firstProjectionDifference(expected[index], actual[index], `${path}[${index}]`);
+      if (difference) return difference;
+    }
+    return { path: `${path}.length`, expected: expected.length, actual: actual.length };
+  }
+  if (expected instanceof Map && actual instanceof Map) {
+    const keys = [...new Set([...expected.keys(), ...actual.keys()])].map(String).sort();
+    for (const key of keys) {
+      const expectedHas = expected.has(key);
+      const actualHas = actual.has(key);
+      const keyPath = objectPath(path, key);
+      if (!expectedHas || !actualHas) {
+        return {
+          path: keyPath,
+          expected: expectedHas ? diagnosticValue(expected.get(key)) : missingProjectionValue,
+          actual: actualHas ? diagnosticValue(actual.get(key)) : missingProjectionValue,
+        };
+      }
+      const difference = firstProjectionDifference(expected.get(key), actual.get(key), keyPath);
+      if (difference) return difference;
+    }
+  }
+  if (expected instanceof Set && actual instanceof Set) {
+    return {
+      path,
+      expected: [...expected].map(diagnosticValue).sort(),
+      actual: [...actual].map(diagnosticValue).sort(),
+    };
+  }
+  if (expected !== null && actual !== null && typeof expected === 'object' && typeof actual === 'object') {
+    const expectedObject = expected as Record<string, unknown>;
+    const actualObject = actual as Record<string, unknown>;
+    const keys = [...new Set([...Object.keys(expectedObject), ...Object.keys(actualObject)])].sort();
+    for (const key of keys) {
+      const expectedHas = Object.hasOwn(expectedObject, key);
+      const actualHas = Object.hasOwn(actualObject, key);
+      const keyPath = objectPath(path, key);
+      if (!expectedHas || !actualHas) {
+        return {
+          path: keyPath,
+          expected: expectedHas ? diagnosticValue(expectedObject[key]) : missingProjectionValue,
+          actual: actualHas ? diagnosticValue(actualObject[key]) : missingProjectionValue,
+        };
+      }
+      const difference = firstProjectionDifference(expectedObject[key], actualObject[key], keyPath);
+      if (difference) return difference;
+    }
+  }
+  return { path, expected: diagnosticValue(expected), actual: diagnosticValue(actual) };
+}
+
+export class ProjectionMismatchError extends Error {
+  readonly code = 'compacted_replay_projection_mismatch';
+
+  constructor(readonly detail: ProjectionDifference) {
+    super(`compacted_replay_projection_mismatch ${JSON.stringify(detail)}`);
+    this.name = 'ProjectionMismatchError';
+  }
+}
+
 const ARCHIVE_ATTESTATION = /^snapshot=(.+);restore-proof=journal\.head=([1-9][0-9]*)$/;
 
 export function parseArchiveAttestation(value: string): {
@@ -158,12 +242,16 @@ export function compactEventRecords(
   }
 
   const projection = buildProjections([...events]);
+  // A checkpoint is the fold at its own sequence. Serializing the final fold
+  // here would seed future state and then apply every post-boundary event to it
+  // a second time (duplicating contradictions and perturbing collection order).
+  const boundaryProjection = buildProjections(events.filter((event) => event.seq <= boundary.seq));
   const checkpoint = EventRecordSchema.parse({
     seq: boundary.seq,
     entity_type: 'estate',
     entity_id: boundary.entity_id,
     event_type: 'estate.compaction_checkpoint',
-    payload: checkpointPayload(projection, request),
+    payload: checkpointPayload(boundaryProjection, request),
     provenance: { source: 'observer', transport_receipt: null, emitter_version: boundary.provenance.emitter_version ?? null },
     occurred_at: boundary.occurred_at,
     recorded_at: boundary.recorded_at,
@@ -174,8 +262,9 @@ export function compactEventRecords(
     checkpoint,
     ...events.filter((event) => event.seq > boundary.seq),
   ];
-  if (!Bun.deepEquals(buildProjections(compacted), projection)) {
-    throw new Error('compacted_replay_projection_mismatch');
+  const compactedProjection = buildProjections(compacted);
+  if (!Bun.deepEquals(compactedProjection, projection)) {
+    throw new ProjectionMismatchError(firstProjectionDifference(projection, compactedProjection)!);
   }
   return compacted;
 }

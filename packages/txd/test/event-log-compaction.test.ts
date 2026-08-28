@@ -5,7 +5,10 @@
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION, type EventInput, type EventRecord } from '@terminus-os/contracts';
 import { Daemon } from '../src/core.ts';
-import { compactEventRecords } from '../src/event-log-compaction.ts';
+import {
+  compactEventRecords,
+  firstProjectionDifference,
+} from '../src/event-log-compaction.ts';
 import { buildProjections } from '../src/projections.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
@@ -89,6 +92,58 @@ test('boot replay rebuilds the identical estate model with a superseded generati
   const restarted = MemoryEventStore.fromRecords(compacted);
   const daemon = new Daemon(restarted, new FakeTmux());
   expect(await daemon.estateRows()).toEqual(expected.seatBoard);
+});
+
+test('checkpoint captures boundary truth before replaying the live rotation and scoped-reset shape', () => {
+  const events = [
+    event(1, 'reg.pane_created', 'seat', 'palace:W', { pane_state: 'live' }),
+    event(2, 'reg.bound', 'seat', 'palace:W', {
+      agent_id: 'boundary-agent', birth_generation: 'old-birth', pane_generation: 'old-pane',
+      persona: 'ultramarines', rank: 'astartes', commander: 'council:custodes', tint: '#081c30',
+    }),
+    event(3, 'reg.agent_registered', 'agent', 'boundary-agent', {
+      persona: 'ultramarines', rank: 'astartes', commander: 'council:custodes',
+    }),
+    event(4, 'reg.pane_created', 'seat', 'palace:E', { pane_state: 'live' }),
+    event(5, 'reg.bound', 'seat', 'palace:E', {
+      agent_id: 'retired-before-boundary', birth_generation: 'retired-birth', pane_generation: 'retired-pane',
+      persona: 'iron-hands', rank: 'astartes', commander: 'council:custodes', tint: '#313143',
+    }),
+    event(6, 'reg.retired', 'agent', 'retired-before-boundary', {}),
+    event(7, 'reg.seat_cleared', 'seat', 'palace:E', {}),
+    event(8, 'estate.scoped_reset_requested', 'estate', 'open-reset', { seats: ['palace:W'] }),
+    event(9, 'estate.rotation_requested', 'estate', 'rotation-closed', { force: true }),
+    event(10, 'estate.rotation_completed', 'estate', 'rotation-closed', { canonical_seats: 2 }),
+    event(11, 'reg.contradiction_flagged', 'estate', 'council', {
+      kind: 'page_drift', detail: 'geometry differs', missing_attestation: null,
+    }),
+    event(12, 'estate.scoped_reset_completed', 'estate', 'later-reset', { seats: ['palace:E'] }),
+  ];
+
+  const expected = buildProjections(events);
+  const compacted = compactEventRecords(events, {
+    boundary_seq: 10,
+    archive_attestation: 'snapshot=/verified/live-shape;restore-proof=journal.head=8739',
+    reset_journal_head: 8739,
+  });
+
+  expect(buildProjections(compacted)).toEqual(expected);
+  expect(buildProjections(compacted).currentBindings.map((binding) => binding.agent_id))
+    .toContain('boundary-agent');
+  expect(buildProjections(compacted).turnByAgent.get('retired-before-boundary')).toBe('retired');
+  expect(compacted.some((row) => row.entity_id === 'open-reset')).toBe(true);
+  expect(buildProjections(compacted).openContradictions).toHaveLength(1);
+});
+
+test('projection mismatch detail names the first path and preserves both value types', () => {
+  expect(firstProjectionDifference(
+    { currentBindings: [{ registered: true, bound_seq: 7 }] },
+    { currentBindings: [{ registered: false, bound_seq: 7 }] },
+  )).toEqual({
+    path: '$.currentBindings[0].registered',
+    expected: true,
+    actual: false,
+  });
 });
 
 test('compaction refuses an absent archive attestation before changing the stream', () => {
