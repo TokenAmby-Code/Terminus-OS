@@ -11,6 +11,7 @@ export function sqlOptions(endpoint: DbEndpointT): Bun.SQL.PostgresOrMySQLOption
     adapter: "postgres",
     database: endpoint.database,
     port: endpoint.port,
+    max: endpoint.max,
     connection: { application_name: endpoint.application_name },
   } as const;
   return endpoint.kind === "socket"
