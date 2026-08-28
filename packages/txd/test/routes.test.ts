@@ -8,6 +8,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { resolveSshSeatTargets } from '../src/config.ts';
 import { EnvelopeInventoryError } from '../src/envelopes.ts';
+import { ProjectionMismatchError } from '../src/event-log-compaction.ts';
 import { buildRoutes, deferredJson, makeServer } from '../src/server.ts';
 import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 
@@ -82,6 +83,49 @@ test('POST /ctl/estate/compact-events refuses a missing archive attestation', as
     expect(res.status).toBe(422);
   } finally {
     srv.stop(true);
+  }
+});
+
+test('POST /ctl/estate/compact-events returns and journals typed projection mismatch detail', async () => {
+  const d = daemon();
+  const detail = {
+    path: '$.currentBindings[0].registered',
+    expected: true,
+    actual: false,
+  };
+  (d as unknown as { compactEventLog: () => Promise<never> }).compactEventLog = async () => {
+    throw new ProjectionMismatchError(detail);
+  };
+  const logged: string[] = [];
+  const priorConsoleError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(' '));
+  const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/estate/compact-events`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: 'operator-agent',
+        reset_journal_head: 8739,
+        archive_attestation: 'snapshot=/verified/live-shape;restore-proof=journal.head=8739',
+      }),
+    });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      ok: false,
+      error: 'compacted_replay_projection_mismatch',
+      detail,
+    });
+    expect(logged).toHaveLength(1);
+    expect(JSON.parse(logged[0]!)).toMatchObject({
+      event: 'handler_error',
+      route: 'POST /ctl/estate/compact-events',
+      error: 'compacted_replay_projection_mismatch',
+      detail,
+    });
+  } finally {
+    srv.stop(true);
+    console.error = priorConsoleError;
   }
 });
 
