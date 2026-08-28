@@ -1,16 +1,18 @@
 // Behavioral pins for txd's STC-owned observation doors.
 
 import { expect, test } from 'bun:test';
+import type { SQL } from 'bun';
 import { HealthResponseSchema, InspectResponseSchema } from '@tokenamby-code/stc-contract/schemas';
 import type { ObservationStore } from '@tokenamby-code/stc-contract/observation';
 import {
+  createTxdObservationSource,
   makeTxdObservationHandler,
   type TxdObservationSource,
 } from '../src/observation.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { Daemon } from '../src/core.ts';
 import { FakeTmux } from '../src/tmux.ts';
-import { SCHEMA_VERSION } from '@terminus-os/contracts';
+import { SCHEMA_VERSION, type EventRecord } from '@terminus-os/contracts';
 
 const observationStore: ObservationStore = {
   recordWalk: async () => {},
@@ -121,4 +123,59 @@ test('comm transport reads the dedicated current-binding projection and recovery
     provenance, occurred_at: new Date().toISOString(),
   });
   expect(await store.unresolvedCommTransportTargets(signal)).toEqual([]);
+});
+
+class LiveShapedReadSpyStore extends MemoryEventStore {
+  reads = 0;
+  private readonly liveEvents: EventRecord[];
+
+  constructor(eventCount: number) {
+    super();
+    this.liveEvents = Array.from({ length: eventCount }, (_, index) => ({
+      seq: index + 1,
+      entity_type: 'agent',
+      entity_id: 'health-load-agent',
+      event_type: 'act.prompt_submitted',
+      payload: {},
+      provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-28T00:00:00.000Z',
+      recorded_at: '2026-08-28T00:00:00.000Z',
+    }));
+  }
+
+  override async readAll(): Promise<EventRecord[]> {
+    this.reads += 1;
+    return this.liveEvents;
+  }
+}
+
+test('health reads the boot-maintained projection with zero log reads and stays under 50 ms at live log shape', async () => {
+  const store = new LiveShapedReadSpyStore(49_082);
+  const tmux = new FakeTmux();
+  const daemon = new Daemon(store, tmux);
+  await daemon.estateRows();
+  expect(store.reads).toBe(1);
+
+  const journalSql = (() => Object.assign(Promise.resolve([{
+    cursor: 0,
+    frontier: 0,
+    open_poison: 0,
+    poison_codes: [],
+  }]), { cancel() {} })) as unknown as SQL;
+  const observe = handler(createTxdObservationSource({
+    store,
+    tmux,
+    daemon,
+    journalSql,
+    journalConsumer: { inspect: () => ({ drainRunning: false }) } as never,
+    journalListener: { health: () => ({ state: 'listening' }) } as never,
+  }));
+
+  const started = performance.now();
+  const response = await observe(new Request('http://txd/health'));
+  const elapsed = performance.now() - started;
+
+  expect(response).toBeInstanceOf(Response);
+  expect(store.reads).toBe(1);
+  expect(elapsed).toBeLessThan(50);
 });
