@@ -52,6 +52,7 @@ import { WrapperStartHookSchema } from '@tokenamby-code/agent-contract/agent';
 import { commFrameTokens } from './comm-frame.ts';
 import type { CommAdmission, Daemon } from './core.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
+import { ProjectionMismatchError } from './event-log-compaction.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 import { readHookDiagnostics } from './diagnostics.ts';
 import type { ObservationHandler } from '@tokenamby-code/stc-contract/observation';
@@ -687,6 +688,16 @@ export function makeServer(opts: {
         try {
           return await route.handler(req, params);
         } catch (err) {
+          if (err instanceof ProjectionMismatchError) {
+            console.error(JSON.stringify({
+              level: 'error',
+              event: 'handler_error',
+              route: route.label,
+              error: err.code,
+              detail: err.detail,
+            }));
+            return json({ ok: false, error: err.code, detail: err.detail }, 500);
+          }
           console.error(JSON.stringify({ level: 'error', event: 'handler_error', route: route.label, error: sanitizeTmuxIds(String(err)) }));
           // Generic body: the full error stays in the server log only. Serializing
           // String(err) could echo a raw %id back through the membrane.
