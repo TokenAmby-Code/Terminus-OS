@@ -1,6 +1,9 @@
 // Event store (spec §2) — the single source of truth.
 //
-// One append-only Postgres table (`txd.events`), ONE writer. Truth is the
+// One append-only Postgres table (`txd.events`), ONE writer. The production
+// codebase has exactly one INSERT boundary: PostgresEventStore below. The tx
+// CLI uses txd's HTTP surface, k12-work has no database path into this table,
+// and migrations run before the store is returned to the daemon. Truth is the
 // stream; every displayed status is a derived view (see projections.ts).
 // Retention is operator-gated at completed estate generations. A compacted
 // prefix becomes one projection checkpoint at the same sequence; open cohorts
@@ -42,6 +45,8 @@ export interface EventStore {
   append(input: EventInput): Promise<EventRecord>;
   /** Append many events in one transaction (single-writer batch). */
   appendAll(inputs: EventInput[]): Promise<EventRecord[]>;
+  /** Observe records committed through this process's sole writer boundary. */
+  onAppend(listener: (event: EventRecord) => void): () => void;
   /** Full stream in seq order — the replay source. */
   readAll(signal?: AbortSignal): Promise<EventRecord[]>;
   readByEntity(entityId: string): Promise<EventRecord[]>;
@@ -101,6 +106,7 @@ function rowToRecord(r: Row): EventRecord {
 }
 
 export class PostgresEventStore implements EventStore {
+  private appendListeners = new Set<(event: EventRecord) => void>();
   private constructor(
     private sql: SQL,
     private now: Clock,
@@ -136,17 +142,30 @@ export class PostgresEventStore implements EventStore {
     return { ...parsed, seq: Number(rows[0]!.seq), recorded_at };
   }
 
-  append(input: EventInput): Promise<EventRecord> {
-    return this.insert(this.sql, input);
+  async append(input: EventInput): Promise<EventRecord> {
+    const record = await this.insert(this.sql, input);
+    this.notifyAppend(record);
+    return record;
   }
 
-  appendAll(inputs: EventInput[]): Promise<EventRecord[]> {
+  async appendAll(inputs: EventInput[]): Promise<EventRecord[]> {
     for (const input of inputs) assertNoTmuxIdInIdentifiers(input, 'event_input');
-    return this.sql.begin(async (tx) => {
+    const records = await this.sql.begin(async (tx) => {
       const out: EventRecord[] = [];
       for (const input of inputs) out.push(await this.insert(tx, input));
       return out;
-    }) as Promise<EventRecord[]>;
+    }) as EventRecord[];
+    for (const record of records) this.notifyAppend(record);
+    return records;
+  }
+
+  onAppend(listener: (event: EventRecord) => void): () => void {
+    this.appendListeners.add(listener);
+    return () => this.appendListeners.delete(listener);
+  }
+
+  private notifyAppend(event: EventRecord): void {
+    for (const listener of this.appendListeners) listener(event);
   }
 
   async readAll(signal?: AbortSignal): Promise<EventRecord[]> {
@@ -291,6 +310,7 @@ export class PostgresEventStore implements EventStore {
 export class MemoryEventStore implements EventStore {
   private events: EventRecord[] = [];
   private nextSeq = 1;
+  private appendListeners = new Set<(event: EventRecord) => void>();
 
   constructor(private now: Clock = systemClock) {}
 
@@ -309,14 +329,27 @@ export class MemoryEventStore implements EventStore {
 
   async append(input: EventInput): Promise<EventRecord> {
     assertNoTmuxIdInIdentifiers(input, 'event_input');
-    return this.commit(EventInputSchema.parse(input));
+    const record = this.commit(EventInputSchema.parse(input));
+    this.notifyAppend(record);
+    return record;
   }
 
   async appendAll(inputs: EventInput[]): Promise<EventRecord[]> {
     // Validate the whole batch before committing any of it (transactional).
     for (const input of inputs) assertNoTmuxIdInIdentifiers(input, 'event_input');
     const parsed = inputs.map((i) => EventInputSchema.parse(i));
-    return parsed.map((p) => this.commit(p));
+    const records = parsed.map((p) => this.commit(p));
+    for (const record of records) this.notifyAppend(record);
+    return records;
+  }
+
+  onAppend(listener: (event: EventRecord) => void): () => void {
+    this.appendListeners.add(listener);
+    return () => this.appendListeners.delete(listener);
+  }
+
+  private notifyAppend(event: EventRecord): void {
+    for (const listener of this.appendListeners) listener(event);
   }
 
   async readAll(signal?: AbortSignal): Promise<EventRecord[]> {
