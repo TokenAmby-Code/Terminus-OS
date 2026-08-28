@@ -2,8 +2,8 @@
 //
 // Single writer: every mutating path runs under one async mutex so seq order
 // and read-modify-write sequences never interleave. Truth is the event stream;
-// this class only APPENDS facts and READS projections — it never mutates a
-// projection directly.
+// this class only APPENDS facts and folds each committed record into its
+// maintained projection. Boot and explicit log rewrites rebuild from replay.
 
 import {
   SCHEMA_VERSION,
@@ -267,6 +267,13 @@ function committedTransportBytes(outcome: { bytes: number; verdict: string }): n
 
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
+  private maintainedProjection: Projections | null = null;
+  private maintainedProjectionSeq = 0;
+  private maintainedEvents: EventRecord[] = [];
+  private projectionInitialized = false;
+  private projectionEventsDuringFold: EventRecord[] = [];
+  private projectionReady: Promise<void>;
+  private openScopedResets = new Map<string, string[]>();
   private commWaiters = new Map<string, Set<() => void>>();
   private commTransportsInFlight = new Set<string>();
   private commTransportWaiters = new Map<string, Set<() => void>>();
@@ -288,7 +295,19 @@ export class Daemon {
     private commWatchArm: ((input: CommWatchArmInput) => Promise<void>) | null = null,
     private composerGate: ((input: ComposerGateInput) => Promise<void>) | null = null,
     private commReceiptRuntime: CommReceiptRuntime = DEFAULT_COMM_RECEIPT_RUNTIME,
-  ) {}
+  ) {
+    // Install the commit observer before taking the boot snapshot. An append
+    // racing that SELECT is either present in the snapshot or queued by seq;
+    // it can never fall between the two and disappear from the fold.
+    this.store.onAppend((event) => {
+      if (!this.projectionInitialized) {
+        this.projectionEventsDuringFold.push(event);
+        return;
+      }
+      this.applyProjectionEvent(event);
+    });
+    this.projectionReady = this.rebuildProjection();
+  }
 
   private sshSeatTarget(seatId: string): string | undefined {
     return this.physicalRegistration?.sshSeatTargets.targetFor(seatId);
@@ -423,9 +442,8 @@ export class Daemon {
           seats,
         }),
       );
-      const events = await this.store.readAll();
-      const pendingResetSeats = this.pendingScopedResetSeats(events);
-      const projections = buildProjections(events);
+      const pendingResetSeats = this.pendingScopedResetSeats();
+      const projections = await this.projections();
       const bound = new Set(projections.currentBindings.map((binding) => binding.seat_id));
       // A successful engine start owns the seat immediately. Registration is
       // asynchronous, so waiting for reg.bound would put the same seat back on
@@ -1004,7 +1022,11 @@ export class Daemon {
 
   /** Serialize a mutating op — the single-writer discipline. */
   private locked<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.mutex.then(fn, fn);
+    const execute = async () => {
+      await this.projectionReady;
+      return fn();
+    };
+    const run = this.mutex.then(execute, execute);
     this.mutex = run.then(
       () => undefined,
       () => undefined,
@@ -1017,23 +1039,77 @@ export class Daemon {
   }
 
   private async projections(): Promise<Projections> {
-    return buildProjections(await this.store.readAll());
+    await this.projectionReady;
+    return this.maintainedProjection!;
   }
 
-  private pendingScopedResetSeats(events: Awaited<ReturnType<EventStore['readAll']>>): Set<string> {
-    const closed = new Set(events
-      .filter((event) =>
-        event.event_type === 'estate.scoped_reset_completed'
-        || event.event_type === 'estate.scoped_reset_failed',
-      )
-      .map((event) => event.entity_id));
-    return new Set(events.flatMap((event) =>
-      event.event_type === 'estate.scoped_reset_requested'
-        && !closed.has(event.entity_id)
-        && Array.isArray(event.payload.seats)
+  private pendingScopedResetSeats(): Set<string> {
+    return new Set([...this.openScopedResets.values()].flat());
+  }
+
+  private projectionCheckpoint(): EventRecord {
+    const projection = this.maintainedProjection!;
+    return {
+      seq: this.maintainedProjectionSeq,
+      entity_type: 'estate',
+      entity_id: 'maintained-projection',
+      event_type: 'estate.compaction_checkpoint',
+      payload: {
+        current_bindings: projection.currentBindings,
+        seat_board: projection.seatBoard,
+        open_contradictions: projection.openContradictions,
+        turn_by_agent: [...projection.turnByAgent],
+        ever_bound_agents: [...projection.everBoundAgents],
+        physical_declarations: [...projection.physicalDeclarations.values()],
+        placement_attested_agents: [...projection.placementAttestedAgents],
+        abandoned_seats: [...projection.abandonedSeats],
+        launch_compositions: [...projection.launchCompositions.values()],
+        transport_claims: [...projection.transportClaims.values()],
+      },
+      provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: this.now(),
+      recorded_at: this.now(),
+    };
+  }
+
+  private foldScopedReset(event: EventRecord): void {
+    if (event.event_type === 'estate.scoped_reset_requested') {
+      const seats = Array.isArray(event.payload.seats)
         ? event.payload.seats.filter((seat): seat is string => typeof seat === 'string')
-        : [],
-    ));
+        : [];
+      this.openScopedResets.set(event.entity_id, seats);
+    } else if (event.event_type === 'estate.scoped_reset_completed'
+      || event.event_type === 'estate.scoped_reset_failed') {
+      this.openScopedResets.delete(event.entity_id);
+    }
+  }
+
+  private applyProjectionEvent(event: EventRecord): void {
+    this.maintainedProjection = buildProjections([this.projectionCheckpoint(), event]);
+    this.maintainedProjectionSeq = Math.max(this.maintainedProjectionSeq, event.seq);
+    this.maintainedEvents.push(event);
+    this.foldScopedReset(event);
+  }
+
+  private async rebuildProjection(): Promise<void> {
+    this.projectionInitialized = false;
+    const events = await this.store.readAll();
+    this.maintainedProjection = buildProjections(events);
+    this.maintainedProjectionSeq = Math.max(0, ...events.map((event) => event.seq));
+    this.maintainedEvents = [...events];
+    this.openScopedResets.clear();
+    for (const event of events) this.foldScopedReset(event);
+    const appended = this.projectionEventsDuringFold
+      .filter((event) => event.seq > this.maintainedProjectionSeq)
+      .sort((left, right) => left.seq - right.seq);
+    this.projectionEventsDuringFold = [];
+    for (const event of appended) this.applyProjectionEvent(event);
+    this.projectionInitialized = true;
+  }
+
+  private async events(): Promise<EventRecord[]> {
+    await this.projectionReady;
+    return this.maintainedEvents;
   }
 
   private async applyBindingTint(seatId: string, tint: string): Promise<boolean> {
@@ -1115,7 +1191,7 @@ export class Daemon {
 
   /** Fail-dark recovery for a crash after physical style mutation but before reg.bound. */
   private async recoverBindingPreparations(): Promise<void> {
-    const events = await this.store.readAll();
+    const events = await this.events();
     const closed = new Set(events.flatMap((event) => {
       if (event.event_type === 'reg.binding_aborted' && typeof event.payload.prepare_id === 'string') {
         return [event.payload.prepare_id];
@@ -1125,7 +1201,7 @@ export class Daemon {
       }
       return [];
     }));
-    const currentSeats = new Set(buildProjections(events).currentBindings.map((binding) => binding.seat_id));
+    const currentSeats = new Set((await this.projections()).currentBindings.map((binding) => binding.seat_id));
     for (const prepared of events) {
       if (prepared.event_type !== 'reg.binding_prepared') continue;
       const prepareId = typeof prepared.payload.prepare_id === 'string' ? prepared.payload.prepare_id : null;
@@ -1144,7 +1220,7 @@ export class Daemon {
   /** Resume every requested scoped reconstruction from event truth. */
   private async recoverScopedResets(): Promise<boolean> {
     let councilRebuilt = false;
-    const events = await this.store.readAll();
+    const events = await this.events();
     const closed = new Set(events
       .filter((event) =>
         event.event_type === 'estate.scoped_reset_completed'
@@ -1214,7 +1290,7 @@ export class Daemon {
         throw new Error(`txd failed to resume pending ${seats[0]} pane reconstruction`);
       }
       const occurred_at = this.now();
-      const resetEvents = await this.store.readAll();
+      const resetEvents = await this.events();
       const inputs = bindings.flatMap((binding) =>
         this.resetBindingInputs(binding, null, occurred_at, resetEvents),
       );
@@ -1345,8 +1421,8 @@ export class Daemon {
   ): Promise<boolean> {
     if (!this.physicalRegistration) return false;
     const observation = await this.locked(async () => {
-      const events = await this.store.readAll();
-      const projections = buildProjections(events);
+      const events = await this.events();
+      const projections = await this.projections();
       const binding = routableBindings(projections).find((row) => row.agent_id === targetAgentId);
       if (!binding?.pane_generation) return null;
       const observationId = `${targetAgentId}:${binding.pane_generation}`;
@@ -1365,8 +1441,8 @@ export class Daemon {
     const announcement = (async () => {
       const occurredAt = this.now();
       const shouldPublish = await this.locked(async () => {
-        const events = await this.store.readAll();
-        const projections = buildProjections(events);
+        const events = await this.events();
+        const projections = await this.projections();
         const current = projections.currentBindings.find((row) =>
           isRoutableBinding(row, projections)
           && row.agent_id === targetAgentId
@@ -1402,7 +1478,7 @@ export class Daemon {
         observed_at: occurredAt,
       });
       await this.locked(async () => {
-        const events = await this.store.readAll();
+        const events = await this.events();
         if (events.some((event) => event.entity_id === observation.observationId
           && event.event_type === 'act.composer_interactive_announced')) return;
         await this.store.append({
@@ -1453,7 +1529,7 @@ export class Daemon {
       }
       if (!sourceBinding.persona) throw new Error('source_persona_unresolved');
       const source: CommFrameSource = { persona: sourceBinding.persona, seat_id: sourceBinding.seat_id };
-      const events = await this.store.readAll();
+      const events = await this.events();
       // The funnel mouth. A caller-supplied identity is softened to its
       // canonical form exactly once, here; `--self` and `--reply` name an
       // agent id txd itself recorded, which is canonical already.
@@ -1501,7 +1577,7 @@ export class Daemon {
           throw new Error(`target_binding_changed: ${internal.expectedTargetAgentId}`);
         }
       }
-      const pendingResetSeats = this.pendingScopedResetSeats(events);
+      const pendingResetSeats = this.pendingScopedResetSeats();
       const fenced = targets.find((target) => pendingResetSeats.has(target.seat_id));
       if (fenced) throw new Error(`scoped_reset_pending: ${fenced.seat_id}`);
       const intentBinding = req.intent
@@ -1581,7 +1657,7 @@ export class Daemon {
     if (prepared.replayed) {
       if (!prepared.replayComplete) {
         await this.terminalizeInactiveCommTransport(prepared.messageId);
-        const events = await this.store.readAll();
+        const events = await this.events();
         const sent = events.filter((event) => event.entity_id === prepared.messageId
           && event.event_type === 'act.comm_bytes_sent');
         prepared.eventIds.push(...sent.map((event) => event.seq)
@@ -1630,13 +1706,12 @@ export class Daemon {
 
       const plans = await this.locked(async () => {
         const proj = await this.projections();
-        const events = await this.store.readAll();
         if (internal && !proj.currentBindings.some((binding) => binding.registered
           && binding.agent_id === req.source_agent_id
           && binding.bound_seq === internal.expectedSourceBoundSeq)) {
           throw new Error('source_binding_changed');
         }
-        const pendingResetSeats = this.pendingScopedResetSeats(events);
+        const pendingResetSeats = this.pendingScopedResetSeats();
         for (const target of prepared.targets) {
           const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
             && row.agent_id === target.agent_id
@@ -1734,7 +1809,7 @@ export class Daemon {
             });
           }
           if (sent.verdict === 'staged') {
-            const events = await this.store.readAll();
+            const events = await this.events();
             // A command or skill surface submits with no comm envelope in the
             // prompt, so its hook carries an empty `message_ids` list and the
             // rendered frame is the only thing that names it. Enter is driven
@@ -1836,14 +1911,14 @@ export class Daemon {
    */
   private async completeLostEnter(arm: LostEnterArm): Promise<void> {
     const go = await this.locked(async () => {
-      const events = await this.store.readAll();
+      const events = await this.events();
       const assertionId = `${arm.messageId}:${arm.targetAgentId}`;
       if (events.some((event) => event.entity_id === assertionId
         && event.event_type === 'act.comm_delivery_asserted')) return false;
       if (events.some((event) => event.event_type === 'act.comm_submit_driven'
         && event.payload.message_id === arm.messageId
         && event.payload.target_agent_id === arm.targetAgentId)) return false;
-      const proj = buildProjections(events);
+      const proj = await this.projections();
       const binding = proj.currentBindings.find((row) => isRoutableBinding(row, proj)
         && row.agent_id === arm.targetAgentId
         && row.seat_id === arm.seatId
@@ -1855,7 +1930,7 @@ export class Daemon {
     const outcome = await this.tmux.completeStagedSubmit(arm.seatId, arm.frame, arm.paneGeneration);
     if (outcome !== 'submit_completed' && outcome !== 'submit_failed') return;
     await this.locked(async () => {
-      const events = await this.store.readAll();
+      const events = await this.events();
       if (events.some((event) => event.event_type === 'act.comm_submit_driven'
         && event.payload.message_id === arm.messageId
         && event.payload.target_agent_id === arm.targetAgentId)) return;
@@ -1923,8 +1998,7 @@ export class Daemon {
     const prepared = await this.locked(async () => {
       if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
       const proj = await this.projections();
-      const events = await this.store.readAll();
-      const pendingResetSeats = this.pendingScopedResetSeats(events);
+      const pendingResetSeats = this.pendingScopedResetSeats();
       const logicalIdentity = this.acceptLogicalCommIdentity(req.target);
       const matches = this.identityBindings(logicalIdentity, proj);
       if (matches.length > 1) throw new Error(AMBIGUOUS_IDENTITY(req.target));
@@ -2086,7 +2160,7 @@ export class Daemon {
   }
 
   private async assertCallback(askId: string, targetAgent: string, content: string, source: 'reply' | 'stop', stopEventId: string | null, receipt: string | null): Promise<void> {
-    const events = await this.store.readAll();
+    const events = await this.events();
     const snapshot = events.find((e) => e.entity_id === askId && e.event_type === 'reg.comm_target_snapshotted');
     const targets = (snapshot?.payload.targets ?? []) as CommTarget[];
     if (!targets.some((t) => t.agent_id === targetAgent)) return;
@@ -2173,7 +2247,7 @@ export class Daemon {
   private terminalizeInactiveCommTransport(messageId: string): Promise<void> {
     return this.locked(async () => {
       if (this.commTransportsInFlight.has(messageId)) return;
-      const events = await this.store.readAll();
+      const events = await this.events();
       const accepted = events.find((event) => event.entity_id === messageId
         && event.event_type === 'reg.comm_accepted');
       if (!accepted) return;
@@ -2215,7 +2289,7 @@ export class Daemon {
       // the frame carries. The event stream records canonical ids, so each
       // token resolves to its accepted message here, at the ingress, and an
       // unresolvable token simply names no correspondence of ours.
-      const preEvents = await this.store.readAll();
+      const preEvents = await this.events();
       const acceptedByToken = new Map<string, string>();
       for (const event of preEvents) {
         if (event.event_type !== 'reg.comm_accepted') continue;
@@ -2237,7 +2311,7 @@ export class Daemon {
         },
         provenance: this.prov('hook', receipt), occurred_at: this.now(),
       });
-      const events = await this.store.readAll();
+      const events = await this.events();
       const asserted: string[] = [];
       const matchedMessageIds: string[] = [];
       const confirmations = new Map<string, string[]>();
@@ -2372,7 +2446,7 @@ export class Daemon {
   // never from the bytes that were staged, which is the conflation this surface
   // exists to end.
   async commDelivery(messageId: string): Promise<CommDeliveryReadResponse> {
-    const events = await this.store.readAll();
+    const events = await this.events();
     const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
     if (!accepted) throw new Error('message_absent');
     const snapshot = events.find((e) => e.event_type === 'reg.comm_target_snapshotted' && e.payload.message_id === messageId);
@@ -2408,7 +2482,7 @@ export class Daemon {
   async waitCommReceipt(req: CommReceiptWaitRequest): Promise<CommReceipt> {
     if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
     const state = async () => {
-      const events = await this.store.readAll();
+      const events = await this.events();
       const accepted = events.find((event) => event.entity_id === req.message_id && event.event_type === 'reg.comm_accepted');
       if (!accepted) throw new Error('message_absent');
       if (accepted.payload.source_agent_id !== req.source_agent_id) throw new Error('comm_source_mismatch');
@@ -2524,7 +2598,7 @@ export class Daemon {
 
   commStop(agentId: string, content: string, stopEventId: string | null, receipt: string | null): Promise<void> {
     return this.locked(async () => {
-      const events = await this.store.readAll();
+      const events = await this.events();
       const askIds = new Set(events
         .filter((e) => e.event_type === 'reg.comm_accepted' && typeof e.payload.ask_id === 'string')
         .map((e) => String(e.payload.ask_id)));
@@ -2594,7 +2668,7 @@ export class Daemon {
   async waitComm(req: CommWaitRequest): Promise<CommWaitResponse> {
     if (req.schema_version !== SCHEMA_VERSION) throw new Error(`schema_version_mismatch: daemon pins ${SCHEMA_VERSION}`);
     const read = async (): Promise<CommWaitResponse> => {
-      const events = await this.store.readAll();
+      const events = await this.events();
       const snapshot = events.find((e) => e.entity_id === req.ask_id && e.event_type === 'reg.comm_target_snapshotted');
       if (!snapshot) throw new Error('ask_absent');
       const targets = snapshot.payload.targets as CommTarget[];
@@ -2657,7 +2731,7 @@ export class Daemon {
       // single-writer lock is held. No implicit handover: callers must close a
       // current binding before a different launch can claim either side.
       const proj = await this.projections();
-      if (this.pendingScopedResetSeats(await this.store.readAll()).has(req.seat_id)) {
+      if (this.pendingScopedResetSeats().has(req.seat_id)) {
         return {
           ok: false,
           seat_id: req.seat_id,
@@ -2854,7 +2928,7 @@ export class Daemon {
         return page !== undefined && isTxdPage(page) && rebuiltPages.has(page);
       });
       const bootRetiredAt = this.now();
-      const bootEvents = await this.store.readAll();
+      const bootEvents = await this.events();
       const bootRetirements = bindings.flatMap((binding) =>
         this.resetBindingInputs(binding, null, bootRetiredAt, bootEvents),
       );
@@ -2876,7 +2950,7 @@ export class Daemon {
       // have torn (createSeat committed, its append did not) — the pane persists
       // but the fact was lost. Presence WITHOUT attestation is that torn state.
       const attested = new Set(
-        (await this.store.readAll()).filter((e) => e.event_type === 'reg.pane_created').map((e) => e.entity_id),
+        (await this.events()).filter((e) => e.event_type === 'reg.pane_created').map((e) => e.entity_id),
       );
       const created: string[] = [];
       const existing: string[] = [];
@@ -3240,7 +3314,7 @@ export class Daemon {
       inputs.push({ entity_type: 'seat', entity_id: binding.seat_id, event_type: 'reg.seat_abandoned', payload: {}, provenance: prov, occurred_at });
     }
     inputs.push(...this.commDeliveryFailures(
-      await this.store.readAll(), binding.agent_id, 'delivery_target_closed', occurred_at, prov,
+      await this.events(), binding.agent_id, 'delivery_target_closed', occurred_at, prov,
     ));
     await this.store.appendAll(inputs);
     this.wakeCommDeliveryFailures(inputs);
@@ -3321,7 +3395,7 @@ export class Daemon {
       // interrupted turn left painted refuses as frame_present, an invisible
       // composer refuses as unobservable, and a later fresh stop retries with
       // fresh evidence. A deduped or refused stop never reaches this join.
-      const events = await this.store.readAll();
+      const events = await this.events();
       for (const receipt of events) {
         if (receipt.event_type !== 'act.comm_bytes_sent'
           || receipt.payload.target_agent_id !== req.agent_id
@@ -3376,9 +3450,9 @@ export class Daemon {
     const response = await this.locked(async () => {
       councilRebuilt = await this.recoverScopedResets();
       await this.attestEstateDivergenceUnlocked(transportReceipt);
-      const events = await this.store.readAll();
+      const events = await this.events();
       const t0 = performance.now();
-      const proj = buildProjections(events);
+      const proj = await this.projections();
       const replay_ms = performance.now() - t0;
 
       const observed = await this.tmux.listSeats();
@@ -3492,7 +3566,7 @@ export class Daemon {
       }
 
       // Recompute open set over the freshly-appended stream.
-      const openContradictions = buildProjections(await this.store.readAll()).openContradictions;
+      const openContradictions = (await this.projections()).openContradictions;
       const p0 = openContradictions.length > 0;
 
       return {
@@ -3566,7 +3640,9 @@ export class Daemon {
   compactEventLog(request: EventLogCompactionRequest): Promise<EventLogCompactionResult> {
     return this.locked(async () => {
       if (request.schema_version !== SCHEMA_VERSION) throw new Error('schema_version_mismatch');
-      return this.store.compact(request);
+      const result = await this.store.compact(request);
+      await this.rebuildProjection();
+      return result;
     });
   }
 
@@ -3812,7 +3888,7 @@ export class Daemon {
       // The pane processes are replaced: any shell run staged in them lost
       // the shell that would signal its completion. Fail those runs loud now.
       for (const seat of seats) this.abortPaneRuns(seat);
-      const resetEvents = await this.store.readAll();
+      const resetEvents = await this.events();
       const inputs = bindings.flatMap((binding) =>
         this.resetBindingInputs(binding, transportReceipt, completedAt, resetEvents),
       );
@@ -4093,7 +4169,7 @@ export class Daemon {
 
   finalizeEstateRotation(): Promise<void> {
     return this.locked(async () => {
-      const events = await this.store.readAll();
+      const events = await this.events();
       const completed = new Set(events.filter((event) => event.event_type === 'estate.rotation_completed').map((event) => event.entity_id));
       const pending = [...events].reverse().find((event) => event.event_type === 'estate.rotation_requested' && !completed.has(event.entity_id));
       if (!pending) {
