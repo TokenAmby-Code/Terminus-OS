@@ -1,11 +1,37 @@
 #!/bin/sh
 set -eu
 
+event=${1:-client-resized}
+event_zoom=${2:-}
+case "$event" in
+  client-resized|after-resize-pane) ;;
+  *) exit 0 ;;
+esac
+
 target='main:=council'
+pending='@txd_council_reflow_pending'
+lock='txd-council-reflow'
+tmux wait-for -L "$lock"
+trap 'tmux wait-for -U "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+
 height=$(tmux display-message -p -t "$target" '#{window_height}' 2>/dev/null) || exit 0
 numerator=$(tmux show-options -wv -t "$target" @txd_council_top_numerator 2>/dev/null) || exit 0
 denominator=$(tmux show-options -wv -t "$target" @txd_council_top_denominator 2>/dev/null) || exit 0
 borders=$(tmux show-options -wv -t "$target" @txd_council_horizontal_borders 2>/dev/null) || exit 0
+zoomed=$(tmux display-message -p -t "$target" '#{window_zoomed_flag}' 2>/dev/null) || exit 0
+
+if [ "$event" = after-resize-pane ]; then
+  # Hook commands run in the background. The captured event state prevents a
+  # delayed zoom-in event from draining a debt recorded by a later resize.
+  [ "$event_zoom" = 0 ] || exit 0
+  deferred=$(tmux show-options -wv -t "$target" "$pending" 2>/dev/null) || exit 0
+  [ "$deferred" = 1 ] || exit 0
+  [ "$zoomed" = 0 ] || exit 0
+elif [ "$zoomed" = 1 ]; then
+  tmux set-option -w -t "$target" "$pending" 1
+  exit 0
+fi
+
 top=$(((((height - borders) * numerator) + (denominator / 2)) / denominator))
 pane_border_status=$(tmux show-options -wv -t "$target" pane-border-status)
 if [ "$pane_border_status" = off ]; then
@@ -20,3 +46,7 @@ while IFS="$(printf '\t')" read -r seat pane; do
     council:custodes|council:pax) tmux resize-pane -t "$pane" -y "$requested_top" ;;
   esac
 done
+
+# Clear only after both columns converge. after-resize-pane deliveries caused
+# by these writes serialize on the tmux wait-for lock, then observe no debt.
+tmux set-option -wu -t "$target" "$pending" 2>/dev/null || true

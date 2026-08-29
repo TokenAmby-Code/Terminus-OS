@@ -17,6 +17,22 @@ async function tmux(socket: string, ...args: string[]): Promise<string> {
     proc.exited,
   ]);
   if (code !== 0) throw new Error(`disposable tmux command failed: ${args[0]}: ${stderr.trim()}`);
+  // tx.conf correctly points live servers at the installed generation. These
+  // source-tree fixtures must keep their disposable hooks on the candidate
+  // script or an older installed reflow can mutate the test server.
+  if (args.includes('start-server')) {
+    const hooks: Array<[string, string]> = [
+      ['client-resized', `run-shell -b "${reflowCouncil} client-resized"`],
+      ['after-resize-pane', `run-shell -b "${reflowCouncil} after-resize-pane #{window_zoomed_flag}"`],
+    ];
+    for (const [hook, command] of hooks) {
+      const installed = Bun.spawn(['tmux', '-L', socket, 'set-hook', '-g', hook, command], {
+        stdout: 'ignore', stderr: 'pipe',
+      });
+      const [hookStderr, hookCode] = await Promise.all([new Response(installed.stderr).text(), installed.exited]);
+      if (hookCode !== 0) throw new Error(`disposable tmux hook install failed: ${hook}: ${hookStderr.trim()}`);
+    }
+  }
   return stdout.trim();
 }
 
@@ -180,6 +196,39 @@ describe('disposable canonical estate geometry', () => {
     await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '81', '-y', '24');
     await tmux(socket, 'run-shell', reflowCouncil);
 
+    expect(await paneLayoutHeights(socket, 'council')).toEqual({
+      'council:custodes': 15,
+      'council:fabricator-general': 8,
+      'council:pax': 15,
+      'council:orchestrator': 8,
+    });
+    expect(await control.estateDivergences()).toEqual([]);
+    expect(await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
+  });
+
+  test('a client resize preserves Council zoom and applies deferred two-thirds geometry after unzoom', async () => {
+    const socket = `txd-council-zoomed-client-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '81', '-y', '66');
+    expect(await control.rebuildPage('council')).toBe(true);
+    const before = await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}');
+    await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, 'council:custodes'));
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '81', '-y', '24');
+    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('1');
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{@txd_council_reflow_pending}')).toBe('1');
+
+    await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, 'council:custodes'));
+    // The installed after-resize-pane hook dispatches this exact drain in the
+    // background so the hook never recursively blocks tmux. Invoke the same
+    // event consumer synchronously here to make completion deterministic.
+    await tmux(socket, 'run-shell', `${reflowCouncil} after-resize-pane 0`);
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('0');
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{@txd_council_reflow_pending}')).toBe('');
     expect(await paneLayoutHeights(socket, 'council')).toEqual({
       'council:custodes': 15,
       'council:fabricator-general': 8,

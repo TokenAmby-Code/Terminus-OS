@@ -46,17 +46,35 @@ test('the active table is exact, current-viewport, and release-persistent', () =
   tmux('send-keys', '-t', 'main:0.0', '-X', 'cancel');
 });
 
-test('prefix e is an idempotent focus action, not an inverted zoom toggle', () => {
+test('prefix e is an idempotent manual unzoom action', () => {
   const binding = new TextDecoder().decode(tmux('list-keys', '-T', 'prefix', 'e').stdout);
   expect(binding).toContain('window_zoomed_flag');
   expect(binding).toContain('resize-pane -Z');
-  expect(binding).toContain('==:#{window_zoomed_flag},0');
+  expect(binding).toContain('==:#{window_zoomed_flag},1');
 });
 
-test('client resize reflows Council through the declared geometry projection', () => {
+test('prefix arrows enter the same Enter-to-zoom table as prefix h/j/k/l', () => {
+  const movements: Array<[string, string]> = [
+    ['h', 'L'], ['j', 'D'], ['k', 'U'], ['l', 'R'],
+    ['Left', 'L'], ['Down', 'D'], ['Up', 'U'], ['Right', 'R'],
+  ];
+  for (const [key, direction] of movements) {
+    const binding = new TextDecoder().decode(tmux('list-keys', '-T', 'prefix', key).stdout);
+    expect(binding).toContain(`select-pane -${direction}`);
+    expect(binding).toContain('switch-client -T pane-select');
+  }
+  expect(new TextDecoder().decode(tmux('list-keys', '-T', 'pane-select', 'Enter').stdout)).toContain('resize-pane -Z');
+});
+
+test('client resize defers Council reflow until a zoom-clear command event', () => {
   const hook = new TextDecoder().decode(tmux('show-hooks', '-g', 'client-resized').stdout);
   expect(hook).toContain('packages/txd/tmux/reflow-council');
+  expect(hook).toContain('client-resized');
   expect(hook).not.toMatch(/select-layout|even-vertical|tiled/);
+  const drain = new TextDecoder().decode(tmux('show-hooks', '-g', 'after-resize-pane').stdout);
+  expect(drain).toContain('packages/txd/tmux/reflow-council');
+  expect(drain).toContain('after-resize-pane');
+  expect(drain).toContain('window_zoomed_flag');
 });
 
 // The estate hooks only parse under the k12 socket guard, and a server boot
