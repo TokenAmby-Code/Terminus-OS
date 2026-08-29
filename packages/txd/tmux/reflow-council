@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+target='main:=council'
+height=$(tmux display-message -p -t "$target" '#{window_height}' 2>/dev/null) || exit 0
+numerator=$(tmux show-options -wv -t "$target" @txd_council_top_numerator 2>/dev/null) || exit 0
+denominator=$(tmux show-options -wv -t "$target" @txd_council_top_denominator 2>/dev/null) || exit 0
+borders=$(tmux show-options -wv -t "$target" @txd_council_horizontal_borders 2>/dev/null) || exit 0
+top=$(((((height - borders) * numerator) + (denominator / 2)) / denominator))
+pane_border_status=$(tmux show-options -wv -t "$target" pane-border-status)
+if [ "$pane_border_status" = off ]; then
+  requested_top=$top
+else
+  requested_top=$((top - 1))
+fi
+
+tmux list-panes -t "$target" -F '#{@canonical_id}	#{pane_id}' |
+while IFS="$(printf '\t')" read -r seat pane; do
+  case "$seat" in
+    council:custodes|council:pax) tmux resize-pane -t "$pane" -y "$requested_top" ;;
+  esac
+done

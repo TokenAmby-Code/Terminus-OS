@@ -23,6 +23,20 @@ export const TXD_WINDOWS = {
   somnium_fleet: [TXD_STACK_WINDOWS.somnium_fleet],
 } as const;
 
+// Council owns one horizontal border between its two rows. The remaining rows
+// are divided two-to-one, with the nearest integer assigned to the top row.
+// For a 66-row window this declares 65 usable rows: 43 top and 22 bottom.
+export const COUNCIL_GEOMETRY = {
+  top: { numerator: 2, denominator: 3 },
+  horizontalBorders: 1,
+} as const;
+
+export function councilGeometryRows(windowHeight: number): { top: number; bottom: number } {
+  const usable = windowHeight - COUNCIL_GEOMETRY.horizontalBorders;
+  const top = Math.round(usable * COUNCIL_GEOMETRY.top.numerator / COUNCIL_GEOMETRY.top.denominator);
+  return { top, bottom: usable - top };
+}
+
 export type TxdPage = keyof typeof TXD_WINDOWS;
 export type TxdStackPage = keyof typeof TXD_STACK_WINDOWS;
 
