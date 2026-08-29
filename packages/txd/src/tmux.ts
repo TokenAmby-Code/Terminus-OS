@@ -11,6 +11,8 @@
 // tmux dependency; on-box acceptance exercises the real plane.
 
 import {
+  COUNCIL_GEOMETRY,
+  councilGeometryRows,
   isStackPage,
   seatBelongsToPage,
   TXD_ESTATE,
@@ -307,10 +309,10 @@ const REPAIR_SPLITS: Record<string, { source: string; flags: string[]; size?: st
   'somnium:S': { source: 'somnium:N', flags: ['-v'] },
   'somnium:NE': { source: 'somnium:SE', flags: ['-v', '-b'] },
   'somnium:SE': { source: 'somnium:NE', flags: ['-v'] },
-  'council:custodes': { source: 'council:fabricator-general', flags: ['-v', '-b'], size: '67%' },
-  'council:fabricator-general': { source: 'council:custodes', flags: ['-v'], size: '33%' },
-  'council:pax': { source: 'council:orchestrator', flags: ['-v', '-b'], size: '67%' },
-  'council:orchestrator': { source: 'council:pax', flags: ['-v'], size: '33%' },
+  'council:custodes': { source: 'council:fabricator-general', flags: ['-v', '-b'] },
+  'council:fabricator-general': { source: 'council:custodes', flags: ['-v'] },
+  'council:pax': { source: 'council:orchestrator', flags: ['-v', '-b'] },
+  'council:orchestrator': { source: 'council:pax', flags: ['-v'] },
 };
 
 const CANON_OPT = '@canonical_id';
@@ -972,6 +974,30 @@ export class RealTmux implements TmuxControlPlane {
     return this.checked(args.includes('-c') ? args : [...args, '-c', this.homeDirectory()], operation, target);
   }
 
+  private async councilRows(target: string): Promise<{ top: number; bottom: number }> {
+    const raw = await this.checked(
+      ['display-message', '-p', '-t', target, '#{window_height}'],
+      'observe council window height',
+      'council',
+    );
+    const height = Number(raw);
+    if (!Number.isInteger(height) || height < 2) {
+      throw new Error(`txd tmux council window has invalid height: ${raw}`);
+    }
+    return councilGeometryRows(height);
+  }
+
+  private async declareCouncilGeometry(target: string): Promise<void> {
+    const options = {
+      '@txd_council_top_numerator': String(COUNCIL_GEOMETRY.top.numerator),
+      '@txd_council_top_denominator': String(COUNCIL_GEOMETRY.top.denominator),
+      '@txd_council_horizontal_borders': String(COUNCIL_GEOMETRY.horizontalBorders),
+    } as const;
+    for (const [name, value] of Object.entries(options)) {
+      await this.checked(['set-option', '-w', '-t', target, name, value], 'declare council geometry', 'council');
+    }
+  }
+
   /**
    * Pane geometry as the window lays it out.
    *
@@ -1045,12 +1071,11 @@ export class RealTmux implements TmuxControlPlane {
         && se.left === ne.left && se.top === ne.top + ne.height + 1
         && nw.width === sw.width && ne.width === se.width
         && nw.height === ne.height && sw.height === se.height
-        // The column splits at the fraction REPAIR_SPLITS declares for the top
-        // seat (67%). tmux resolves that percentage of the whole column height
-        // (both panes plus their shared border) to an integer pane height, and
-        // rounding direction is tmux's, not ours — so acceptance recomputes the
-        // same fraction of the same column and allows the one row of rounding.
-        && Math.abs(nw.height - 0.67 * (nw.height + sw.height + 1)) <= 1
+        // COUNCIL_GEOMETRY rounds the two-thirds share to the nearest integer.
+        // That admits only the unavoidable integer-row error (at most 1/3 row)
+        // and rejects the adjacent integer (at least 2/3 row from the ideal).
+        && nw.height === councilGeometryRows(nw.windowHeight).top
+        && sw.height === councilGeometryRows(nw.windowHeight).bottom
         && ne.left + ne.width === nw.windowWidth
         && sw.top + sw.height === nw.windowHeight
         && se.top + se.height === nw.windowHeight;
@@ -1079,6 +1104,43 @@ export class RealTmux implements TmuxControlPlane {
         && east.left + east.width === west.windowWidth;
     }
     return true;
+  }
+
+  /** Reproject a structurally intact Council after tmux changes window rows. */
+  private async reflowCouncil(rows: EstateRow[]): Promise<void> {
+    const seats = TXD_WINDOWS.council;
+    const panes = rows.filter((row) => row.session === TXD_SESSION && row.window === 'council');
+    if (panes.length !== seats.length) return;
+    const bySeat = new Map(panes.map((row) => [row.seat, row]));
+    if (seats.some((seat) => !bySeat.has(seat))) return;
+    const nw = bySeat.get(seats[0]!)!;
+    const sw = bySeat.get(seats[1]!)!;
+    const ne = bySeat.get(seats[2]!)!;
+    const se = bySeat.get(seats[3]!)!;
+    const originTop = Math.min(...panes.map((pane) => pane.top));
+    const intact = nw.left === 0 && nw.top === originTop
+      && sw.left === 0 && sw.top === nw.top + nw.height + 1
+      && ne.left === nw.width + 1 && ne.top === originTop
+      && se.left === ne.left && se.top === ne.top + ne.height + 1
+      && nw.width === sw.width && ne.width === se.width
+      && nw.height === ne.height && sw.height === se.height
+      && ne.left + ne.width === nw.windowWidth
+      && sw.top + sw.height === nw.windowHeight
+      && se.top + se.height === nw.windowHeight;
+    if (!intact) return;
+    const desired = councilGeometryRows(nw.windowHeight);
+    if (nw.height === desired.top && sw.height === desired.bottom) return;
+    const paneBorderStatus = await this.checked(
+      ['show-options', '-wv', '-t', `${TXD_SESSION}:=council`, 'pane-border-status'],
+      'observe council pane border status',
+      'council',
+    );
+    const requestedTop = desired.top - (paneBorderStatus === 'off' ? 0 : 1);
+    for (const seat of [seats[0], seats[2]]) {
+      const pane = await this.resolvePane(seat);
+      if (!pane) throw new Error(`txd cannot reflow missing Council seat ${seat}`);
+      await this.checked(['resize-pane', '-t', pane, '-y', String(requestedTop)], 'reflow council geometry', seat);
+    }
   }
 
   private isCanonicalEstate(rows: EstateRow[]): boolean {
@@ -1245,18 +1307,20 @@ export class RealTmux implements TmuxControlPlane {
       const southeast = await this.estateChecked(['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[4]!), '-c', this.homeDirectory(), '-l', '50%', '-t', northeast], 'split somnium southeast', page);
       panes = [first, north, south, northeast, southeast];
     } else if (page === 'council') {
+      await this.declareCouncilGeometry(first);
+      const councilRows = await this.councilRows(first);
       const northeast = await this.estateChecked(
         ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[2]!), '-c', this.homeDirectory(), '-l', '50%', '-t', first],
         'split council east column',
         page,
       );
       const southwest = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', '33%', '-t', first],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[1]!), '-c', this.homeDirectory(), '-l', String(councilRows.bottom), '-t', first],
         'split council southwest',
         page,
       );
       const southeast = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', '33%', '-t', northeast],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment(seats[3]!), '-c', this.homeDirectory(), '-l', String(councilRows.bottom), '-t', northeast],
         'split council southeast',
         page,
       );
@@ -1435,6 +1499,10 @@ export class RealTmux implements TmuxControlPlane {
         return row.session === TXD_SESSION && (row.seat === '' || seatBelongsToPage(row.window, row.seat));
       });
       if (!recoverable) throw new Error('txd refused non-canonical existing tmux estate; canonical construction requires an empty socket');
+      if (rows.some((row) => row.session === TXD_SESSION && row.window === 'council')) {
+        await this.declareCouncilGeometry(`${TXD_SESSION}:=council`);
+        await this.reflowCouncil(rows);
+      }
       if (!(await this.clearDefaultAgentEnvironment(TXD_SESSION))) {
         throw new Error('txd could not clear the estate session agent environment');
       }
@@ -1503,16 +1571,18 @@ export class RealTmux implements TmuxControlPlane {
         ['new-window', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:custodes'), '-c', this.homeDirectory(), '-t', TXD_SESSION, '-n', 'council'],
         'create council window',
       );
+      await this.declareCouncilGeometry(council);
+      const councilRows = await this.councilRows(council);
       const councilNE = await this.estateChecked(
         ['split-window', '-h', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:pax'), '-c', this.homeDirectory(), '-l', '50%', '-t', council],
         'split council east column',
       );
       const councilSW = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:fabricator-general'), '-c', this.homeDirectory(), '-l', '33%', '-t', council],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:fabricator-general'), '-c', this.homeDirectory(), '-l', String(councilRows.bottom), '-t', council],
         'split council southwest',
       );
       const councilSE = await this.estateChecked(
-        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:orchestrator'), '-c', this.homeDirectory(), '-l', '33%', '-t', councilNE],
+        ['split-window', '-v', '-d', '-P', '-F', '#{pane_id}', ...this.paneEnvironment('council:orchestrator'), '-c', this.homeDirectory(), '-l', String(councilRows.bottom), '-t', councilNE],
         'split council southeast',
       );
       const councilPanes = [council, councilSW, councilNE, councilSE];
@@ -1696,8 +1766,14 @@ export class RealTmux implements TmuxControlPlane {
     if (!(await this.clearPageZoom(page, target))) return false;
     const spec = REPAIR_SPLITS[seatId];
     const sourcePane = (spec && anchors.get(spec.source)) ?? [...anchors.values()][0]!;
+    const repairedCouncilRows = page === 'council' && spec && anchors.has(spec.source)
+      ? await this.councilRows(sourcePane)
+      : null;
+    const councilSize = repairedCouncilRows
+      ? repairedCouncilRows[seatId === 'council:custodes' || seatId === 'council:pax' ? 'top' : 'bottom']
+      : null;
     const flags = spec && anchors.has(spec.source)
-      ? [...spec.flags, ...(spec.size ? ['-l', spec.size] : [])]
+      ? [...spec.flags, ...(councilSize !== null ? ['-l', String(councilSize)] : spec.size ? ['-l', spec.size] : [])]
       : ['-h'];
     try {
       const created = await this.estateChecked(

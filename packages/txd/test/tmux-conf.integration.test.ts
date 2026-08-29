@@ -53,6 +53,12 @@ test('prefix e is an idempotent focus action, not an inverted zoom toggle', () =
   expect(binding).toContain('==:#{window_zoomed_flag},0');
 });
 
+test('client resize reflows Council through the declared geometry projection', () => {
+  const hook = new TextDecoder().decode(tmux('show-hooks', '-g', 'client-resized').stdout);
+  expect(hook).toContain('packages/txd/tmux/reflow-council');
+  expect(hook).not.toMatch(/select-layout|even-vertical|tiled/);
+});
+
 // The estate hooks only parse under the k12 socket guard, and a server boot
 // tolerates config errors that `source-file` refuses — so sourcing the conf
 // under the guard is the one load that proves every hook name is one the real
