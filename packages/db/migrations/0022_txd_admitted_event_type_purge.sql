@@ -2,7 +2,7 @@
 -- Boot replay validates every stored row against that union, so a row whose
 -- emitter no longer exists refuses the whole stream and the daemon cannot
 -- start. Delete every row outside the admitted set. The append-only fence
--- drops only for this surgical delete, exactly as 0014 did for bus.events.
+-- drops only for this surgical delete.
 
 ALTER TABLE txd.events DISABLE TRIGGER events_no_delete;
 

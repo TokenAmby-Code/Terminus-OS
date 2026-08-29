@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { SQL } from "bun";
 import { connectDb } from "../src/client.ts";
@@ -113,6 +114,20 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
     ]);
   });
 
+  test("the migration ledger mirrors the present migration directory", async () => {
+    await sql`INSERT INTO schema_migrations (id, name) VALUES (9999, 'absent')`;
+    await runMigrations(sql, MIGRATIONS_DIR);
+
+    const expected = (await readdir(MIGRATIONS_DIR))
+      .sort()
+      .map(filename => {
+        const match = /^(\d{4})_([a-z0-9_]+)\.sql$/.exec(filename)!;
+        return { id: Number(match[1]), name: match[2] as string };
+      });
+    const rows = await sql`SELECT id, name FROM schema_migrations ORDER BY id`;
+    expect(rows).toEqual(expected);
+  });
+
   test("connectDb fails loud on a dead endpoint (no retry-forever)", async () => {
     const dead = DbEndpoint.parse({
       kind: "socket",
@@ -129,7 +144,6 @@ describe.skipIf(!endpoint)("db integration (live postgres 18)", () => {
 async function resetTestDatabase(sql: SQL): Promise<void> {
   await sql.unsafe(`
     DROP SCHEMA IF EXISTS replay CASCADE;
-    DROP SCHEMA IF EXISTS bus CASCADE;
     DROP SCHEMA IF EXISTS telemetry CASCADE;
     DROP SCHEMA IF EXISTS txd CASCADE;
     DROP TABLE IF EXISTS public.schema_migrations;
