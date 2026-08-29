@@ -4,7 +4,9 @@ import { PostgresObservationStore } from "@tokenamby-code/stc-contract/observati
 import { SERVICE_VERSION } from "./identity.ts";
 import { makeServer } from "./server.ts";
 import { PostgresTelemetryStore } from "./store.ts";
+import { loadFleetTimezone } from "@terminus-os/contracts/fleet-time";
 
+await loadFleetTimezone();
 
 const bind = process.env.TELEMETRYD_BIND ?? "127.0.0.1";
 const port = Number(process.env.TELEMETRYD_PORT ?? "7784");

@@ -104,8 +104,13 @@ describe('systemd/txd.service pins', () => {
 
   test('clipboard origin identity resolves through generated fleet machine configuration', () => {
     pin('Environment=TXD_MACHINE_REGISTRY=%h/runtimes/Token-Fleet/live/shared/generated/registry.json');
+    pin('Environment=TOKEN_FLEET_MACHINE_CONFIG_ROOT=%h/runtimes/Token-Fleet/live/machines');
     pin('AssertPathExists=%h/runtimes/Token-Fleet/live/shared/generated/registry.json');
     pin('ExecStartPre=/usr/bin/test -r %h/runtimes/Token-Fleet/live/shared/generated/registry.json');
+  });
+
+  test('timezone config is unit-owned without an EnvironmentFile dependency', () => {
+    expect(unit).not.toMatch(/^EnvironmentFile=.*timezone/m);
   });
 });
 

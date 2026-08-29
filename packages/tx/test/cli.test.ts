@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import { runCli, type CliDependencies } from '../src/cli.ts';
 
+const testTimezone = async () => 'America/Phoenix';
+
 function harness(response: unknown = { ok: true }) {
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -9,6 +11,7 @@ function harness(response: unknown = { ok: true }) {
     request: async (method, path, body) => { calls.push({ method, path, ...(body === undefined ? {} : { body }) }); return response; },
     stdout: (line) => stdout.push(line),
     stderr: (line) => stderr.push(line),
+    timezone: testTimezone,
     observation: {
       health: async () => response as never,
       inspect: async () => response as never,
@@ -61,7 +64,7 @@ test('inspect hooks returns bounded typed journal diagnostics', async () => {
     schema_version: 11,
     source: 'systemd-journal',
     identifier: 'txd-tmux-hook',
-    diagnostics: [{ recorded_at: '2026-08-17T17:00:00.000Z', priority: 3, message: 'Unable to connect' }],
+    diagnostics: [{ recorded_at: '2026-08-17 10:00:00 MST', priority: 3, message: 'Unable to connect' }],
   });
 });
 
@@ -187,6 +190,7 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
     },
     stdout: (line) => stdout.push(line),
     stderr: (line) => stderr.push(line),
+    timezone: testTimezone,
   };
   try {
     expect(await runCli(['comm', '--ask', 'palace:W', 'report your seat'], deps)).toBe(0);

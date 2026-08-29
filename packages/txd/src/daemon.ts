@@ -16,6 +16,9 @@ import { realRemoteEnvelopeLister } from './envelopes.ts';
 import { parseClipboardMachineRegistry } from './clipboard-origin.ts';
 import { SERVICE_VERSION } from './identity.ts';
 import { createTxdObservationSource, makeTxdObservationHandler } from './observation.ts';
+import { loadFleetTimezone } from '@terminus-os/contracts/fleet-time';
+
+await loadFleetTimezone();
 
 const build = {
   version: SERVICE_VERSION,

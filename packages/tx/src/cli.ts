@@ -5,6 +5,7 @@ import { findTmuxIdInIdentifiers } from '@terminus-os/contracts';
 import { createObservationClient, type ObservationClient } from '@tokenamby-code/stc-contract/client';
 import { runningRuntimeMarker } from '@tokenamby-code/stc-contract/version';
 import { SERVICE_IDENTITY, SERVICE_VERSION } from '@terminus-os/txd/identity';
+import { loadFleetTimezone, renderHumanText, stringifyHuman } from '@terminus-os/contracts/fleet-time';
 
 export type CliDependencies = {
   request: TxdRequest;
@@ -13,6 +14,7 @@ export type CliDependencies = {
   clipboard?: () => LocalClipboard;
   observation?: ObservationClient;
   version?: () => Record<string, unknown>;
+  timezone: () => Promise<string>;
 };
 
 /**
@@ -42,7 +44,12 @@ function usage(commands: readonly Command[]): string {
 
 export async function runCli(
   argv: string[],
-  deps: CliDependencies = { request: createClient(), stdout: console.log, stderr: console.error },
+  deps: CliDependencies = {
+    request: createClient(),
+    stdout: console.log,
+    stderr: console.error,
+    timezone: loadFleetTimezone,
+  },
   commands: readonly Command[] = COMMANDS,
 ): Promise<number> {
   if (argv.length === 0 || argv[0] === 'help' || argv[0] === '--help' || argv[0] === '-h') {
@@ -53,7 +60,10 @@ export async function runCli(
     const observation = deps.observation ?? createObservationClient({
       baseUrl: process.env.TXD_URL ?? 'http://127.0.0.1:7781',
     });
+    let timezone: string | undefined;
     try {
+      const loadedTimezone = await deps.timezone();
+      timezone = loadedTimezone;
       let value: unknown;
       if (argv[0] === 'health') value = await observation.health();
       else if (argv[0] === 'inspect') value = await observation.inspect();
@@ -63,10 +73,11 @@ export async function runCli(
         stc_version: runningRuntimeMarker().version,
       })))();
       assertCanonicalOutput(value);
-      deps.stdout(JSON.stringify(value, null, 2));
+      deps.stdout(stringifyHuman(value, loadedTimezone, 2));
       return argv[0] === 'health' && !(value as { ok?: boolean }).ok ? 1 : 0;
     } catch (error) {
-      deps.stderr(`tx: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      deps.stderr(`tx: ${timezone ? renderHumanText(message, timezone) : message}`);
       return 1;
     }
   }
@@ -78,15 +89,19 @@ export async function runCli(
     deps.stderr(usage(commands));
     return 2;
   }
+  let timezone: string | undefined;
   try {
+    const loadedTimezone = await deps.timezone();
+    timezone = loadedTimezone;
     return await command.run({
       args: argv.slice(command.path.length),
       request: deps.request,
-      write: (value) => { assertCanonicalOutput(value); deps.stdout(JSON.stringify(value, null, 2)); },
+      write: (value) => { assertCanonicalOutput(value); deps.stdout(stringifyHuman(value, loadedTimezone, 2)); },
       clipboard: deps.clipboard ?? createLocalClipboard,
     });
   } catch (error) {
-    deps.stderr(`tx: ${error instanceof Error ? error.message : String(error)}`);
+    const message = error instanceof Error ? error.message : String(error);
+    deps.stderr(`tx: ${timezone ? renderHumanText(message, timezone) : message}`);
     return 1;
   }
 }
