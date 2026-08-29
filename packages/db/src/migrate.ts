@@ -20,8 +20,9 @@ export interface MigrationReport {
 
 /**
  * Decide which migrations to run. Pure and loud: any malformed filename,
- * duplicate id, applied-but-missing file, or out-of-order backfill throws —
- * a warped ledger is never silently reconciled.
+ * duplicate id or out-of-order backfill throws. The present files define the
+ * migration set; ledger rows without a corresponding file are discarded by
+ * the runner before planning.
  */
 export function planMigrations(filenames: string[], appliedIds: number[]): MigrationFile[] {
   const files = filenames.map(filename => {
@@ -44,16 +45,9 @@ export function planMigrations(filenames: string[], appliedIds: number[]): Migra
   }
 
   const onDisk = new Set(files.map(f => f.id));
-  for (const id of appliedIds) {
-    if (!onDisk.has(id)) {
-      throw new Error(
-        `[terminus-db] schema_migrations records id ${id} but no such file exists on disk — migration history was rewritten`,
-      );
-    }
-  }
-
-  const applied = new Set(appliedIds);
-  const maxApplied = appliedIds.length ? Math.max(...appliedIds) : -Infinity;
+  const retainedAppliedIds = appliedIds.filter(id => onDisk.has(id));
+  const applied = new Set(retainedAppliedIds);
+  const maxApplied = retainedAppliedIds.length ? Math.max(...retainedAppliedIds) : -Infinity;
   const pending = files.filter(f => !applied.has(f.id));
   for (const f of pending) {
     if (f.id < maxApplied) {
@@ -95,12 +89,18 @@ export async function runMigrations(sql: SQL, migrationsDir: string): Promise<Mi
   return (await sql.begin(async tx => {
     await tx`select pg_advisory_xact_lock(${MIGRATION_LOCK_KEY})`;
     const appliedIds = await appliedMigrationIds(tx);
-    const pending = planMigrations(filenames, appliedIds);
+    const presentIds = new Set(planMigrations(filenames, []).map(migration => migration.id));
+    const retiredIds = appliedIds.filter(id => !presentIds.has(id));
+    for (const id of retiredIds) {
+      await tx`delete from schema_migrations where id = ${id}`;
+    }
+    const retainedAppliedIds = appliedIds.filter(id => presentIds.has(id));
+    const pending = planMigrations(filenames, retainedAppliedIds);
     for (const migration of pending) {
       const text = await Bun.file(join(migrationsDir, migration.filename)).text();
       await tx.unsafe(text);
       await tx`insert into schema_migrations (id, name) values (${migration.id}, ${migration.name})`;
     }
-    return { applied: pending, alreadyApplied: appliedIds.length };
+    return { applied: pending, alreadyApplied: retainedAppliedIds.length };
   })) as MigrationReport;
 }

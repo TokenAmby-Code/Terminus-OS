@@ -24,9 +24,8 @@ ALTER TABLE replay.events
     ADD CONSTRAINT replay_occurred_at_timestamp CHECK (replay.is_timestamptz(occurred_at)),
     ADD CONSTRAINT replay_recorded_at_timestamp CHECK (replay.is_timestamptz(recorded_at));
 
--- busd is the only replay writer and invokes its in-process wake after commit.
--- Startup and explicit reconciliation recover a lost wake. Bun.SQL has no
--- LISTEN support, so retaining a trigger nobody consumes would be false
--- operational signaling.
+-- Replay writers invoke their in-process wake after commit. Startup and
+-- explicit reconciliation recover a lost wake. Bun.SQL has no LISTEN support,
+-- so retaining a trigger nobody consumes would be false operational signaling.
 DROP TRIGGER IF EXISTS replay_event_wakeup ON replay.events;
 DROP FUNCTION IF EXISTS replay.wake();

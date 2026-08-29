@@ -3,9 +3,8 @@
 -- txd-store used to bind `JSON.stringify(x)::jsonb`, handing Bun.SQL an
 -- already-JSON-encoded parameter: the cast stored payload/provenance as jsonb
 -- *strings*, so the ruled psql surface (payload->>'k') returned nothing on
--- those rows. The store now binds objects directly (mirroring the busd #34
--- fix, af8088e9); this migration casts the historical string rows to real
--- objects in place.
+-- those rows. The store now binds objects directly; this migration casts the
+-- historical string rows to real objects in place.
 --
 -- txd.events is STRUCTURALLY append-only (0002 triggers raise on UPDATE), so
 -- the update trigger is disabled for exactly these statements — inside the

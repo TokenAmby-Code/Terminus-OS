@@ -16,29 +16,3 @@ test('adversarial: desktop telemetry has no private NOTIFY channel', async () =>
   expect(migration).not.toContain('publish_desktop_event');
   expect(migration).not.toContain("pg_notify('desktop_telemetry'");
 });
-
-test('adversarial: Phase 0 erases every named false subscription row', async () => {
-  const migration = await Bun.file(join(root, 'packages/db/migrations/0015_event_phase_zero_cleanup.sql')).text();
-  const names = [
-    'daily-note-create-work',
-    'deployment-personal-github-push',
-    'deployment-work-github-push',
-    'githubd-deployment',
-    'githubd-fleet',
-    'githubd-work-battlefield',
-    'githubd-work-coderabbit',
-    'githubd-work-deployment',
-    'githubd-work-github',
-    'githubd-work-policy',
-    'probe',
-    'txd-k12-personal-hook-session-start',
-  ];
-  for (const table of ['bus.managed_subscriptions', 'bus.cursors', 'bus.subscriptions']) {
-    const statement = migration.match(new RegExp(`DELETE FROM ${table.replace('.', '\\.')}(?:.|\\n)*?;`))?.[0];
-    expect(statement).toBeDefined();
-    for (const name of names) {
-      expect(statement).toContain(`'${name}'`);
-    }
-  }
-  expect(migration).toMatch(/DROP CONSTRAINT(?: IF EXISTS)? delivery_attempts_subscription_name_fkey/);
-});

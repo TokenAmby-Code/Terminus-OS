@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS replay.publication_intents (
 CREATE TABLE IF NOT EXISTS replay.delivery_attempts (
     attempt_sequence bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     event_id         uuid        NOT NULL REFERENCES replay.events (event_id),
-    subscription_name text       NOT NULL REFERENCES bus.subscriptions (name),
+    subscription_name text       NOT NULL,
     succeeded        boolean     NOT NULL,
     error            text        NULL,
     attempted_at     timestamptz NOT NULL DEFAULT now(),

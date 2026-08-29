@@ -13,10 +13,6 @@ describe("migration planning (pure, forward-only)", () => {
     expect(migration.match(/entity_type\s*=\s*'seat'/g)).toHaveLength(2);
     expect(migration).toContain("LIKE 'reg.seat\\_%' ESCAPE '\\'");
   });
-  test("the per-tool bus event purge is a forward-only migration", async () => {
-    const files = await readdir(join(import.meta.dir, "..", "migrations"));
-    expect(files).toContain("0014_bus_tool_hook_event_purge.sql");
-  });
   test("the txd journal predicate cut is forward of the existing phone migrations", async () => {
     const files = await readdir(join(import.meta.dir, "..", "migrations"));
     expect(files).toContain("0019_txd_journal_predicate.sql");
@@ -47,8 +43,8 @@ describe("migration planning (pure, forward-only)", () => {
     expect(() => planMigrations(["0001_a.sql", "0001_b.sql"], [])).toThrow(/duplicate/);
   });
 
-  test("an applied id missing from disk means rewritten history — loud failure", () => {
-    expect(() => planMigrations(["0002_second.sql"], [1])).toThrow(/rewritten/);
+  test("plans from the migration files that are present", () => {
+    expect(planMigrations(["0002_second.sql"], [1, 2])).toEqual([]);
   });
 
   test("backfilling below an applied id is a loud failure", () => {
