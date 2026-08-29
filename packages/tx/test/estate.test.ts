@@ -2,12 +2,14 @@ import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { runCli, type CliDependencies } from '../src/cli.ts';
 
+const testTimezone = async () => 'America/Phoenix';
+
 function harness() {
   const calls: unknown[] = [];
   const errors: string[] = [];
   const deps: CliDependencies = {
     request: async (method, path, body) => { calls.push({ method, path, body }); return { ok: true }; },
-    stdout: () => {}, stderr: (line) => errors.push(line),
+    stdout: () => {}, stderr: (line) => errors.push(line), timezone: testTimezone,
   };
   return { calls, errors, deps };
 }
@@ -78,7 +80,7 @@ test('event-log compaction requires an explicit archive attestation and reset he
       'estate', 'compact-events',
       '--reset-journal-head', '8722',
       '--archive-attestation', 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739',
-    ], { request, stdout: (line) => output.push(JSON.parse(line)), stderr: () => {} })).toBe(0);
+    ], { request, stdout: (line) => output.push(JSON.parse(line)), stderr: () => {}, timezone: testTimezone })).toBe(0);
   } finally {
     if (env === undefined) delete process.env.AGENT_ID;
     else process.env.AGENT_ID = env;
@@ -100,7 +102,7 @@ test('event-log compaction refuses locally when archive attestation is absent', 
   let requested = false;
   expect(await runCli(
     ['estate', 'compact-events', '--reset-journal-head', '8722'],
-    { request: async () => { requested = true; }, stdout: () => {}, stderr: () => {} },
+    { request: async () => { requested = true; }, stdout: () => {}, stderr: () => {}, timezone: testTimezone },
   )).toBe(1);
   expect(requested).toBe(false);
 });

@@ -5,6 +5,8 @@ import { CLIPBOARD_BUFFER_NAME, SCHEMA_VERSION } from '@terminus-os/contracts';
 import { runCli, type CliDependencies } from '../src/cli.ts';
 import { createLocalClipboard, runProcess, type LocalClipboard } from '../src/clipboard.ts';
 
+const testTimezone = async () => 'America/Phoenix';
+
 function harness(response: unknown, clipboard: LocalClipboard) {
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -17,6 +19,7 @@ function harness(response: unknown, clipboard: LocalClipboard) {
     clipboard: () => clipboard,
     stdout: (line) => stdout.push(line),
     stderr: (line) => stderr.push(line),
+    timezone: testTimezone,
   };
   return { deps, stdout, stderr, calls };
 }

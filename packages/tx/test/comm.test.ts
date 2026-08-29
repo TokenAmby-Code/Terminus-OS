@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import { runCli, type CliDependencies } from '../src/cli.ts';
 
+const testTimezone = async () => 'America/Phoenix';
+
 test('comm CLI forwards opaque payload and exposes no format or idempotency flags', async () => {
   const old = process.env.AGENT_ID;
   process.env.AGENT_ID = 'source';
@@ -12,7 +14,7 @@ test('comm CLI forwards opaque payload and exposes no format or idempotency flag
         ? { ok: true, message_id: 'message-1', ask_id: null }
         : { ok: true, phase: 'bytes_sent', message_id: 'message-1', source_agent_id: 'source', targets: [], bytes_sent: 1, staged: true, event_ids: [] };
     },
-    stdout: () => {}, stderr: () => {},
+    stdout: () => {}, stderr: () => {}, timezone: testTimezone,
   };
   try {
     expect(await runCli(['comm', 'pax', '---\n{"λ":true}'], deps)).toBe(0);
@@ -37,7 +39,7 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
       if (path === '/agents/comm') return { ok: true, message_id: `message-${++sequence}`, ask_id: null };
       return { ok: true, phase: 'bytes_sent', message_id: `message-${sequence}`, source_agent_id: 'source', targets: [], bytes_sent: 1, staged: true, event_ids: [] };
     },
-    stdout: () => {}, stderr: (line) => errors.push(line),
+    stdout: () => {}, stderr: (line) => errors.push(line), timezone: testTimezone,
   };
   try {
     expect(await runCli(['comm', 'council:custodes', 'command=compact', '--', 'hard'], deps)).toBe(0);
@@ -84,6 +86,7 @@ test('tier 1: an on-time delivery attestation follows the durable admission id',
     },
     stdout: (line) => stdout.push(line),
     stderr: () => {},
+    timezone: testTimezone,
   };
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
@@ -107,6 +110,7 @@ test('tier 2: the bounded wait returns bytes sent after the durable admission id
       : { ok: true, phase: 'bytes_sent', message_id: 'message-2', source_agent_id: 'source', bytes_sent: 5, staged: true, targets: [] },
     stdout: (line) => stdout.push(line),
     stderr: () => {},
+    timezone: testTimezone,
   };
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
@@ -137,6 +141,7 @@ test('the durable admission id is printed before an unbounded transport receipt 
       if (stdout.length === 1) firstOutput(JSON.parse(line));
     },
     stderr: () => {},
+    timezone: testTimezone,
   });
   try {
     expect(await admissionPrinted).toMatchObject({ message_id: 'durable-message' });
@@ -167,6 +172,7 @@ test('behavioral pin: a typed comm transport refusal is printed and exits non-ze
         },
     stdout: (line) => stdout.push(line),
     stderr: () => {},
+    timezone: testTimezone,
   };
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(1);
@@ -192,6 +198,7 @@ test('behavioral pin: comm admission refusal exits non-zero without requesting a
     },
     stdout: (line) => stdout.push(line),
     stderr: () => {},
+    timezone: testTimezone,
   };
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(1);
@@ -211,6 +218,7 @@ test('behavioral pin: an unreachable txd makes comm exit non-zero', async () => 
       request: async () => { throw new Error('Unable to connect'); },
       stdout: () => {},
       stderr: (line) => errors.push(line),
+      timezone: testTimezone,
     })).toBe(1);
     expect(errors).toEqual(['tx: Unable to connect']);
   } finally {

@@ -8,6 +8,7 @@ Type=notify
 NotifyAccess=main
 Environment=TELEMETRYD_BIND=127.0.0.1
 Environment=TELEMETRYD_PORT=7784
+Environment=TOKEN_FLEET_MACHINE_CONFIG_ROOT=%h/runtimes/Token-Fleet/live/machines
 ExecStart=%h/.bun/bin/bun src/daemon.ts
 Restart=on-failure
 RestartSec=2

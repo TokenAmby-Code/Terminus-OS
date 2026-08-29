@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import { runCli, type CliDependencies } from '../src/cli.ts';
 
+const testTimezone = async () => 'America/Phoenix';
+
 function harness() {
   const calls: { method: string; path: string; body: unknown }[] = [];
   const deps: CliDependencies = {
@@ -8,7 +10,7 @@ function harness() {
       calls.push({ method, path, body });
       return { ok: true, closed_count: 1, refused_count: 0, verdicts: [], reason: null };
     },
-    stdout: () => {}, stderr: () => {},
+    stdout: () => {}, stderr: () => {}, timezone: testTimezone,
   };
   return { calls, deps };
 }
