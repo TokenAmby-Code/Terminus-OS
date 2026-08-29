@@ -46,11 +46,11 @@ test('the active table is exact, current-viewport, and release-persistent', () =
   tmux('send-keys', '-t', 'main:0.0', '-X', 'cancel');
 });
 
-test('prefix e is an idempotent manual unzoom action', () => {
+test('prefix e toggles zoom exactly like prefix z', () => {
   const binding = new TextDecoder().decode(tmux('list-keys', '-T', 'prefix', 'e').stdout);
-  expect(binding).toContain('window_zoomed_flag');
   expect(binding).toContain('resize-pane -Z');
-  expect(binding).toContain('==:#{window_zoomed_flag},1');
+  expect(binding).not.toContain('if-shell');
+  expect(binding).not.toContain('window_zoomed_flag');
 });
 
 test('prefix arrows enter the same Enter-to-zoom table as prefix h/j/k/l', () => {
