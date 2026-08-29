@@ -16,12 +16,15 @@ describe('tmux/tx.conf', () => {
     expect(conf).toContain('bind r source-file ~/.local/lib/terminus-os/txd/packages/txd/tmux/tx.conf');
   });
 
-  test('contains idempotent pane focus and native pane navigation', () => {
+  test('contains explicit unzoom and one pane-navigation transaction for letters and arrows', () => {
     const paneUx = conf.slice(conf.indexOf('# Pane navigation and expansion.'), conf.indexOf('bind -r H'));
 
-    expect(paneUx).toContain("bind e if -F '#{==:#{window_zoomed_flag},0}' 'resize-pane -Z'");
+    expect(paneUx).toContain("bind e if -F '#{==:#{window_zoomed_flag},1}' 'resize-pane -Z'");
     expect(paneUx).not.toContain('bind e resize-pane -Z');
-    for (const [key, direction] of [['h', 'L'], ['j', 'D'], ['k', 'U'], ['l', 'R']]) {
+    for (const [key, direction] of [
+      ['h', 'L'], ['j', 'D'], ['k', 'U'], ['l', 'R'],
+      ['Left', 'L'], ['Down', 'D'], ['Up', 'U'], ['Right', 'R'],
+    ]) {
       expect(paneUx).toContain(`bind ${key} {`);
       expect(paneUx).toContain(`select-pane -${direction}`);
       expect(paneUx).toContain(`bind -T pane-select ${key} {`);
@@ -134,6 +137,11 @@ describe('tmux/tx.conf', () => {
       expect(hook).toContain('2>&1');
       expect(hook).toMatch(/\| systemd-cat .* \|\| true"'$/);
     }
+  });
+
+  test('defers Council reflow while zoomed and drains it on the zoom-clear command event', () => {
+    expect(conf).toContain("set-hook -g client-resized 'run-shell -b \"$HOME/.local/lib/terminus-os/txd/packages/txd/tmux/reflow-council client-resized\"'");
+    expect(conf).toContain("set-hook -g after-resize-pane 'run-shell -b \"$HOME/.local/lib/terminus-os/txd/packages/txd/tmux/reflow-council after-resize-pane #{window_zoomed_flag}\"'");
   });
 
   test('leaves daemon-owned lifecycle hooks untouched on config reload', () => {
