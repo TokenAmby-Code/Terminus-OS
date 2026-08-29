@@ -8,7 +8,7 @@
   "dependencies": {
     "@terminus-os/contracts": "workspace:*",
     "@terminus-os/txd": "workspace:*",
-    "@tokenamby-code/stc-contract": "1.3.0"
+    "@tokenamby-code/stc-contract": "1.4.1"
   },
   "scripts": { "test": "bun test", "typecheck": "tsc --noEmit" },
   "devDependencies": { "@types/bun": "^1.3.14", "typescript": "^5.8.0" }
