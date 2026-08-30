@@ -185,6 +185,15 @@ type InternalComm = {
   };
 };
 type ResolvedCommTarget = CommTarget & { logical_identity: CommLogicalIdentity };
+type PendingCommRedelivery = {
+  messageId: string;
+  sourceAgentId: string;
+  deliveryTarget: CommTarget;
+  binding: CurrentBinding & { agent_id: string };
+  frame: string;
+  kind: string;
+  name: unknown;
+};
 const DEFAULT_COMM_RECEIPT_RUNTIME: CommReceiptRuntime = {
   now: () => Date.now(),
   schedule: (wake, delayMs) => {
@@ -265,6 +274,16 @@ function committedTransportBytes(outcome: { bytes: number; verdict: string }): n
   return outcome.verdict === 'seat_unresolved' ? 0 : outcome.bytes;
 }
 
+function receiptDeliveryTargetAgentId(receipt: EventRecord): string {
+  return String(receipt.payload.delivery_target_agent_id ?? receipt.payload.target_agent_id);
+}
+
+function latestCommTransportByTarget(events: EventRecord[], messageId: string): Map<string, EventRecord> {
+  return new Map(events.filter((event) => event.entity_id === messageId
+    && event.event_type === 'act.comm_bytes_sent')
+    .map((event) => [receiptDeliveryTargetAgentId(event), event]));
+}
+
 export class Daemon {
   private mutex: Promise<unknown> = Promise.resolve();
   private maintainedProjection: Projections | null = null;
@@ -279,6 +298,8 @@ export class Daemon {
   private commTransportWaiters = new Map<string, Set<() => void>>();
   private deliveryWaiters = new Map<string, Set<() => void>>();
   private composerObservationsInFlight = new Map<string, Promise<boolean>>();
+  private commRedeliveryRequested = false;
+  private commRedeliveryDrain: Promise<void> | null = null;
   // Live pane-shell runs by seat, so a physical pane replacement can abort
   // exactly the completions whose signal died with the pane's shell.
   private paneRuns = new Map<string, Set<AbortController>>();
@@ -669,8 +690,8 @@ export class Daemon {
    * assertion (including tint) is in hand, so the agent is bound and visible
    * before its engine takes a first turn.
    */
-  recordPhysicalDeclaration(input: PhysicalDeclaration, receipt: string | null = null): Promise<void> {
-    return this.locked(async () => {
+  async recordPhysicalDeclaration(input: PhysicalDeclaration, receipt: string | null = null): Promise<void> {
+    await this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const declaration = PhysicalDeclarationSchema.parse(input);
       try {
@@ -688,6 +709,7 @@ export class Daemon {
         throw error;
       }
     });
+    await this.requestCommRedelivery();
   }
 
   private async auditAndBindDeclaration(
@@ -1625,8 +1647,7 @@ export class Daemon {
             occurred_at: this.now(),
           });
         }
-        const sent = events.filter((event) => event.entity_id === messageId
-          && event.event_type === 'act.comm_bytes_sent');
+        const sent = [...latestCommTransportByTarget(events, messageId).values()];
         return {
           messageId,
           askId: null,
@@ -1637,7 +1658,8 @@ export class Daemon {
           renderedMessageFrame,
           eventIds: [existing.seq, snapshot.seq, ...sent.map((event) => event.seq)],
           replayed: true,
-          replayComplete: sent.length === targets.length,
+          replayComplete: sent.length === targets.length
+            && sent.every((event) => Number(event.payload.bytes ?? 0) > 0),
           replayStaged: sent.length === targets.length
             && sent.every((event) => event.payload.submit_verdict === 'staged'),
         };
@@ -1665,11 +1687,12 @@ export class Daemon {
       if (!prepared.replayComplete) {
         await this.terminalizeInactiveCommTransport(prepared.messageId);
         const events = await this.events();
-        const sent = events.filter((event) => event.entity_id === prepared.messageId
-          && event.event_type === 'act.comm_bytes_sent');
+        const sent = [...latestCommTransportByTarget(events, prepared.messageId).values()];
         prepared.eventIds.push(...sent.map((event) => event.seq)
           .filter((seq) => !prepared.eventIds.includes(seq)));
-        prepared.replayStaged = sent.length === prepared.targets.length
+        prepared.replayComplete = sent.length === prepared.targets.length
+          && sent.every((event) => Number(event.payload.bytes ?? 0) > 0);
+        prepared.replayStaged = prepared.replayComplete
           && sent.every((event) => event.payload.submit_verdict === 'staged');
       }
       return {
@@ -1746,13 +1769,18 @@ export class Daemon {
     // the effect fact this transaction exists to record. Event 37076 proved
     // the old inversion: staging held this.locked for five minutes, edge-proxy
     // reached txd with the hook, and timed out before txd could admit it.
-    const outcomes: Array<{ plan: typeof plans[number]; sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>> }> = [];
+    const outcomes: Array<{
+      plan: typeof plans[number];
+      sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>>;
+      failureReason?: 'transport_process_ended';
+    }> = [];
     for (const plan of plans) {
       // The binding's opaque pane generation is the physical transaction
       // witness. Re-attest immediately before mutation: a replaced/unreadable
       // pane refuses with zero effect instead of letting a stale logical seat
       // address type into whatever now occupies that name.
       let sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>>;
+      let failureReason: 'transport_process_ended' | undefined;
       try {
         const generation = await this.tmux.seatGeneration(plan.target.seat_id);
         sent = generation !== plan.binding.pane_generation
@@ -1770,8 +1798,9 @@ export class Daemon {
         // post-validation transport refusal, not permission to strand the
         // sender without a durable per-target verdict.
         sent = { bytes: 0, verdict: 'transport_failed' as const };
+        failureReason = 'transport_process_ended';
       }
-      outcomes.push({ plan, sent });
+      outcomes.push({ plan, sent, ...(failureReason ? { failureReason } : {}) });
     }
 
     const completionArms: LostEnterArm[] = [];
@@ -1780,7 +1809,7 @@ export class Daemon {
       accepted = await this.locked(async () => {
         const event_ids = [...prepared.eventIds];
         let allStaged = true;
-        for (const { plan, sent } of outcomes) {
+        for (const { plan, sent, failureReason } of outcomes) {
           const receiptDeadline = this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS;
           const event = await this.store.append({ entity_type: 'message', entity_id: prepared.messageId, event_type: 'act.comm_bytes_sent',
             payload: {
@@ -1790,6 +1819,7 @@ export class Daemon {
               kind: req.intent?.kind ?? 'message',
               name: req.intent?.name ?? null, rendered_frame: plan.frame,
               receipt_deadline_at: new Date(receiptDeadline).toISOString(),
+              ...(failureReason ? { failure_reason: failureReason } : {}),
             }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
           event_ids.push(event.seq);
           allStaged &&= sent.verdict === 'staged';
@@ -2246,6 +2276,183 @@ export class Daemon {
   }
 
   /**
+   * The durable comm queue is the event stream itself. An accepted target with
+   * no positive-byte transport fact remains owed; a zero-byte refusal records
+   * the interrupted attempt without terminalizing that obligation. Boot and
+   * binding-live edges call this wake directly, so recovery has no retry clock.
+   */
+  private requestCommRedelivery(): Promise<void> {
+    this.commRedeliveryRequested = true;
+    if (this.commRedeliveryDrain) return this.commRedeliveryDrain;
+    const drain = (async () => {
+      while (this.commRedeliveryRequested) {
+        this.commRedeliveryRequested = false;
+        const attempted = new Set<string>();
+        while (true) {
+          const pending = await this.nextPendingCommRedelivery(attempted);
+          if (!pending) break;
+          attempted.add(`${pending.messageId}:${pending.deliveryTarget.agent_id}`);
+          await this.redeliverComm(pending);
+        }
+      }
+    })().finally(() => {
+      if (this.commRedeliveryDrain === drain) this.commRedeliveryDrain = null;
+    });
+    this.commRedeliveryDrain = drain;
+    return drain;
+  }
+
+  private nextPendingCommRedelivery(
+    attempted: ReadonlySet<string>,
+  ): Promise<PendingCommRedelivery | null> {
+    return this.locked(async () => {
+      const events = await this.events();
+      const projections = await this.projections();
+      for (const accepted of events) {
+        if (accepted.event_type !== 'reg.comm_accepted') continue;
+        const messageId = accepted.entity_id;
+        if (this.commTransportsInFlight.has(messageId)) continue;
+        const snapshot = events.find((event) => event.event_type === 'reg.comm_target_snapshotted'
+          && event.payload.message_id === messageId);
+        const targets = (snapshot?.payload.targets ?? accepted.payload.targets ?? []) as CommTarget[];
+        const latest = latestCommTransportByTarget(events, messageId);
+        for (const deliveryTarget of targets) {
+          if (attempted.has(`${messageId}:${deliveryTarget.agent_id}`)) continue;
+          const assertionId = `${messageId}:${deliveryTarget.agent_id}`;
+          if (events.some((event) => event.entity_id === assertionId
+            && (event.event_type === 'act.comm_delivery_asserted'
+              || event.event_type === 'act.comm_delivery_failed'))) continue;
+          const receipt = latest.get(deliveryTarget.agent_id);
+          if (receipt && Number(receipt.payload.bytes ?? 0) > 0) continue;
+          const identity = deliveryTarget.logical_identity;
+          const binding = routableBindings(projections).find((candidate) => {
+            if (identity?.kind === 'stable_seat') return sameIdentity(candidate.seat_id, identity.seat_id);
+            return candidate.agent_id === (identity?.kind === 'agent_instance'
+              ? identity.agent_id
+              : deliveryTarget.agent_id);
+          });
+          if (!binding?.pane_generation) continue;
+          const source = accepted.payload.source as CommFrameSource;
+          const message = String(accepted.payload.message ?? '');
+          const frame = typeof receipt?.payload.rendered_frame === 'string'
+            ? receipt.payload.rendered_frame
+            : typeof accepted.payload.rendered_frame === 'string'
+              ? accepted.payload.rendered_frame
+              : commFrame(messageId, source, message);
+          this.commTransportsInFlight.add(messageId);
+          return {
+            messageId,
+            sourceAgentId: String(accepted.payload.source_agent_id),
+            deliveryTarget,
+            binding: binding as CurrentBinding & { agent_id: string },
+            frame,
+            kind: String(accepted.payload.kind ?? 'message'),
+            name: accepted.payload.name ?? null,
+          };
+        }
+      }
+      return null;
+    });
+  }
+
+  private async redeliverComm(pending: PendingCommRedelivery): Promise<void> {
+    let sent: Awaited<ReturnType<TmuxControlPlane['sendVerifiedToSeat']>>;
+    let failureReason: string | undefined;
+    try {
+      await this.armCommWatch(
+        pending.messageId,
+        pending.sourceAgentId,
+        pending.binding.agent_id,
+        null,
+      );
+      const generation = await this.tmux.seatGeneration(pending.binding.seat_id);
+      sent = generation !== pending.binding.pane_generation
+        ? { bytes: 0, verdict: 'seat_unresolved' as const }
+        : await this.tmux.sendVerifiedToSeat(
+          pending.binding.seat_id,
+          pending.messageId,
+          pending.frame,
+          undefined,
+          pending.binding.engine ?? undefined,
+          pending.binding.pane_generation!,
+        );
+    } catch {
+      sent = { bytes: 0, verdict: 'transport_failed' as const };
+      failureReason = 'transport_process_ended';
+    }
+    try {
+      await this.locked(async () => {
+        const events = await this.events();
+        const latest = latestCommTransportByTarget(events, pending.messageId)
+          .get(pending.deliveryTarget.agent_id);
+        // Another effect fact can win while pane I/O is outside the journal
+        // mutex. Never append a second successful attempt after that victory.
+        if (latest && Number(latest.payload.bytes ?? 0) > 0) return;
+        const projections = await this.projections();
+        const current = routableBindings(projections).find((binding) =>
+          binding.agent_id === pending.binding.agent_id
+          && binding.seat_id === pending.binding.seat_id
+          && binding.pane_generation === pending.binding.pane_generation);
+        if (!current && sent.verdict === 'staged') {
+          sent = { bytes: 0, verdict: 'seat_unresolved' as const };
+        }
+        const deadline = this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS;
+        await this.store.append({
+          entity_type: 'message',
+          entity_id: pending.messageId,
+          event_type: 'act.comm_bytes_sent',
+          payload: {
+            target_agent_id: pending.binding.agent_id,
+            delivery_target_agent_id: pending.deliveryTarget.agent_id,
+            seat_id: pending.binding.seat_id,
+            bytes: committedTransportBytes(sent),
+            submit_verdict: sent.verdict,
+            target_turn: projections.turnByAgent.get(pending.binding.agent_id) ?? 'unobserved',
+            kind: pending.kind,
+            name: pending.name,
+            rendered_frame: pending.frame,
+            receipt_deadline_at: new Date(deadline).toISOString(),
+            redelivery: true,
+            ...(failureReason ? { failure_reason: failureReason } : {}),
+          },
+          provenance: this.prov('observer', null),
+          occurred_at: this.now(),
+        });
+        if (sent.verdict === 'staged') {
+          const afterReceipt = await this.events();
+          const submitted = afterReceipt.some((event) => event.event_type === 'act.prompt_submitted'
+            && event.payload.agent_id === pending.binding.agent_id
+            && ((Array.isArray(event.payload.message_ids)
+                && event.payload.message_ids.includes(pending.messageId))
+              || (typeof event.payload.content === 'string'
+                && event.payload.content.includes(pending.frame))));
+          const assertionId = `${pending.messageId}:${pending.deliveryTarget.agent_id}`;
+          if (submitted && !afterReceipt.some((event) => event.entity_id === assertionId
+            && event.event_type === 'act.comm_delivery_asserted')) {
+            await this.store.append({
+              entity_type: 'assertion',
+              entity_id: assertionId,
+              event_type: 'act.comm_delivery_asserted',
+              payload: {
+                message_id: pending.messageId,
+                target_agent_id: pending.deliveryTarget.agent_id,
+                receiving_agent_id: pending.binding.agent_id,
+                source_agent_id: pending.sourceAgentId,
+              },
+              provenance: this.prov('observer', null),
+              occurred_at: this.now(),
+            });
+            this.wakeDelivery(pending.messageId);
+          }
+        }
+      });
+    } finally {
+      this.commTransportsInFlight.delete(pending.messageId);
+      this.wakeCommTransport(pending.messageId);
+    }
+  }
+
+  /**
    * A committed admission with missing transport rows is terminal only when
    * no transport operation for it exists in this daemon. That condition is
    * what a restart proves: the former process cannot still complete pane I/O.
@@ -2261,7 +2468,7 @@ export class Daemon {
       const targets = (accepted.payload.targets ?? []) as CommTarget[];
       const receipted = new Set(events.filter((event) => event.entity_id === messageId
         && event.event_type === 'act.comm_bytes_sent')
-        .map((event) => String(event.payload.target_agent_id)));
+        .map(receiptDeliveryTargetAgentId));
       for (const target of targets) {
         if (receipted.has(target.agent_id)) continue;
         const deadline = this.commReceiptRuntime.now() + COMM_DELIVERY_RECEIPT_TIMEOUT_MS;
@@ -2334,8 +2541,11 @@ export class Daemon {
         event.event_type === 'reg.comm_accepted'
         && (event.payload.kind === 'command' || event.payload.kind === 'skill')
         && event.payload.rendered_frame === hook.content
-        && Array.isArray(event.payload.target_agent_ids)
-        && event.payload.target_agent_ids.includes(hook.agent_id));
+        && ((event.payload.target_agent_ids as unknown[]).includes(hook.agent_id)
+          || events.some((receipt) => receipt.entity_id === event.entity_id
+            && receipt.event_type === 'act.comm_bytes_sent'
+            && receipt.payload.target_agent_id === hook.agent_id
+            && receipt.payload.submit_verdict === 'staged')));
       const intentMessage = intentCandidates.length === 1 ? intentCandidates[0] : undefined;
       const messageIds = [...new Set([
         ...framedMessageIds,
@@ -2344,27 +2554,52 @@ export class Daemon {
       ])];
       for (const messageId of messageIds) {
         const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
-        if (!accepted || !(accepted.payload.target_agent_ids as unknown[]).includes(hook.agent_id)) continue;
-        // The snapshot is the delivery target contract — `commDelivery` reads
-        // targets from it, so an assertion it cannot see must never be
-        // written. Redemption requires the receiver in BOTH records.
-        const snapshot = events.find((e) => e.event_type === 'reg.comm_target_snapshotted'
-          && e.payload.message_id === messageId);
-        const snapshotTargets = (snapshot?.payload.targets ?? []) as CommTarget[];
-        if (!snapshotTargets.some((target) => target.agent_id === hook.agent_id)) continue;
-        matched = true;
-        const staged = events.some((event) => event.entity_id === messageId
+        if (!accepted) continue;
+        const stagedReceipts = events.filter((event) => event.entity_id === messageId
           && event.event_type === 'act.comm_bytes_sent'
           && event.payload.target_agent_id === hook.agent_id
           && event.payload.submit_verdict === 'staged');
-        if (!staged) continue;
-        matchedMessageIds.push(messageId);
-        const assertionId = `${messageId}:${hook.agent_id}`;
-        if (!events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) {
-          await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
-            payload: { message_id: messageId, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
-          asserted.push(messageId);
+        // The snapshot is the delivery target contract — `commDelivery` reads
+        // targets from it. A stable-seat redelivery may be received by a new
+        // agent instance, so its receipt carries the original delivery target
+        // whose exactly-once assertion this hook redeems.
+        const snapshot = events.find((e) => e.event_type === 'reg.comm_target_snapshotted'
+          && e.payload.message_id === messageId);
+        const snapshotTargets = (snapshot?.payload.targets ?? []) as CommTarget[];
+        const deliveryTarget = snapshotTargets.find((target) => target.agent_id === hook.agent_id)
+          ?? snapshotTargets.find((target) => stagedReceipts.some((receipt) =>
+            receiptDeliveryTargetAgentId(receipt) === target.agent_id));
+        if (!deliveryTarget) continue;
+        matched = true;
+        if (stagedReceipts.length === 0) continue;
+        const assertionId = `${messageId}:${deliveryTarget.agent_id}`;
+        if (events.some((event) => event.entity_id === assertionId
+          && event.event_type === 'act.comm_delivery_asserted')) {
+          await this.store.append({
+            entity_type: 'assertion',
+            entity_id: assertionId,
+            event_type: 'act.receipt_deduped',
+            payload: {
+              of: 'comm_delivery_asserted',
+              reason: 'already_asserted',
+              message_id: messageId,
+              target_agent_id: deliveryTarget.agent_id,
+              receiving_agent_id: hook.agent_id,
+            },
+            provenance: this.prov('observer', receipt),
+            occurred_at: this.now(),
+          });
+          continue;
         }
+        matchedMessageIds.push(messageId);
+        await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+          payload: {
+            message_id: messageId,
+            target_agent_id: deliveryTarget.agent_id,
+            receiving_agent_id: hook.agent_id,
+            source_agent_id: accepted.payload.source_agent_id,
+          }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
+        asserted.push(messageId);
         this.wakeDelivery(messageId);
         const sourceAgentId = String(accepted.payload.source_agent_id);
         const confirmationStaged = events.some((event) => event.event_type === 'act.agent_input_injected'
@@ -2373,7 +2608,7 @@ export class Daemon {
           && event.payload.target_agent_id === sourceAgentId
           && Array.isArray(event.payload.message_ids)
           && event.payload.message_ids.includes(messageId));
-        const bytesSent = events.find((event) => event.event_type === 'act.comm_bytes_sent'
+        const bytesSent = [...events].reverse().find((event) => event.event_type === 'act.comm_bytes_sent'
           && event.entity_id === messageId
           && event.payload.target_agent_id === hook.agent_id);
         const deadline = Date.parse(String(bytesSent?.payload.receipt_deadline_at ?? ''));
@@ -2495,10 +2730,10 @@ export class Daemon {
       if (accepted.payload.source_agent_id !== req.source_agent_id) throw new Error('comm_source_mismatch');
       const delivery = await this.commDelivery(req.message_id);
       const sentRows = events.filter((event) => event.entity_id === req.message_id && event.event_type === 'act.comm_bytes_sent');
-      const sent = [...new Map(sentRows.map((event) => [String(event.payload.target_agent_id), event])).values()];
+      const sent = [...new Map(sentRows.map((event) => [receiptDeliveryTargetAgentId(event), event])).values()];
       const deadline = Math.max(...sent.map((event) => Date.parse(String(event.payload.receipt_deadline_at ?? ''))));
       const deadlineByTarget = new Map(sent.map((event) => [
-        String(event.payload.target_agent_id),
+        receiptDeliveryTargetAgentId(event),
         Date.parse(String(event.payload.receipt_deadline_at ?? '')),
       ]));
       const timely = delivery.complete && delivery.deliveries.every((row) => {
@@ -2549,7 +2784,7 @@ export class Daemon {
             ? [...verdicts][0] as 'submit_failed' | 'transport_failed' | 'seat_unresolved'
             : 'multiple',
           refusals: unstaged.map((row) => ({
-            target: targets.find((target) => target.agent_id === row.payload.target_agent_id)!,
+            target: targets.find((target) => target.agent_id === receiptDeliveryTargetAgentId(row))!,
             bytes: Number(row.payload.bytes ?? 0),
             submit_verdict: String(row.payload.submit_verdict) as 'submit_failed' | 'transport_failed' | 'seat_unresolved',
             event_id: row.seq,
@@ -2706,8 +2941,8 @@ export class Daemon {
   // Refuses invalid or conflicting handovers before touching tmux. Binding is
   // ATOMIC: identity + persona + tint commit as ONE
   // `reg.bound` event carrying the full tuple — half-bound is unspellable.
-  launch(req: LaunchRequest, transportReceipt: string | null = null): Promise<LaunchResponse> {
-    return this.locked(async () => {
+  async launch(req: LaunchRequest, transportReceipt: string | null = null): Promise<LaunchResponse> {
+    const response = await this.locked(async () => {
       const occurred_at = this.now();
       const prov = this.prov('wrapper', transportReceipt);
 
@@ -2878,6 +3113,8 @@ export class Daemon {
 
       return { ok: true, seat_id: req.seat_id, handover: true, missing_attestations: [], reason: null };
     });
+    if (response.ok) await this.requestCommRedelivery();
+    return response;
   }
 
   // ── constructEstate — boot-time idempotent ensure (estate, rung 2) ──────
@@ -2988,6 +3225,7 @@ export class Daemon {
     });
     await this.announceVacantPerpetualSeats();
     await this.assertOccupancyCensus();
+    await this.requestCommRedelivery();
     return result;
   }
 
@@ -4086,10 +4324,11 @@ export class Daemon {
         || receipt.payload.target_agent_id !== agentId
         || receipt.payload.submit_verdict !== 'staged') continue;
       const messageId = receipt.entity_id;
-      const assertionId = `${messageId}:${agentId}`;
+      const deliveryTargetAgentId = receiptDeliveryTargetAgentId(receipt);
+      const assertionId = `${messageId}:${deliveryTargetAgentId}`;
       if (events.some((event) => event.entity_id === assertionId
         && event.event_type === 'act.comm_delivery_asserted')) continue;
-      const failureId = `comm-delivery-failure:${messageId}:${agentId}`;
+      const failureId = `comm-delivery-failure:${messageId}:${deliveryTargetAgentId}`;
       if (events.some((event) => event.entity_id === failureId
         && event.event_type === 'act.comm_delivery_failed')) continue;
       if (inputs.some((input) => input.entity_id === failureId)) continue;
@@ -4100,7 +4339,8 @@ export class Daemon {
         entity_type: 'assertion', entity_id: failureId, event_type: 'act.comm_delivery_failed',
         payload: {
           message_id: messageId,
-          target_agent_id: agentId,
+          target_agent_id: deliveryTargetAgentId,
+          receiving_agent_id: agentId,
           source_agent_id: accepted.payload.source_agent_id,
           seat_id: receipt.payload.seat_id,
           transport_receipt_seq: receipt.seq,

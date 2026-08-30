@@ -15,6 +15,7 @@ import { FakeTmux } from '../src/tmux.ts';
 
 const SOURCE_AGENT = '11111111-1111-4111-8111-111111111111';
 const TARGET_AGENT = '22222222-2222-4222-8222-222222222222';
+const REBOUND_TARGET_AGENT = '88888888-8888-4888-8888-888888888888';
 const SOURCE_BIRTH = '33333333-3333-4333-8333-333333333333';
 const TARGET_BIRTH = '44444444-4444-4444-8444-444444444444';
 const EFFECT_ID = '55555555-5555-4555-8555-555555555555';
@@ -265,6 +266,84 @@ class RefusingTmux extends FakeTmux {
     return super.sendVerifiedToSeat(...args);
   }
 }
+
+class RestartInterruptedTmux extends FakeTmux {
+  attempts = 0;
+
+  override async sendVerifiedToSeat(...args: Parameters<FakeTmux['sendVerifiedToSeat']>) {
+    if (args[0] === 'council:orchestrator' && this.attempts++ === 0) {
+      throw new Error('transport process ended');
+    }
+    return super.sendVerifiedToSeat(...args);
+  }
+}
+
+test('behavioral pin: a zero-byte restart interruption redelivers once when transport is live again', async () => {
+  const tmux = new RestartInterruptedTmux();
+  const { store, daemon } = await rig(tmux);
+  const accepted = await daemon.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: SOURCE_AGENT,
+    target: 'council:orchestrator',
+    message: 'survive the txd restart',
+    ask: false,
+    reply: false,
+  });
+  expect(accepted).toMatchObject({ staged: false });
+  expect((await store.readAll()).filter((event) => event.entity_id === accepted.message_id
+    && event.event_type === 'act.comm_bytes_sent')).toEqual([
+    expect.objectContaining({ payload: expect.objectContaining({
+      bytes: 0,
+      submit_verdict: 'transport_failed',
+      failure_reason: 'transport_process_ended',
+    }) }),
+  ]);
+
+  await store.append({
+    entity_type: 'seat',
+    entity_id: 'council:orchestrator',
+    event_type: 'reg.seat_cleared',
+    payload: {},
+    provenance,
+    occurred_at: '2026-08-25T00:00:03.000Z',
+  });
+  await bind(
+    store,
+    tmux,
+    'council:orchestrator',
+    REBOUND_TARGET_AGENT,
+    'orchestrator',
+    '99999999-9999-4999-8999-999999999999',
+  );
+
+  const restarted = new Daemon(store, tmux, undefined, undefined, null, null, async () => {});
+  await restarted.constructEstate();
+  expect(tmux.sends('council:orchestrator')).toHaveLength(1);
+
+  await restarted.promptSubmitted({
+    schema_version: SCHEMA_VERSION,
+    agent_id: REBOUND_TARGET_AGENT,
+    comm_tokens: [commTokenForMessageId(accepted.message_id)],
+  });
+  await restarted.promptSubmitted({
+    schema_version: SCHEMA_VERSION,
+    agent_id: REBOUND_TARGET_AGENT,
+    comm_tokens: [commTokenForMessageId(accepted.message_id)],
+  });
+  await restarted.constructEstate();
+
+  const events = await store.readAll();
+  expect(events.filter((event) => event.entity_id === accepted.message_id
+    && event.event_type === 'act.comm_bytes_sent')).toHaveLength(2);
+  expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted'
+    && event.payload.message_id === accepted.message_id
+    && event.payload.target_agent_id === TARGET_AGENT
+    && event.payload.receiving_agent_id === REBOUND_TARGET_AGENT)).toHaveLength(1);
+  expect(events.filter((event) => event.event_type === 'act.receipt_deduped'
+    && event.payload.of === 'comm_delivery_asserted'
+    && event.payload.message_id === accepted.message_id)).toHaveLength(1);
+  expect(tmux.sends('council:orchestrator')).toHaveLength(1);
+});
 
 test('behavioral pin: transport refusal remains ordinary txd comm evidence', async () => {
   const { store, daemon, request } = await rig(new RefusingTmux());
