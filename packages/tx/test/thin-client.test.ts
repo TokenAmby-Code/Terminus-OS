@@ -18,7 +18,7 @@ test('tx is an endpoint client and has no truth-owning dependency', async () => 
 
 test('public commands are declarative endpoint pingers with no parallel state surface', () => {
   expect(COMMANDS.map((command) => command.path.join(' '))).toEqual([
-    'comm', 'inspect hooks', 'comm delivery', 'run', 'close', 'mode', 'clipboard push', 'clipboard pull',
+    'comm', 'journal dispose', 'inspect hooks', 'comm delivery', 'run', 'close', 'mode', 'clipboard push', 'clipboard pull',
     'estate compact-events', 'estate show', 'estate zombies', 'estate reconcile', 'estate abandon', 'estate event', 'estate rotate',
   ]);
 });

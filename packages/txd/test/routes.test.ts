@@ -9,6 +9,7 @@ import { Daemon } from '../src/core.ts';
 import { resolveSshSeatTargets } from '../src/config.ts';
 import { EnvelopeInventoryError } from '../src/envelopes.ts';
 import { ProjectionMismatchError } from '../src/event-log-compaction.ts';
+import { JournalPoisonDispositionError } from '../src/journal/durable-consumer.ts';
 import { buildRoutes, deferredJson, makeServer } from '../src/server.ts';
 import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 
@@ -83,6 +84,35 @@ test('POST /ctl/estate/compact-events refuses a missing archive attestation', as
     expect(res.status).toBe(422);
   } finally {
     srv.stop(true);
+  }
+});
+
+test('POST /ctl/journal/poison/dispose returns typed absent and already-disposed refusals', async () => {
+  for (const [code, status] of [
+    ['journal_poison_absent', 404],
+    ['journal_poison_already_disposed', 409],
+  ] as const) {
+    const disposer = {
+      disposePoison: async () => { throw new JournalPoisonDispositionError(code, 417); },
+    };
+    const srv = makeServer({
+      bind: '127.0.0.1', port: 0, daemon: daemon(), machine: 'test', journalPoisonDisposer: disposer,
+    });
+    try {
+      const res = await fetch(`http://127.0.0.1:${srv.port}/ctl/journal/poison/dispose`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          schema_version: SCHEMA_VERSION,
+          source_agent_id: 'custodes-worker',
+          event_seq: 417,
+          reason: 'invalid v8 backfill conflict',
+        }),
+      });
+      expect(res.status).toBe(status);
+      expect(await res.json()).toEqual({ ok: false, error: code, event_seq: 417 });
+    } finally {
+      srv.stop(true);
+    }
   }
 });
 
