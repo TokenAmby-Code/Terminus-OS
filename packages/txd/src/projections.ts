@@ -192,6 +192,7 @@ export function buildProjections(events: EventRecord[]): Projections {
           agent_id: str(e.payload.agent_id),
           birth_generation: str(e.payload.birth_generation),
           registered: false,
+          ticket_id: null,
           persona: str(e.payload.persona),
           rank: str(e.payload.rank),
           commander: str(e.payload.commander),
@@ -252,6 +253,7 @@ export function buildProjections(events: EventRecord[]): Projections {
         );
         if (binding) {
           binding.registered = true;
+          binding.ticket_id = str(e.payload.ticket_id);
           binding.persona = str(e.payload.persona);
           binding.rank = str(e.payload.rank);
           binding.commander = str(e.payload.commander);
@@ -328,6 +330,7 @@ export function buildProjections(events: EventRecord[]): Projections {
       pane,
       binding: binding ? 'bound' : 'unbound',
       turn: agentId ? turnByAgent.get(agentId) ?? 'unobserved' : 'unobserved',
+      ticket_id: binding?.ticket_id ?? null,
       persona: binding?.persona ?? null,
       rank: binding?.rank ?? null,
       commander: binding?.commander ?? null,

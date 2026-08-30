@@ -15,7 +15,7 @@
       "name": "@terminus-os/contracts",
       "version": "0.0.0",
       "dependencies": {
-        "@tokenamby-code/agent-contract": "1.1.0",
+        "@tokenamby-code/agent-contract": "1.2.0",
         "zod": "^4.4.3",
       },
     },
@@ -67,7 +67,7 @@
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
         "@terminus-os/systemd": "workspace:*",
-        "@tokenamby-code/agent-contract": "1.1.0",
+        "@tokenamby-code/agent-contract": "1.2.0",
         "@tokenamby-code/stc-contract": "1.4.1",
       },
       "devDependencies": {
@@ -104,5 +104,9 @@
     "undici-types": ["undici-types@8.3.0", "", {}, "sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ=="],
 
     "zod": ["zod@4.4.3", "", {}, "sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ=="],
+
+    "@terminus-os/contracts/@tokenamby-code/agent-contract": ["@tokenamby-code/agent-contract@1.2.0", "https://npm.pkg.github.com/download/@tokenamby-code/agent-contract/1.2.0/187c3cb0a8c9adf4921f8059c3df7f763b6df6f1", { "dependencies": { "zod": "^4.4.3" } }, "sha512-HkGfqmYtzT1eKEDVzL3R1fkzPaZs2EX7rI8Mf+A3oG3M+GLOt4r3ZkGcM16mLsLctO1cDY0AesLo1gVewnXMdg=="],
+
+    "@terminus-os/txd/@tokenamby-code/agent-contract": ["@tokenamby-code/agent-contract@1.2.0", "https://npm.pkg.github.com/download/@tokenamby-code/agent-contract/1.2.0/187c3cb0a8c9adf4921f8059c3df7f763b6df6f1", { "dependencies": { "zod": "^4.4.3" } }, "sha512-HkGfqmYtzT1eKEDVzL3R1fkzPaZs2EX7rI8Mf+A3oG3M+GLOt4r3ZkGcM16mLsLctO1cDY0AesLo1gVewnXMdg=="],
   }
 }

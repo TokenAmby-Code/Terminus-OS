@@ -8,6 +8,19 @@ function e(over: Partial<EventInput>): EventInput {
   return { entity_type: 'seat', entity_id: 'x', event_type: 'reg.pane_created', payload: {}, provenance: prov, occurred_at: 't', ...over } as EventInput;
 }
 
+test('a registered Agent birth ticket is projected read-only into estate and inspect rows', async () => {
+  const s = new MemoryEventStore();
+  const ticketId = '33333333-3333-4333-8333-333333333333';
+  await s.append(e({ entity_id: 'palace:W', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
+  await s.append(e({ entity_id: 'palace:W', event_type: 'reg.bound', payload: { agent_id: 'worker-1', birth_generation: 'birth-1' } }));
+  await s.append(e({ entity_type: 'agent', entity_id: 'worker-1', event_type: 'reg.agent_registered', payload: { ticket_id: ticketId } }));
+
+  const projection = buildProjections(await s.readAll());
+  expect(projection.currentBindings[0]?.ticket_id).toBe(ticketId);
+  expect(projection.seatBoard[0]?.ticket_id).toBe(ticketId);
+  await s.close();
+});
+
 test('bare seat create → freelist entry, unbound, live', async () => {
   const s = new MemoryEventStore();
   await s.append(e({ entity_id: 'somnium:NE', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));

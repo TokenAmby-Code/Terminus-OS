@@ -13,6 +13,7 @@ import { MemoryEventStore } from '../src/store.ts';
 import { Daemon } from '../src/core.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { SCHEMA_VERSION, type EventRecord } from '@terminus-os/contracts';
+import { buildProjections } from '../src/projections.ts';
 
 const observationStore: ObservationStore = {
   recordWalk: async () => {},
@@ -74,6 +75,39 @@ test('health and inspect are strict STC 1.4.1 envelopes with txd identity and ri
   expect(inspectBody.holdings.map((holding: { name: string }) => holding.name)).toEqual([
     'bindings', 'contradictions', 'divergence', 'events', 'freelist', 'zombies',
   ]);
+});
+
+test('inspect binding holdings carry the registered Agent birth ticket read-only', async () => {
+  const ticketId = '33333333-3333-4333-8333-333333333333';
+  const projection = buildProjections([
+    {
+      seq: 1, entity_type: 'seat', entity_id: 'palace:W', event_type: 'reg.pane_created',
+      payload: { pane_state: 'live' }, provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-30T00:00:00.000Z', recorded_at: '2026-08-30T00:00:00.000Z',
+    },
+    {
+      seq: 2, entity_type: 'seat', entity_id: 'palace:W', event_type: 'reg.bound',
+      payload: { agent_id: 'worker-1' }, provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-30T00:00:00.000Z', recorded_at: '2026-08-30T00:00:00.000Z',
+    },
+    {
+      seq: 3, entity_type: 'agent', entity_id: 'worker-1', event_type: 'reg.agent_registered',
+      payload: { ticket_id: ticketId }, provenance: { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION },
+      occurred_at: '2026-08-30T00:00:00.000Z', recorded_at: '2026-08-30T00:00:00.000Z',
+    },
+  ]);
+  const holdingSource = createTxdObservationSource({
+    store: {} as never,
+    tmux: {} as never,
+    daemon: { observationProjection: async () => projection } as never,
+    journalSql: {} as SQL,
+    journalConsumer: {} as never,
+    journalListener: {} as never,
+  });
+
+  expect(await holdingSource.bindings(new AbortController().signal)).toMatchObject({
+    records: [{ seat_id: 'palace:W', agent_id: 'worker-1', registered: true, ticket_id: ticketId }],
+  });
 });
 
 test('a foreign or divergent estate is red-but-available and never hides another failing lane', async () => {

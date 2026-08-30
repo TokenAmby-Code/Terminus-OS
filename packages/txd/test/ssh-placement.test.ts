@@ -20,6 +20,7 @@ import { Daemon } from '../src/core.ts';
 import { TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
 import { resolveSshSeatTargets } from '../src/config.ts';
 import { envelopeSessionName } from '../src/envelopes.ts';
+import { AGENT_TICKET_ID } from './agent-fixture.ts';
 
 const DISPATCH_ID = '9f1b1f6a-5d4e-4a0f-9a2b-6c3d4e5f6071';
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
@@ -332,6 +333,7 @@ function registeredAgent(
 ): Agent {
   return {
     schema_version: AGENT_SCHEMA_VERSION,
+    ticket_id: AGENT_TICKET_ID,
     identity: `astartes:black-shields:${AGENT_ID}`,
     incarnation: { agent_id: AGENT_ID, birth_generation: BIRTH_GENERATION },
     registered_at: new Date().toISOString(),

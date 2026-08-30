@@ -190,7 +190,12 @@ export function createTxdObservationSource(options: {
         count: rows.length,
         breakdown: { registered: rows.filter((row) => row.registered).length, pending: rows.filter((row) => !row.registered).length },
         evidence: { debt: 'agent-semantic surface is reported here and is not part of observation identity' },
-        records: rows.map((row) => ({ seat_id: row.seat_id, agent_id: row.agent_id, registered: row.registered })),
+        records: rows.map((row) => ({
+          seat_id: row.seat_id,
+          agent_id: row.agent_id,
+          registered: row.registered,
+          ticket_id: row.ticket_id,
+        })),
       };
     },
     async freelist(signal) {

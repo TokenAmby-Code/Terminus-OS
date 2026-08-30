@@ -13,6 +13,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
+import { AGENT_TICKET_ID } from './agent-fixture.ts';
 
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
 
@@ -52,6 +53,7 @@ function declaration(seat: string, paneGeneration: string, agentId: string, pers
 function registeredAgent(seat: string, paneGeneration: string, decl: PhysicalDeclaration): Agent {
   return {
     schema_version: AGENT_SCHEMA_VERSION,
+    ticket_id: AGENT_TICKET_ID,
     identity: `astartes:${decl.persona}:${decl.agent_id}`,
     incarnation: { agent_id: decl.agent_id, birth_generation: decl.birth_generation },
     registered_at: '2026-08-09T00:00:00.000Z',

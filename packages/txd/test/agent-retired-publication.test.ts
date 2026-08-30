@@ -12,6 +12,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
+import { AGENT_TICKET_ID } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -74,8 +75,9 @@ async function physicalDeclaration(tmux: FakeTmux, seatId: string): Promise<Phys
 async function declareRegistration(d: Daemon, declaration: PhysicalDeclaration): Promise<PhysicalDeclaration> {
   await d.activateRegisteredAgent({
     schema_version: AGENT_SCHEMA_VERSION,
-    agent_id: AGENT_ID,
-    birth_generation: BIRTH_GENERATION,
+    ticket_id: AGENT_TICKET_ID,
+    identity: `astartes:black-shields:${AGENT_ID}`,
+    incarnation: { agent_id: AGENT_ID, birth_generation: BIRTH_GENERATION },
     registered_at: '2026-08-01T12:00:00.000Z',
     engine: 'claude',
     launch: { argv: [], requested_cwd: '/manual/work' },
