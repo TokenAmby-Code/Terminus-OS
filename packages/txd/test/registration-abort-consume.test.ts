@@ -15,6 +15,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
+import { AGENT_TICKET_ID } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -72,6 +73,7 @@ function abortEvent(overrides: Partial<RegistrationAborted> = {}): RegistrationA
 function registeredAgent(decl: PhysicalDeclaration): Agent {
   return {
     schema_version: AGENT_SCHEMA_VERSION,
+    ticket_id: AGENT_TICKET_ID,
     identity: `astartes:black-shields:${decl.agent_id}`,
     incarnation: { agent_id: decl.agent_id, birth_generation: decl.birth_generation },
     registered_at: '2026-08-01T12:00:00.000Z',

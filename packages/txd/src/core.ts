@@ -939,6 +939,7 @@ export class Daemon {
     return this.locked(async () => {
       const agent = AgentSchema.parse(input);
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
+      if (!agent.placement) throw new Error('registered_agent_physical_conflict');
       const projections = await this.projections();
       const binding = projections.currentBindings.find(
         (candidate) => candidate.agent_id === agent.incarnation.agent_id,
@@ -978,6 +979,7 @@ export class Daemon {
         event_type: 'reg.agent_registered',
         payload: {
           birth_generation: agent.incarnation.birth_generation,
+          ticket_id: agent.ticket_id,
           pane_id: agent.placement.pane_id,
           pane_generation: agent.placement.pane_generation,
           persona: agent.persona?.persona ?? null,

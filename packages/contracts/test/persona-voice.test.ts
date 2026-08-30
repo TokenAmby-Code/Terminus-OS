@@ -1,6 +1,6 @@
 // Behavioral pin on the mirrored Agent contract: the persona package carries
 // its voice — a synth voice_identity for speaking personas, null for silent
-// ones — and the contract speaks schema 6.
+// ones — and the contract speaks schema 8.
 import { describe, expect, test } from "bun:test";
 import { AGENT_SCHEMA_VERSION, PersonaPackageSchema } from "@tokenamby-code/agent-contract/agent";
 import { AgentRetiredSchema, RegistrationAbortedSchema } from "@tokenamby-code/agent-contract/events";
@@ -39,11 +39,11 @@ describe("persona voice in the agent package", () => {
 });
 
 describe("agent schema version in the agent package", () => {
-  test("the mirror speaks schema 6", () => {
-    expect(AGENT_SCHEMA_VERSION).toBe(6);
+  test("the mirror speaks schema 8", () => {
+    expect(AGENT_SCHEMA_VERSION).toBe(8);
   });
 
-  test("agent.retired is pinned to schema 6 and schema 5 stays dead", () => {
+  test("agent.retired is pinned to schema 8 and schema 7 stays dead", () => {
     const retired = {
       schema_version: AGENT_SCHEMA_VERSION,
       agent_id: AGENT_ID,
@@ -54,11 +54,11 @@ describe("agent schema version in the agent package", () => {
       cause: "close",
       retired_at: "2026-08-01T12:00:00.000Z",
     };
-    expect(AgentRetiredSchema.parse(retired).schema_version).toBe(6);
-    expect(AgentRetiredSchema.safeParse({ ...retired, schema_version: 5 }).success).toBe(false);
+    expect(AgentRetiredSchema.parse(retired).schema_version).toBe(8);
+    expect(AgentRetiredSchema.safeParse({ ...retired, schema_version: 7 }).success).toBe(false);
   });
 
-  test("registration_aborted is pinned to schema 6 and schema 5 stays dead", () => {
+  test("registration_aborted is pinned to schema 8 and schema 7 stays dead", () => {
     const aborted = {
       schema_version: AGENT_SCHEMA_VERSION,
       agent_id: AGENT_ID,
@@ -69,7 +69,7 @@ describe("agent schema version in the agent package", () => {
       reason: "pane_refused",
       aborted_at: "2026-08-01T12:00:00.000Z",
     };
-    expect(RegistrationAbortedSchema.parse(aborted).schema_version).toBe(6);
-    expect(RegistrationAbortedSchema.safeParse({ ...aborted, schema_version: 5 }).success).toBe(false);
+    expect(RegistrationAbortedSchema.parse(aborted).schema_version).toBe(8);
+    expect(RegistrationAbortedSchema.safeParse({ ...aborted, schema_version: 7 }).success).toBe(false);
   });
 });

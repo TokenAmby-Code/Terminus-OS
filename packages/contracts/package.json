@@ -20,7 +20,7 @@
     "./replay": "./src/replay.ts"
   },
   "dependencies": {
-    "@tokenamby-code/agent-contract": "1.1.0",
+    "@tokenamby-code/agent-contract": "1.2.0",
     "zod": "^4.4.3"
   }
 }

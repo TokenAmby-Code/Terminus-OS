@@ -16,6 +16,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { bindOverseerSource, closeRequest } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
+import { AGENT_TICKET_ID } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -64,12 +65,12 @@ async function bindUnregistered(tmux: FakeTmux, d: Daemon, seatId: string): Prom
 const ofType = (published: Array<{ type: string; payload: Record<string, unknown> }>, type: string) =>
   published.filter((event) => event.type === type);
 
-// The schema-6 ruling: this event was born inside the schema-6 literal window,
-// so it must never publish under literal 5 — literal 5 is spent. The pin goes
+// The schema-8 ruling: this event travels with the current Agent vocabulary,
+// so it must never publish under literal 7 — literal 7 is spent. The pin goes
 // red on any base whose contract still carries the pre-window version, which
 // is exactly the merge ordering the ruling demands.
-test('the contract literal rides schema 6, never 5', () => {
-  expect(AGENT_SCHEMA_VERSION).toBe(6);
+test('the contract literal rides schema 8, never 7', () => {
+  expect(AGENT_SCHEMA_VERSION).toBe(8);
 });
 
 test('a bound-but-unregistered seat\'s pane death publishes agent.unregistered_closed and no agent.retired', async () => {
@@ -121,8 +122,9 @@ test('a registered agent\'s close publishes agent.retired and never the unregist
   const declaration = await bindUnregistered(tmux, d, 'palace:W');
   await d.activateRegisteredAgent({
     schema_version: AGENT_SCHEMA_VERSION,
-    agent_id: AGENT_ID,
-    birth_generation: BIRTH_GENERATION,
+    ticket_id: AGENT_TICKET_ID,
+    identity: `astartes:black-shields:${AGENT_ID}`,
+    incarnation: { agent_id: AGENT_ID, birth_generation: BIRTH_GENERATION },
     registered_at: '2026-08-01T12:00:00.000Z',
     engine: 'claude',
     launch: { argv: [], requested_cwd: '/manual/work' },

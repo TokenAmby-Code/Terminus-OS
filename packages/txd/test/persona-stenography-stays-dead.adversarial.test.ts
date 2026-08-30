@@ -6,6 +6,7 @@ import { expect, test } from 'bun:test';
 import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
 import { type Agent } from '@tokenamby-code/agent-contract/agent';
 import { type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
+import { AGENT_TICKET_ID } from './agent-fixture.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -95,6 +96,7 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
     await d.recordPhysicalDeclaration(seatDeclaration);
     const agent: Agent = {
       schema_version: AGENT_SCHEMA_VERSION,
+      ticket_id: AGENT_TICKET_ID,
       identity: `astartes:black-shields:${agentId}`,
       incarnation: {
         agent_id: agentId,
