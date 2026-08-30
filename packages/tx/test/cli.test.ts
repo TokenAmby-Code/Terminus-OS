@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { runCli, type CliDependencies } from '../src/cli.ts';
+import { createTxdObservationClient } from '../src/observation.ts';
 
 const testTimezone = async () => 'America/Phoenix';
 
@@ -32,6 +33,47 @@ test('health, inspect, and version use the STC observation client', async () => 
     expect(await runCli([operation], { ...h.deps, observation, version })).toBe(0);
   }
   expect(calls).toEqual(['health', 'inspect']);
+});
+
+test('inspect accepts the current STC envelope through an additive funnel mouth', async () => {
+  const probe = {
+    name: 'postgres',
+    rung: 'dependency' as const,
+    state: 'ready' as const,
+    detail: '',
+    observed_at: '2026-08-30T15:30:00.000Z',
+    elapsed_ms: 1,
+    deadline_ms: 300_000,
+    deadline_derived_from: 'fleet stop floor',
+    caveats: ['read-only SELECT'],
+    evidence: { select_1: 1 },
+  };
+  const envelope = {
+    identity: { service: 'txd', daemon: 'txd', cli: 'tx' },
+    version: '0.1.0',
+    stc_version: '1.4.1',
+    machine: 'k12-personal',
+    probes: [probe],
+    holdings: [],
+    observation_ring: {
+      capacity_per_probe: 4,
+      capacity_derived_from: 'bounded retained evidence',
+      probes: [{ name: 'postgres', failure_onset_at: null, readings: [probe] }],
+    },
+    additive_envelope_field: { introduced_after_this_client: true },
+  };
+  const h = harness();
+  const observation = createTxdObservationClient({
+    baseUrl: 'http://127.0.0.1:7781',
+    fetch: async () => new Response(JSON.stringify(envelope), { status: 200 }),
+  });
+  expect(await runCli(['inspect'], { ...h.deps, observation })).toBe(0);
+  expect(h.stderr).toEqual([]);
+  const rendered = JSON.parse(h.stdout[0]!);
+  expect(Object.keys(rendered).sort()).toEqual([
+    'holdings', 'identity', 'machine', 'observation_ring', 'probes', 'stc_version', 'version',
+  ]);
+  expect(rendered.observation_ring.probes[0].name).toBe('postgres');
 });
 
 test('the shared router supports nested subcommands', async () => {
