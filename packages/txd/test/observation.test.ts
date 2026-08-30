@@ -133,6 +133,31 @@ test('a foreign or divergent estate is red-but-available and never hides another
   ]);
 });
 
+test('journal-consumer health counts only poison rows whose disposition is null', async () => {
+  let query = '';
+  const journalSql = ((strings: TemplateStringsArray) => {
+    query = strings.join('?');
+    return Object.assign(Promise.resolve([{
+      cursor: 41,
+      frontier: 41,
+      open_poison: 0,
+      poison_codes: [],
+    }]), { cancel() {} });
+  }) as unknown as SQL;
+  const observationSource = createTxdObservationSource({
+    store: { observePostgres: async () => ({}) } as never,
+    tmux: {} as never,
+    daemon: {} as never,
+    journalSql,
+    journalConsumer: { inspect: () => ({ drainRunning: false }) } as never,
+    journalListener: { health: () => ({ state: 'listening' }) } as never,
+  });
+
+  const result = await observationSource.journalConsumer(new AbortController().signal);
+  expect(result).toMatchObject({ state: 'ready', evidence: { open_poison: 0 } });
+  expect(query).toContain('poison.disposition IS NULL');
+});
+
 test('comm transport refusal is closed by later observed transport and cannot cross a binding edge', async () => {
   const store = new MemoryEventStore();
   const daemon = new Daemon(store, new FakeTmux());

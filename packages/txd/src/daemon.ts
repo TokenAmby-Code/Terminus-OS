@@ -137,7 +137,14 @@ const observation = makeTxdObservationHandler({
   machine: cfg.machine,
   version: SERVICE_VERSION,
 });
-const server = makeServer({ bind: cfg.bind, port: cfg.port, daemon, machine: cfg.machine, observation });
+const server = makeServer({
+  bind: cfg.bind,
+  port: cfg.port,
+  daemon,
+  machine: cfg.machine,
+  observation,
+  journalPoisonDisposer: eventJournal.consumer,
+});
 
 console.log(
   JSON.stringify({

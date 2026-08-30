@@ -119,6 +119,25 @@ function decodedPush(response: ClipboardPushResponse): string {
 export const COMMANDS: readonly Command[] = [
   { path: ['comm'], summary: '<identity> command=<name>|skill=<name> [-- args]; caller supplies no /, $, or engine flag', run: comm },
   {
+    path: ['journal', 'dispose'],
+    summary: 'Dispose one txd journal poison by event sequence with a required reason',
+    run: async ({ args, request, write }) => {
+      const usage = 'usage: tx journal dispose <event-seq> --reason <reason>';
+      if (args.length !== 3 || args[1] !== '--reason' || !/^[1-9][0-9]*$/.test(args[0] ?? '') || !args[2]?.trim()) {
+        throw new Error(usage);
+      }
+      const eventSeq = Number(args[0]);
+      if (!Number.isSafeInteger(eventSeq)) throw new Error(usage);
+      write(await request('POST', '/ctl/journal/poison/dispose', {
+        schema_version: SCHEMA_VERSION,
+        source_agent_id: agentSource('journal dispose'),
+        event_seq: eventSeq,
+        reason: args[2],
+      }));
+      return 0;
+    },
+  },
+  {
     path: ['inspect', 'hooks'],
     summary: 'Read bounded txd-owned tmux hook diagnostics from the system journal',
     run: async ({ args, request, write }) => {

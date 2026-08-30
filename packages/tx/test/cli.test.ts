@@ -91,6 +91,37 @@ test('help is deterministic and lists extension points', async () => {
   expect(h.stdout.join('\n')).toContain('tx inspect hooks');
 });
 
+test('journal dispose sends one exact event sequence, required reason, and actor identity', async () => {
+  const prior = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'custodes-worker';
+  const h = harness({ ok: true, event_seq: 417, disposition: 'actor=custodes-worker; reason=invalid v8 backfill conflict' });
+  try {
+    expect(await runCli([
+      'journal', 'dispose', '417', '--reason', 'invalid v8 backfill conflict',
+    ], h.deps)).toBe(0);
+    expect(h.calls).toEqual([{
+      method: 'POST',
+      path: '/ctl/journal/poison/dispose',
+      body: {
+        schema_version: 13,
+        source_agent_id: 'custodes-worker',
+        event_seq: 417,
+        reason: 'invalid v8 backfill conflict',
+      },
+    }]);
+  } finally {
+    if (prior === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = prior;
+  }
+});
+
+test('journal dispose has no bulk shape and refuses a missing reason before transport', async () => {
+  const h = harness();
+  expect(await runCli(['journal', 'dispose', '417'], h.deps)).toBe(1);
+  expect(await runCli(['journal', 'dispose', '*', '--reason', 'anything'], h.deps)).toBe(1);
+  expect(await runCli(['journal', 'dispose', '417', '418', '--reason', 'anything'], h.deps)).toBe(1);
+  expect(h.calls).toEqual([]);
+});
+
 test('inspect hooks returns bounded typed journal diagnostics', async () => {
   const h = harness({
     ok: true,
