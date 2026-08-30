@@ -66,6 +66,43 @@ test('tier 2 returns bytes sent at the bound, then a late attestation emits a re
   ]);
 });
 
+test('a replayed frame after delivery assertion records one deduped fact and never injects a late confirmation', async () => {
+  // Production shape from 2026-08-29: the first prompt submission asserted
+  // delivery (txd.events 98884-98889). The target engine later replayed the
+  // identical frame after the tier-1 bound (99159), with no new comm event.
+  // That external replay is a receipt to reconcile, not a second delivery.
+  const { daemon, store, tmux, advance } = await rig();
+  const accepted = await daemon.comm({
+    schema_version: SCHEMA_VERSION,
+    source_agent_id: 'sender',
+    target: 'target',
+    message: 'orientation frame',
+    ask: false,
+    reply: false,
+  });
+  const frame = {
+    schema_version: SCHEMA_VERSION,
+    agent_id: 'target',
+    comm_tokens: [commTokenForMessageId(accepted.message_id)],
+    content: 'identical already-delivered orientation frame',
+  };
+
+  expect(await daemon.promptSubmitted(frame)).toMatchObject({ asserted: [accepted.message_id] });
+  advance(30_000);
+  expect(await daemon.promptSubmitted(frame)).toMatchObject({ asserted: [] });
+
+  const events = await store.readAll();
+  expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted'
+    && event.payload.message_id === accepted.message_id)).toHaveLength(1);
+  expect(events.filter((event) => event.event_type === 'act.receipt_deduped'
+    && event.payload.of === 'comm_delivery_asserted'
+    && event.payload.message_id === accepted.message_id)).toHaveLength(1);
+  expect(events.filter((event) => event.payload.input_class === 'delivery_confirmation'
+    && Array.isArray(event.payload.message_ids)
+    && event.payload.message_ids.includes(accepted.message_id))).toHaveLength(0);
+  expect(tmux.sends('council:custodes')).toEqual([]);
+});
+
 test('a throwing admission observer cannot abort the already-committed transport', async () => {
   const { daemon, tmux } = await rig();
   const accepted = await daemon.comm({

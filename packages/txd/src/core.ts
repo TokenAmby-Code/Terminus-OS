@@ -2358,13 +2358,28 @@ export class Daemon {
           && event.payload.target_agent_id === hook.agent_id
           && event.payload.submit_verdict === 'staged');
         if (!staged) continue;
-        matchedMessageIds.push(messageId);
         const assertionId = `${messageId}:${hook.agent_id}`;
-        if (!events.some((e) => e.entity_id === assertionId && e.event_type === 'act.comm_delivery_asserted')) {
-          await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
-            payload: { message_id: messageId, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
-          asserted.push(messageId);
+        if (events.some((event) => event.entity_id === assertionId
+          && event.event_type === 'act.comm_delivery_asserted')) {
+          await this.store.append({
+            entity_type: 'assertion',
+            entity_id: assertionId,
+            event_type: 'act.receipt_deduped',
+            payload: {
+              of: 'comm_delivery_asserted',
+              reason: 'already_asserted',
+              message_id: messageId,
+              target_agent_id: hook.agent_id,
+            },
+            provenance: this.prov('observer', receipt),
+            occurred_at: this.now(),
+          });
+          continue;
         }
+        matchedMessageIds.push(messageId);
+        await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+          payload: { message_id: messageId, target_agent_id: hook.agent_id, source_agent_id: accepted.payload.source_agent_id }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
+        asserted.push(messageId);
         this.wakeDelivery(messageId);
         const sourceAgentId = String(accepted.payload.source_agent_id);
         const confirmationStaged = events.some((event) => event.event_type === 'act.agent_input_injected'

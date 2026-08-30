@@ -116,7 +116,7 @@ test('re-delivery of the same flush adds nothing — the assertion is idempotent
   expect(await asserted()).toEqual([first, second]);
 });
 
-test('a busy sender leaves no parked confirmation and hook replay retries the verified injection', async () => {
+test('a busy sender leaves no parked confirmation and hook replay dedupes without another injection', async () => {
   const store = new MemoryEventStore();
   const fakeTmux = new FakeTmux();
   const tmux: TmuxControlPlane = fakeTmux;
@@ -170,11 +170,12 @@ test('a busy sender leaves no parked confirmation and hook replay retries the ve
   expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
   expect(events.filter((event) => event.event_type === 'act.agent_input_injected'
     && event.payload.input_class === 'delivery_confirmation').map((event) => event.payload.submit_verdict))
-    .toEqual(['transport_failed', 'staged']);
-  expect(confirmationAttempts).toBe(2);
-  expect(fakeTmux.sends('council:custodes')).toEqual([
-    `[tx comm delivery confirmed ${messageId} target worker]`,
-  ]);
+    .toEqual(['transport_failed']);
+  expect(events.filter((event) => event.event_type === 'act.receipt_deduped'
+    && event.payload.of === 'comm_delivery_asserted'
+    && event.payload.message_id === messageId)).toHaveLength(1);
+  expect(confirmationAttempts).toBe(1);
+  expect(fakeTmux.sends('council:custodes')).toEqual([]);
 });
 
 test("a frame addressed to someone else is skipped in silence, and does not cost the flush its real delivery", async () => {
