@@ -105,10 +105,24 @@ test('journal dispose sends one exact event sequence, required reason, and actor
       body: {
         schema_version: 13,
         source_agent_id: 'custodes-worker',
-        event_seq: 417,
+        event_seq: '417',
         reason: 'invalid v8 backfill conflict',
       },
     }]);
+  } finally {
+    if (prior === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = prior;
+  }
+});
+
+test('journal dispose preserves the full PostgreSQL bigint event sequence over JSON', async () => {
+  const prior = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'custodes-worker';
+  const h = harness({ ok: false, error: 'journal_poison_absent', event_seq: '9223372036854775807' });
+  try {
+    expect(await runCli([
+      'journal', 'dispose', '9223372036854775807', '--reason', 'nonexistent-control',
+    ], h.deps)).toBe(0);
+    expect(h.calls[0]?.body).toMatchObject({ event_seq: '9223372036854775807' });
   } finally {
     if (prior === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = prior;
   }

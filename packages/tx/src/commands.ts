@@ -126,8 +126,8 @@ export const COMMANDS: readonly Command[] = [
       if (args.length !== 3 || args[1] !== '--reason' || !/^[1-9][0-9]*$/.test(args[0] ?? '') || !args[2]?.trim()) {
         throw new Error(usage);
       }
-      const eventSeq = Number(args[0]);
-      if (!Number.isSafeInteger(eventSeq)) throw new Error(usage);
+      const eventSeq = args[0]!;
+      if (BigInt(eventSeq) > 9_223_372_036_854_775_807n) throw new Error(usage);
       write(await request('POST', '/ctl/journal/poison/dispose', {
         schema_version: SCHEMA_VERSION,
         source_agent_id: agentSource('journal dispose'),

@@ -93,7 +93,7 @@ test('POST /ctl/journal/poison/dispose returns typed absent and already-disposed
     ['journal_poison_already_disposed', 409],
   ] as const) {
     const disposer = {
-      disposePoison: async () => { throw new JournalPoisonDispositionError(code, 417); },
+      disposePoison: async () => { throw new JournalPoisonDispositionError(code, '417'); },
     };
     const srv = makeServer({
       bind: '127.0.0.1', port: 0, daemon: daemon(), machine: 'test', journalPoisonDisposer: disposer,
@@ -104,12 +104,12 @@ test('POST /ctl/journal/poison/dispose returns typed absent and already-disposed
         body: JSON.stringify({
           schema_version: SCHEMA_VERSION,
           source_agent_id: 'custodes-worker',
-          event_seq: 417,
+          event_seq: '417',
           reason: 'invalid v8 backfill conflict',
         }),
       });
       expect(res.status).toBe(status);
-      expect(await res.json()).toEqual({ ok: false, error: code, event_seq: 417 });
+      expect(await res.json()).toEqual({ ok: false, error: code, event_seq: '417' });
     } finally {
       srv.stop(true);
     }
