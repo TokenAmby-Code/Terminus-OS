@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { MemoryEventStore } from '../src/store.ts';
 import { buildProjections } from '../src/projections.ts';
-import type { EventInput } from '@terminus-os/contracts';
+import type { EventInput, EventRecord } from '@terminus-os/contracts';
 
 const prov = { source: 'wrapper' as const, transport_receipt: null, emitter_version: 1 };
 function e(over: Partial<EventInput>): EventInput {
@@ -19,6 +19,30 @@ test('a registered Agent birth ticket is projected read-only into estate and ins
   expect(projection.currentBindings[0]?.ticket_id).toBe(ticketId);
   expect(projection.seatBoard[0]?.ticket_id).toBe(ticketId);
   await s.close();
+});
+
+test('a txd checkpoint replays an immutable pre-v8 physical declaration without rewriting it', () => {
+  const declaration = {
+    schema_version: 6,
+    agent_id: '2ea2d049-0106-4957-8649-31f93bdc8c9a',
+    birth_generation: '1cc2112c-9c38-45a1-839f-831c33a1096a',
+    pane_id: 'palace:W',
+    pane_generation: '786b72b2-58d5-4294-8f95-928289984d6f',
+    configuration: { generation: 'estate-1', digest: 'c'.repeat(64) },
+    engine: 'codex', wrapper_pid: 4101, persona: 'black-shields', rank: 'astartes', tint: '#111111',
+  };
+  const checkpoint = {
+    seq: 1, entity_type: 'estate', entity_id: 'maintained-projection', event_type: 'estate.compaction_checkpoint',
+    payload: {
+      current_bindings: [], seat_board: [], open_contradictions: [], turn_by_agent: [], ever_bound_agents: [],
+      physical_declarations: [declaration], placement_attested_agents: [], abandoned_seats: [],
+      launch_compositions: [], transport_claims: [],
+    },
+    provenance: prov, occurred_at: 't', recorded_at: 't',
+  };
+
+  expect(buildProjections([checkpoint as EventRecord]).physicalDeclarations.get(declaration.agent_id) as unknown)
+    .toEqual(declaration);
 });
 
 test('bare seat create → freelist entry, unbound, live', async () => {

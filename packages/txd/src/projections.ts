@@ -14,7 +14,7 @@
 //   reg.contradiction_flagged     open unless a later event exists on the same entity_id
 
 import { PANE_STATES } from '@terminus-os/contracts';
-import { WorktreeBindingSchema } from '@tokenamby-code/agent-contract/agent';
+import { AGENT_SCHEMA_VERSION, WorktreeBindingSchema } from '@tokenamby-code/agent-contract/agent';
 import { PhysicalDeclarationSchema } from '@tokenamby-code/agent-contract/events';
 import type {
   SeatBoardRow,
@@ -101,6 +101,25 @@ function positiveInt(v: unknown): number | null {
   return typeof v === 'number' && Number.isInteger(v) && v > 0 ? v : null;
 }
 
+function checkpointPhysicalDeclaration(raw: unknown): PhysicalDeclaration {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('invalid_estate_compaction_checkpoint');
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.schema_version !== 'number' || !Number.isInteger(record.schema_version)) {
+    throw new Error('invalid_estate_compaction_checkpoint');
+  }
+  // A checkpoint is txd-authored replay state. Validate every declaration
+  // field against the installed contract shape while preserving the literal
+  // that the immutable source fact carried when txd folded it.
+  const validated = PhysicalDeclarationSchema.safeParse({
+    ...record,
+    schema_version: AGENT_SCHEMA_VERSION,
+  });
+  if (!validated.success) throw new Error('invalid_estate_compaction_checkpoint');
+  return raw as PhysicalDeclaration;
+}
+
 // Only accept a declared PaneState; an unexpected/typo'd payload string must not
 // slip through as a bogus state and corrupt the freelist/board reads.
 function paneState(v: unknown): PaneState {
@@ -157,7 +176,7 @@ export function buildProjections(events: EventRecord[]): Projections {
         for (const [agent, turn] of payload.turn_by_agent as Array<[string, TurnState]>) turnByAgent.set(agent, turn);
         for (const agent of payload.ever_bound_agents as string[]) everBoundAgents.add(agent);
         for (const raw of payload.physical_declarations as unknown[]) {
-          const declaration = PhysicalDeclarationSchema.parse(raw);
+          const declaration = checkpointPhysicalDeclaration(raw);
           if (!declaration.agent_id) throw new Error('invalid_estate_compaction_checkpoint');
           physicalDeclarations.set(declaration.agent_id, declaration);
         }
