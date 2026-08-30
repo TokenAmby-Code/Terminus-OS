@@ -55,7 +55,7 @@ export type JournalPoisonDispositionErrorCode =
   | "journal_poison_already_disposed";
 
 export class JournalPoisonDispositionError extends Error {
-  constructor(readonly code: JournalPoisonDispositionErrorCode, readonly event_seq: number) {
+  constructor(readonly code: JournalPoisonDispositionErrorCode, readonly event_seq: string) {
     super(code);
     this.name = "JournalPoisonDispositionError";
   }
@@ -160,7 +160,7 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
       if (updated.length !== 1) throw new Error("journal_poison_disposition_write_failed");
       return {
         ok: true,
-        event_seq: Number(updated[0]!.event_seq),
+        event_seq: String(updated[0]!.event_seq),
         disposition: updated[0]!.disposition,
         disposed_at: updated[0]!.disposed_at,
       };

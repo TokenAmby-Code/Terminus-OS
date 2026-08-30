@@ -151,13 +151,13 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
               'invalid_registered_agent', '{}'::jsonb)`;
 
     const result = await store.disposePoison({
-      event_seq: eventSeq,
+      event_seq: String(eventSeq),
       source_agent_id: 'custodes-worker',
       reason: 'invalid v8 backfill conflict',
     });
     expect(result).toMatchObject({
       ok: true,
-      event_seq: eventSeq,
+      event_seq: String(eventSeq),
       disposition: 'actor=custodes-worker; reason=invalid v8 backfill conflict',
     });
     expect(Date.parse(result.disposed_at)).not.toBeNaN();
@@ -173,10 +173,10 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
   test('disposing an absent poison event sequence is a typed refusal', async () => {
     const store = new PostgresJournalConsumerStore(raw, 'txd');
     await expect(store.disposePoison({
-      event_seq: 990_002,
+      event_seq: '990002',
       source_agent_id: 'custodes-worker',
       reason: 'invalid v8 backfill conflict',
-    })).rejects.toEqual(new JournalPoisonDispositionError('journal_poison_absent', 990_002));
+    })).rejects.toEqual(new JournalPoisonDispositionError('journal_poison_absent', '990002'));
   });
 
   test('disposing a poison event sequence twice is a typed refusal and preserves the first disposition', async () => {
@@ -189,10 +189,10 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
       VALUES ('txd-events', ${eventSeq}, gen_random_uuid(), 'agent.registered', 1,
               'invalid_registered_agent', '{}'::jsonb, 'actor=prior; reason=prior ruling', now())`;
     await expect(store.disposePoison({
-      event_seq: eventSeq,
+      event_seq: String(eventSeq),
       source_agent_id: 'custodes-worker',
       reason: 'overwrite attempt',
-    })).rejects.toEqual(new JournalPoisonDispositionError('journal_poison_already_disposed', eventSeq));
+    })).rejects.toEqual(new JournalPoisonDispositionError('journal_poison_already_disposed', String(eventSeq)));
     const rows = (await raw`
       SELECT disposition FROM txd.journal_poison WHERE event_seq = ${eventSeq}`) as Array<{ disposition: string }>;
     expect(rows).toEqual([{ disposition: 'actor=prior; reason=prior ruling' }]);
