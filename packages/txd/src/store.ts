@@ -208,42 +208,50 @@ export class PostgresEventStore implements EventStore {
         WHERE event_type = 'estate.compaction_checkpoint'
         ORDER BY seq DESC LIMIT 1
       ), base_bindings AS (
-        SELECT checkpoint.seq, binding->>'seat_id' AS seat_id,
-               binding->>'agent_id' AS agent_id, false AS cleared
+        SELECT checkpoint.seq AS projection_seq, binding->>'seat_id' AS seat_id,
+               binding->>'agent_id' AS agent_id, false AS cleared,
+               coalesce((binding->>'bound_seq')::bigint, checkpoint.seq) AS bound_seq
         FROM checkpoint,
              jsonb_array_elements(checkpoint.payload->'current_bindings') binding
       ), binding_events AS (
-        SELECT seq, entity_id AS seat_id, payload->>'agent_id' AS agent_id, false AS cleared
+        SELECT seq AS projection_seq, entity_id AS seat_id, payload->>'agent_id' AS agent_id,
+               false AS cleared, seq AS bound_seq
         FROM txd.events
         WHERE event_type = 'reg.bound'
           AND seq > coalesce((SELECT seq FROM checkpoint), 0)
         UNION ALL
-        SELECT seq, entity_id AS seat_id, NULL::text AS agent_id, true AS cleared
+        SELECT seq AS projection_seq, entity_id AS seat_id, NULL::text AS agent_id,
+               true AS cleared, NULL::bigint AS bound_seq
         FROM txd.events
         WHERE event_type IN ('reg.seat_cleared', 'reg.seat_abandoned')
           AND seq > coalesce((SELECT seq FROM checkpoint), 0)
         UNION ALL SELECT * FROM base_bindings
       ), current_bindings AS (
-        SELECT DISTINCT ON (seat_id) seat_id, agent_id, cleared
-        FROM binding_events ORDER BY seat_id, seq DESC
+        SELECT DISTINCT ON (seat_id) seat_id, agent_id, cleared, bound_seq
+        FROM binding_events ORDER BY seat_id, projection_seq DESC
       ), transport AS (
-        SELECT payload->>'target_agent_id' AS agent_id,
-               max(seq) FILTER (
-                 WHERE event_type = 'act.comm_bytes_sent'
-                   AND payload->>'submit_verdict' = 'transport_failed'
-                   AND coalesce((payload->>'bytes')::int, 0) = 0
+        SELECT current_bindings.agent_id,
+               max(events.seq) FILTER (
+                 WHERE events.event_type = 'act.comm_bytes_sent'
+                   AND events.payload->>'submit_verdict' = 'transport_failed'
+                   AND coalesce((events.payload->>'bytes')::int, 0) = 0
                ) AS failure_seq,
-               max(seq) FILTER (WHERE event_type = 'act.comm_delivery_asserted') AS recovery_seq
-        FROM txd.events
-        WHERE event_type IN ('act.comm_bytes_sent', 'act.comm_delivery_asserted')
-          AND payload ? 'target_agent_id'
-        GROUP BY payload->>'target_agent_id'
+               max(events.seq) FILTER (
+                 WHERE events.event_type = 'act.comm_delivery_asserted'
+                    OR (events.event_type = 'act.comm_bytes_sent'
+                      AND coalesce((events.payload->>'bytes')::int, 0) > 0)
+               ) AS recovery_seq
+        FROM current_bindings
+        JOIN txd.events AS events
+          ON events.payload->>'target_agent_id' = current_bindings.agent_id
+         AND events.seq > current_bindings.bound_seq
+         AND events.event_type IN ('act.comm_bytes_sent', 'act.comm_delivery_asserted')
+        WHERE NOT current_bindings.cleared
+        GROUP BY current_bindings.agent_id
       )
       SELECT transport.agent_id
       FROM transport
-      JOIN current_bindings ON current_bindings.agent_id = transport.agent_id
-      WHERE NOT current_bindings.cleared
-        AND transport.failure_seq IS NOT NULL
+      WHERE transport.failure_seq IS NOT NULL
         AND transport.failure_seq > coalesce(transport.recovery_seq, 0)
       ORDER BY transport.agent_id
     ` as Cancellable<Array<{ agent_id: string }>>, signal);
@@ -373,15 +381,19 @@ export class MemoryEventStore implements EventStore {
 
   async unresolvedCommTransportTargets(signal: AbortSignal): Promise<string[]> {
     if (signal.aborted) throw signal.reason ?? new Error('observation_aborted');
-    const currentAgentIds = new Set(buildProjections(this.events).currentBindings
-      .map((binding) => binding.agent_id).filter((agent): agent is string => agent !== null));
+    const currentBindings = new Map(buildProjections(this.events).currentBindings
+      .filter((binding): binding is typeof binding & { agent_id: string } => binding.agent_id !== null)
+      .map((binding) => [binding.agent_id, binding]));
     const unresolved = new Map<string, number>();
     for (const event of this.events) {
       const target = typeof event.payload.target_agent_id === 'string' ? event.payload.target_agent_id : null;
-      if (!target || !currentAgentIds.has(target)) continue;
+      const binding = target ? currentBindings.get(target) : null;
+      if (!target || !binding || event.seq <= binding.bound_seq) continue;
       if (event.event_type === 'act.comm_bytes_sent'
         && event.payload.submit_verdict === 'transport_failed' && event.payload.bytes === 0) unresolved.set(target, event.seq);
-      if (event.event_type === 'act.comm_delivery_asserted') unresolved.delete(target);
+      if (event.event_type === 'act.comm_delivery_asserted'
+        || (event.event_type === 'act.comm_bytes_sent'
+          && typeof event.payload.bytes === 'number' && event.payload.bytes > 0)) unresolved.delete(target);
     }
     return [...unresolved.keys()].sort();
   }

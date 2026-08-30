@@ -201,6 +201,37 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     expect(rows[0]).toEqual({ pay: 'object', prov: 'object', state: 'live', src: 'wrapper' });
   });
 
+  test('comm transport projection recovers from positive bytes and fences prior binding history', async () => {
+    const signal = new AbortController().signal;
+    const agentId = 'transport-projection-agent';
+    const seatId = 'council:transport-projection';
+    await store.append(ev({
+      entity_type: 'seat', entity_id: seatId, event_type: 'reg.bound', payload: { agent_id: agentId },
+    }));
+    await store.append(ev({
+      entity_type: 'message', entity_id: 'transport-refusal', event_type: 'act.comm_bytes_sent',
+      payload: { target_agent_id: agentId, seat_id: seatId, bytes: 0, submit_verdict: 'transport_failed' },
+    }));
+    expect(await store.unresolvedCommTransportTargets(signal)).toContain(agentId);
+
+    await store.append(ev({
+      entity_type: 'message', entity_id: 'transport-recovery', event_type: 'act.comm_bytes_sent',
+      payload: { target_agent_id: agentId, seat_id: seatId, bytes: 42, submit_verdict: 'staged' },
+    }));
+    expect(await store.unresolvedCommTransportTargets(signal)).not.toContain(agentId);
+
+    await store.append(ev({
+      entity_type: 'message', entity_id: 'transport-refusal-again', event_type: 'act.comm_bytes_sent',
+      payload: { target_agent_id: agentId, seat_id: seatId, bytes: 0, submit_verdict: 'transport_failed' },
+    }));
+    expect(await store.unresolvedCommTransportTargets(signal)).toContain(agentId);
+    await store.append(ev({ entity_type: 'seat', entity_id: seatId, event_type: 'reg.seat_cleared', payload: {} }));
+    await store.append(ev({
+      entity_type: 'seat', entity_id: seatId, event_type: 'reg.bound', payload: { agent_id: agentId },
+    }));
+    expect(await store.unresolvedCommTransportTargets(signal)).not.toContain(agentId);
+  });
+
   test('archive-attested compaction records its audit before deleting and preserves replay exactly', async () => {
     await raw`create schema journal`;
     await raw`create table journal.events (seq bigint primary key, recorded_at timestamptz not null)`;

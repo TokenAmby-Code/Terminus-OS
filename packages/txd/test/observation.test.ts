@@ -133,7 +133,7 @@ test('a foreign or divergent estate is red-but-available and never hides another
   ]);
 });
 
-test('comm transport reads the dedicated current-binding projection and recovery closes it', async () => {
+test('comm transport refusal is closed by later observed transport and cannot cross a binding edge', async () => {
   const store = new MemoryEventStore();
   const daemon = new Daemon(store, new FakeTmux());
   await daemon.launch({
@@ -152,9 +152,25 @@ test('comm transport reads the dedicated current-binding projection and recovery
   const signal = new AbortController().signal;
   expect(await store.unresolvedCommTransportTargets(signal)).toEqual(['pax-current']);
   await store.append({
-    entity_type: 'assertion', entity_id: 'delivery-asserted', event_type: 'act.comm_delivery_asserted',
-    payload: { message_id: 'recovery-message', source_agent_id: 'sender', target_agent_id: 'pax-current' },
+    entity_type: 'message', entity_id: 'recovery-message', event_type: 'act.comm_bytes_sent',
+    payload: { target_agent_id: 'pax-current', seat_id: 'council:pax', bytes: 42, submit_verdict: 'staged' },
     provenance, occurred_at: new Date().toISOString(),
+  });
+  expect(await store.unresolvedCommTransportTargets(signal)).toEqual([]);
+
+  await store.append({
+    entity_type: 'message', entity_id: 'failed-again', event_type: 'act.comm_bytes_sent',
+    payload: { target_agent_id: 'pax-current', seat_id: 'council:pax', bytes: 0, submit_verdict: 'transport_failed' },
+    provenance, occurred_at: new Date().toISOString(),
+  });
+  expect(await store.unresolvedCommTransportTargets(signal)).toEqual(['pax-current']);
+  await store.append({
+    entity_type: 'seat', entity_id: 'council:pax', event_type: 'reg.seat_cleared',
+    payload: { agent_id: 'pax-current' }, provenance, occurred_at: new Date().toISOString(),
+  });
+  await store.append({
+    entity_type: 'seat', entity_id: 'council:pax', event_type: 'reg.bound',
+    payload: { agent_id: 'pax-current' }, provenance, occurred_at: new Date().toISOString(),
   });
   expect(await store.unresolvedCommTransportTargets(signal)).toEqual([]);
 });
