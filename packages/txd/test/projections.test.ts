@@ -44,7 +44,6 @@ test('a txd checkpoint replays an immutable pre-v8 physical declaration without 
   expect(buildProjections([checkpoint as EventRecord]).physicalDeclarations.get(declaration.agent_id) as unknown)
     .toEqual(declaration);
 });
-
 test('bare seat create → freelist entry, unbound, live', async () => {
   const s = new MemoryEventStore();
   await s.append(e({ entity_id: 'somnium:NE', event_type: 'reg.pane_created', payload: { pane_state: 'live' } }));
