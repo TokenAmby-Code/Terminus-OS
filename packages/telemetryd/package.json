@@ -15,9 +15,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@tokenamby-code/stc-contract": "1.4.1",
+    "@tokenamby-code/stc-contract": "1.5.1",
     "@terminus-os/contracts": "workspace:*",
-    "@terminus-os/db": "workspace:*",
-    "@terminus-os/systemd": "workspace:*"
+    "@terminus-os/db": "workspace:*"
   }
 }

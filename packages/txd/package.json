@@ -13,9 +13,8 @@
   "dependencies": {
     "@terminus-os/contracts": "workspace:*",
     "@terminus-os/db": "workspace:*",
-    "@terminus-os/systemd": "workspace:*",
     "@tokenamby-code/agent-contract": "1.2.0",
-    "@tokenamby-code/stc-contract": "1.4.1"
+    "@tokenamby-code/stc-contract": "1.5.1"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
