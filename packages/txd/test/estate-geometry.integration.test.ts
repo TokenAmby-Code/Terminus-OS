@@ -629,7 +629,7 @@ describe('disposable canonical estate geometry', () => {
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
-    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '160', '-y', '48');
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '191', '-y', '48');
 
     await tmux(socket, 'kill-pane', '-t', await paneId(socket, 'council:pax'));
     expect(await control.resetSeat('council:pax')).toBe(true);
@@ -640,7 +640,7 @@ describe('disposable canonical estate geometry', () => {
     const panes = rows.split('\n').map((row) => row.split('\t'));
     expect(panes.map(([seat]) => seat).sort()).toEqual([...TXD_WINDOWS.council].sort());
     for (const [, width] of panes) {
-      expectRatio(Number(width), 160, 0.45, 0.55);
+      expectRatio(Number(width), 191, 0.45, 0.55);
     }
     const bySeat = new Map(panes.map(([seat, , height]) => [seat!, Number(height)]));
     expectRatio(bySeat.get('council:custodes')!, 48, 0.60, 0.70);

@@ -1824,6 +1824,7 @@ export class RealTmux implements TmuxControlPlane {
         seatId,
       );
       await this.tag(created, seatId);
+      if (page === 'council') await this.applyCouncilGeometry(target);
       const verified = await this.command('verify_repair_seat_tag', seatId, ['display-message', '-p', '-t', created, `#{${CANON_OPT}}`]);
       return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
     } catch (error) {
