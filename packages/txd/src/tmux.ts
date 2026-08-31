@@ -113,12 +113,9 @@ export type WrapperPlacementAttestation =
 // handed this frame to a pane and pressed Enter; it cannot prove the engine
 // consumed it, and it observes nothing else at send time — a capture raced
 // against a busy engine's repaint proves nothing (specimen e5757301).
-// Delivery is a fact of the receiving engine, folded by txd into
-// `act.comm_delivery_asserted` from engine attestation only: the engine's
-// UserPromptSubmit hook, or — for a frame staged into a WORKING engine — the
-// engine's turn stop joined with a composer-at-rest observation proving the
-// exact frame no longer sits in the composer (`observeFrameAbsence`). No
-// verdict here may spell the word delivered.
+// A staged verdict is txd's transport-delivery witness and produces
+// `act.comm_delivery_asserted`. Engine pickup is separately folded into
+// `act.comm_observed` from UserPromptSubmit or the WORKING-engine stop join.
 export type SendOutcome = { verdict: 'staged'; bytes: number };
 
 /**
@@ -256,7 +253,7 @@ export interface TmuxControlPlane {
   /**
    * Observe, at a caller-held at-rest event (the target's stop), whether the
    * exact frame still sits in the visible composer. Evidence for the turn-stop
-   * delivery join; `unobservable` is absence of evidence, never absence.
+   * observation join; `unobservable` is absence of evidence, never absence.
    */
   observeFrameAbsence(seatId: string, expectedFrame: string): Promise<FrameRestObservation>;
   /**
@@ -264,8 +261,7 @@ export interface TmuxControlPlane {
    * 29fb6cc0): in ONE serialized pane transaction, observe the at-rest
    * composer, and only when it holds the EXACT staged frame drive one Enter
    * for the same transaction. Every other observation refuses with zero
-   * effect. This proves transport completion only — delivery stays a fact of
-   * the receiving engine's own attestation.
+   * effect. An already asserted transport never reaches this recovery path.
    */
   completeStagedSubmit(seatId: string, expectedFrame: string, expectedPaneGeneration?: string): Promise<StagedSubmitCompletion>;
   /**

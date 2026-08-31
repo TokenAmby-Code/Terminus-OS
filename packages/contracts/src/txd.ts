@@ -244,6 +244,7 @@ export const ACT_EVENT_NAMES = [
   'comm_bytes_sent',
   'agent_input_injected',
   'comm_delivery_asserted',
+  'comm_observed',
   'comm_delivery_confirmation_dead_lettered',
   'comm_delivery_failed',
   'comm_submit_driven',
@@ -297,6 +298,7 @@ export const EVENT_TYPES = [
   'act.comm_bytes_sent',
   'act.agent_input_injected',
   'act.comm_delivery_asserted',
+  'act.comm_observed',
   'act.comm_delivery_confirmation_dead_lettered',
   'act.comm_delivery_failed',
   'act.comm_submit_driven',
@@ -819,9 +821,9 @@ export const LifecycleCommEffectResponseSchema = z.object({
 });
 export type LifecycleCommEffectResponse = z.infer<typeof LifecycleCommEffectResponseSchema>;
 // `staged` = this message's bytes were handed to the target pane and Enter was
-// pressed. Delivery is asserted later and separately by
-// `act.comm_delivery_asserted`, correlated to `message_id` — which is why the
-// message id is the caller's correlation handle, not a bare receipt number.
+// pressed. That successful injection writes `act.comm_delivery_asserted` in
+// the same daemon transaction. Later engine pickup is the independent,
+// optional `act.comm_observed` fact.
 export const CommAcceptedSchema = z.object({
   ok: z.literal(true), message_id: z.string(), ask_id: z.string().nullable(),
   source_agent_id: z.string(), targets: z.array(CommTargetSchema), staged: z.boolean(), event_ids: z.array(z.number().int()),
@@ -829,7 +831,7 @@ export const CommAcceptedSchema = z.object({
 export type CommAccepted = z.infer<typeof CommAcceptedSchema>;
 
 // One prompt submission can carry many comm frames. Each named message still
-// needs its own staged transport fact before this hook may assert delivery.
+// needs its own staged transport fact before this hook may record observation.
 export const CommHookSchema = z.object({
   schema_version: z.number().int(), agent_id: z.string().min(1),
   comm_tokens: z.array(z.string().regex(/^[A-Za-z0-9_-]{22}$/)).default([]),
@@ -842,14 +844,14 @@ export type CommHook = z.infer<typeof CommHookSchema>;
 // `act.comm_delivery_asserted` and nothing else; `failed` derives from
 // `act.comm_delivery_failed` and nothing else. Neither is inferred from the
 // other, and a row carrying neither is silence rather than a verdict: a target
-// whose turn has not ended has not refused the message, and observed latency to
-// the assertion ranges from 64ms to nearly ten hours. The CLI's bounded receipt
-// wait below does not alter this durable truth.
+// whose injection has not completed has not refused the message. Engine pickup
+// is intentionally absent from this read model; consumers that need engagement
+// truth read `act.comm_observed`.
 //
 // The refusal exists because silence alone left a sender unable to tell a
-// dropped comm from a pending one. A staged comm whose target binding ends can
-// never be delivered, and that moment is the fact — not a deadline, and not the
-// absence of an assertion.
+// dropped comm from a pending injection. A non-asserted transport whose target
+// binding ends can never be delivered, and that moment is the fact — not a
+// deadline and not the absence of an observation.
 export const CommDeliverySchema = z.object({
   target: CommTargetSchema, delivered: z.boolean(),
   asserted_at: z.string().nullable(), assertion_event_id: z.number().int().nullable(),

@@ -117,7 +117,7 @@ test('a target that started working again by the deadline gets no Enter even wit
   expect(await drivenEvents()).toHaveLength(0);
 });
 
-test('the completion fires at most once per receipt: a second wake for the same message drives no second Enter', async () => {
+test('an asserted receipt wake never drives Enter, including replayed wakes', async () => {
   const { daemon, tmux, advance, schedules, fire, drivenEvents } = await rig();
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'target',
@@ -126,11 +126,10 @@ test('the completion fires at most once per receipt: a second wake for the same 
   tmux.setPaneText('palace:W', paintedFrame(accepted.message_id, 'once only'));
   advance(30_000);
   await fire(0);
-  expect(tmux.entersDriven('palace:W')).toBe(1);
-  // Even if the runtime replays the wake, the recorded completion refuses a second drive.
+  expect(tmux.entersDriven('palace:W')).toBe(0);
   for (let index = 0; index < schedules.length; index += 1) await fire(index);
-  expect(tmux.entersDriven('palace:W')).toBe(1);
-  expect(await drivenEvents()).toHaveLength(1);
+  expect(tmux.entersDriven('palace:W')).toBe(0);
+  expect(await drivenEvents()).toHaveLength(0);
 });
 
 test('a replaced pane generation at the deadline refuses with zero effect', async () => {

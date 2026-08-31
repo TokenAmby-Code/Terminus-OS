@@ -88,7 +88,7 @@ for (const specimen of [
       comm_tokens: [commTokenForMessageId(accepted.message_id)],
     });
 
-    expect(hook.asserted).toEqual([]);
+    expect(hook.observed).toEqual([]);
     expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
     expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toEqual([]);
   });

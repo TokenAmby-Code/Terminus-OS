@@ -744,7 +744,7 @@ test('UserPromptSubmit enters txd directly and asserts the correlated comm deliv
       body: JSON.stringify({ agent_id: 'target', prompt: commFrame(accepted.message_id, { persona: 'p', seat_id: 'council:custodes' }, 'receipt me') }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, asserted: [accepted.message_id] });
+    expect(await res.json()).toMatchObject({ ok: true, observed: [accepted.message_id] });
     expect((await d.commDelivery(accepted.message_id)).complete).toBeTrue();
   } finally {
     srv.stop(true);

@@ -48,7 +48,7 @@ describe("txd lifecycle vocabulary", () => {
   });
 
   test("the qualified event-type union includes communication and estate lifecycle facts", () => {
-    expect(EVENT_TYPES).toHaveLength(46);
+    expect(EVENT_TYPES).toHaveLength(47);
     expect(EVENT_TYPES).toContain('act.comm_submit_driven');
     expect(EVENT_TYPES).toContain('act.agent_input_injected');
     expect(EVENT_TYPES).toContain('reg.comm_accepted');
@@ -56,6 +56,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(EVENT_TYPES).toContain('reg.placement_attested');
     expect(EVENT_TYPES).toContain('act.comm_callback_asserted');
     expect(EVENT_TYPES).toContain('act.comm_delivery_failed');
+    expect(EVENT_TYPES).toContain('act.comm_observed');
     expect(EVENT_TYPES).toContain('act.comm_delivery_confirmation_dead_lettered');
     expect(EVENT_TYPES).toContain('act.comm_watch_unarmed');
     expect(EVENT_TYPES).toContain('reg.composer_observation_prepared');
@@ -66,7 +67,7 @@ describe("txd lifecycle vocabulary", () => {
     expect(EVENT_TYPES).toContain('reg.journal_publication_dropped');
     expect(EVENT_TYPES).toContain('estate.compaction_checkpoint');
     expect(REG_EVENT_NAMES).toHaveLength(22);
-    expect(ACT_EVENT_NAMES).toHaveLength(15);
+    expect(ACT_EVENT_NAMES).toHaveLength(16);
     expect(ESTATE_EVENT_NAMES).toEqual([
       'rotation_refused', 'rotation_requested', 'rotation_completed',
       'scoped_reset_refused', 'scoped_reset_requested', 'scoped_reset_completed', 'scoped_reset_failed',

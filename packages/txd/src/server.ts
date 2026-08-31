@@ -408,7 +408,7 @@ export function buildRoutes(
         try { return json(await daemon.promptSubmitted(parsed.data, receipt(req))); }
         catch (error) {
           if (error instanceof Error && error.message === 'message_target_mismatch') {
-            return json({ ok: true, asserted: [], dead_lettered: [], consumed: false });
+            return json({ ok: true, observed: [], dead_lettered: [], consumed: false });
           }
           throw error;
         }

@@ -64,14 +64,14 @@ async function stagedFrame(store: MemoryEventStore, messageId: string): Promise<
   return String(receipt!.payload.rendered_frame);
 }
 
-test('a staged frame the engine submitted behind an operator draft asserts delivery', async () => {
+test('a staged frame behind an operator draft is delivered at injection and later observed', async () => {
   const { store, daemon } = await rig();
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION, source_agent_id: 'worker', target: 'custodes',
     message: 'GITHUBD DEAD-HEAD FOLD DEADLOCK — REPAIRED, LANDED, CONVERGED.', ask: false, reply: false,
   });
   expect(accepted.staged).toBe(true);
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 
   // The engine's own UserPromptSubmit, shaped exactly as event 56995 was: the
   // draft runs straight into the frame, so the frame parser names nothing.
@@ -79,14 +79,14 @@ test('a staged frame the engine submitted behind an operator draft asserts deliv
     schema_version: SCHEMA_VERSION, agent_id: 'custodes', comm_tokens: [],
     content: `${OPERATOR_DRAFT}${await stagedFrame(store, accepted.message_id)}`,
   });
-  expect(submitted.asserted).toEqual([accepted.message_id]);
+  expect(submitted.observed).toEqual([accepted.message_id]);
 
   const delivery = await daemon.commDelivery(accepted.message_id);
   expect(delivery.complete).toBe(true);
   expect(delivery.deliveries[0]).toMatchObject({ delivered: true, failed: false });
 });
 
-test('a staged frame quoted by an agent it was never staged to asserts nothing', async () => {
+test('a staged frame quoted by another agent adds no false observation', async () => {
   const { store, daemon } = await rig();
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION, source_agent_id: 'worker', target: 'custodes',
@@ -98,32 +98,8 @@ test('a staged frame quoted by an agent it was never staged to asserts nothing',
     schema_version: SCHEMA_VERSION, agent_id: 'bystander', comm_tokens: [],
     content: `look at this: ${await stagedFrame(store, accepted.message_id)}`,
   })).rejects.toThrow('message_target_mismatch');
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-});
-
-test('a comm staged to a target that is then closed resolves to a loud refusal', async () => {
-  const { store, daemon } = await rig();
-  const accepted = await daemon.comm({
-    schema_version: SCHEMA_VERSION, source_agent_id: 'custodes', target: 'worker',
-    message: 'report your leg', ask: false, reply: false,
-  });
-  expect((await daemon.commDelivery(accepted.message_id)).resolved).toBe(false);
-
-  const closed = await daemon.close({ schema_version: SCHEMA_VERSION, source_agent_id: 'custodes', targets: ['worker'] });
-  expect(closed).toMatchObject({ ok: true });
-
-  const failure = (await store.readAll()).find((event) => event.event_type === 'act.comm_delivery_failed');
-  expect(failure?.payload).toMatchObject({
-    message_id: accepted.message_id,
-    target_agent_id: 'worker',
-    source_agent_id: 'custodes',
-    reason: 'delivery_target_closed',
-  });
-
-  const delivery = await daemon.commDelivery(accepted.message_id);
-  expect(delivery.resolved).toBe(true);
-  expect(delivery.complete).toBe(false);
-  expect(delivery.deliveries[0]).toMatchObject({ delivered: false, failed: true, failure_reason: 'delivery_target_closed' });
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toEqual([]);
 });
 
 test('a delivered comm is never refused by the target closing afterwards', async () => {
@@ -138,19 +114,4 @@ test('a delivered comm is never refused by the target closing afterwards', async
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_failed')).toEqual([]);
   const delivery = await daemon.commDelivery(accepted.message_id);
   expect(delivery).toMatchObject({ complete: true, resolved: true });
-});
-
-test('the sender waiting on a receipt is told the refusal, not bytes sent', async () => {
-  const { daemon } = await rig();
-  const accepted = await daemon.comm({
-    schema_version: SCHEMA_VERSION, source_agent_id: 'custodes', target: 'worker',
-    message: 'racing the close', ask: false, reply: false,
-  });
-  const pending = daemon.waitCommReceipt({
-    schema_version: SCHEMA_VERSION, message_id: accepted.message_id, source_agent_id: 'custodes',
-  });
-  await daemon.close({ schema_version: SCHEMA_VERSION, source_agent_id: 'custodes', targets: ['worker'] });
-  expect(await pending).toMatchObject({
-    ok: false, phase: 'delivery_failed', message_id: accepted.message_id,
-  });
 });
