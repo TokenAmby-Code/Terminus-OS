@@ -340,7 +340,7 @@ test('behavioral pin: a zero-byte restart interruption redelivers once when tran
     && event.payload.target_agent_id === TARGET_AGENT
     && event.payload.receiving_agent_id === REBOUND_TARGET_AGENT)).toHaveLength(1);
   expect(events.filter((event) => event.event_type === 'act.receipt_deduped'
-    && event.payload.of === 'comm_delivery_asserted'
+    && event.payload.of === 'comm_observed'
     && event.payload.message_id === accepted.message_id)).toHaveLength(1);
   expect(tmux.sends('council:orchestrator')).toHaveLength(1);
 });

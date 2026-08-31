@@ -1,7 +1,7 @@
-// Adversarial lane: the turn-stop join asserts delivery ONLY with the full
+// Adversarial lane: the turn-stop join records observation ONLY with the full
 // evidence chain — staged transport, target working at send, a fresh stop,
 // and the exact frame observed ABSENT from a visible composer at that stop.
-// Any partial chain stays undelivered forever, and the exterminated send-time
+// Any partial chain stays unobserved, and the exterminated send-time
 // departure observation (raced the busy engine's repaint; specimen e5757301)
 // stays dead: no runtime surface spells it again.
 
@@ -80,8 +80,8 @@ async function send(daemon: Daemon, message: string) {
   });
 }
 
-async function assertions(store: MemoryEventStore) {
-  return (await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted');
+async function observations(store: MemoryEventStore) {
+  return (await store.readAll()).filter((event) => event.event_type === 'act.comm_observed');
 }
 
 test('adversarial: no target stop, no assertion — however clear the composer', async () => {
@@ -91,8 +91,8 @@ test('adversarial: no target stop, no assertion — however clear the composer',
 
   const accepted = await send(daemon, 'clear composer, unfinished turn');
 
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect(await assertions(store)).toEqual([]);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect(await observations(store)).toEqual([]);
 });
 
 test('adversarial: a frame still painted in the composer at the stop never asserts', async () => {
@@ -105,8 +105,8 @@ test('adversarial: a frame still painted in the composer at the stop never asser
   tmux.setPaneText('palace:W', `transcript\n\n › ${String(receipt.payload.rendered_frame).split('\n').join('\n   ')}\n\nchrome\n`);
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect(await assertions(store)).toEqual([]);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect(await observations(store)).toEqual([]);
 });
 
 test('adversarial: an unobservable pane at the stop proves nothing and never asserts', async () => {
@@ -117,8 +117,8 @@ test('adversarial: an unobservable pane at the stop proves nothing and never ass
   // No pane text configured: the fake demands evidence, exactly as the real capture does.
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect(await assertions(store)).toEqual([]);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect(await observations(store)).toEqual([]);
 });
 
 test('adversarial: a frame staged into an engine not observed working never rides the stop join', async () => {
@@ -130,8 +130,8 @@ test('adversarial: a frame staged into an engine not observed working never ride
   const accepted = await send(daemon, 'no turn evidence at send');
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect(await assertions(store)).toEqual([]);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect(await observations(store)).toEqual([]);
 });
 
 test('adversarial: a non-staged transport never asserts on stop', async () => {
@@ -144,7 +144,7 @@ test('adversarial: a non-staged transport never asserts on stop', async () => {
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect(await assertions(store)).toEqual([]);
+  expect(await observations(store)).toEqual([]);
 });
 
 test('adversarial: another agent\'s stop never asserts the target\'s pending frame', async () => {
@@ -157,8 +157,8 @@ test('adversarial: another agent\'s stop never asserts the target\'s pending fra
   const accepted = await send(daemon, 'pending on target, bystander stops');
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'bystander' });
 
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect(await assertions(store)).toEqual([]);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect(await observations(store)).toEqual([]);
 });
 
 test('adversarial: a deduped repeat stop never re-runs the join for later receipts', async () => {
@@ -174,6 +174,6 @@ test('adversarial: a deduped repeat stop never re-runs the join for later receip
   const repeat = await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   expect(repeat).toMatchObject({ ok: true, deduped: true });
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect(await assertions(store)).toEqual([]);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect(await observations(store)).toEqual([]);
 });

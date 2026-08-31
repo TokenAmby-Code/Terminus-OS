@@ -93,12 +93,12 @@ each route is the ruled daemon behavior, unchanged.
   noncanonical, projected unbound, absent from tmux, and carry an open
   `pane_absent` contradiction naming `seat_abandoned`. Canonical seats
   remain reconstruction work and a live or merely unobserved target refuses.
-- After `/agents/comm` stages the bytes, `tx comm` waits on
-  `act.comm_delivery_asserted` for at most 30 seconds. An on-time receiving
-  engine hook returns the delivery-confirmed receipt directly. At the bound,
-  the CLI returns the bytes-sent receipt; a later hook stages the confirmation
-  through the sender's ordinary agent input path and persists that follow-up's
-  own `act.agent_input_injected` receipt. The wait has no delivery-state poll.
+- After `/agents/comm` successfully injects the frame, txd writes
+  `act.comm_delivery_asserted` immediately from the staged transport receipt.
+  The receipt rendezvous therefore completes without target-engine interaction.
+  A later engine pickup writes the optional `act.comm_observed` engagement fact;
+  when it arrives after the receipt bound, txd may stage a sender-facing notice
+  through the ordinary agent input path. The wait has no delivery-state poll.
 - `POST /agents/comm/lifecycle-effect` is the narrow actuator for a lifecycle-
   owned comm effect. The caller supplies its stable effect id and exact source
   and target generation witnesses; txd validates them, admits that id through
@@ -147,19 +147,19 @@ each route is the ruled daemon behavior, unchanged.
   never split, spill, encode, or select a transport. A failed transport or
   submit records its possible-effect byte count but remains permanently
   undelivered.
-- Delivery requires the exact target's `staged` transport fact joined with an
-  engine attestation. An idle engine attests through its exact
-  `UserPromptSubmit` message id. A WORKING engine queues a mid-turn frame into
-  the running turn and fires no `UserPromptSubmit` for it; there the target's
-  own fresh turn stop is the attestation, joined with one composer-at-rest
-  capture taken at that stop proving the exact frame no longer sits in the
-  visible composer — it left it into the queue the finished turn consumed.
+- Delivery is transport truth: the exact target's `staged` transport fact
+  writes `act.comm_delivery_asserted` once per message and target. Engine
+  engagement is separate. An idle engine writes `act.comm_observed` through
+  its exact `UserPromptSubmit` message id. A WORKING engine queues a mid-turn
+  frame into the running turn and fires no `UserPromptSubmit` for it; there the
+  target's own fresh turn stop writes the observation, joined with one
+  composer-at-rest capture taken at that stop proving the exact frame no longer
+  sits in the visible composer — it left it into the queue the finished turn consumed.
   The capture happens at the stop because the engine is at rest there; a
   send-time capture races the busy engine's repaint and proves nothing. A
   still-painted frame, an invisible composer, a stop alone, or a frame staged
-  without observed working turn state never asserts; a later fresh stop
-  retries with fresh evidence. Bytes, process success, and an `ok: true`
-  envelope are never delivery assertions.
+  without observed working turn state never records observation; a later fresh
+  stop retries with fresh evidence.
 - `/agents/mode` accepts only logical identity plus `enter_plan`,
   `toggle_plan`, or `approve_plan`. It resolves the bound engine from event
   truth, records `act.mode_transition_requested` before input, then records an

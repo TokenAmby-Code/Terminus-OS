@@ -47,15 +47,12 @@ test('tier 1 resolves directly from the attestation event and emits no follow-up
   expect((await store.readAll()).filter((event) => event.payload.input_class === 'delivery_confirmation')).toHaveLength(0);
 });
 
-test('tier 2 returns bytes sent at the bound, then a late attestation emits a receipted follow-up', async () => {
-  const { daemon, store, tmux, advance, waitScheduled, scheduledMs, expire } = await rig();
+test('transport receipt resolves immediately while a late observation can still notify the sender', async () => {
+  const { daemon, store, tmux, advance } = await rig();
   const accepted = await daemon.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'target', message: 'late', ask: false, reply: false });
   const pending = daemon.waitCommReceipt({ schema_version: SCHEMA_VERSION, message_id: accepted.message_id, source_agent_id: 'sender' });
-  await waitScheduled();
-  expect(scheduledMs()).toBe(30_000);
+  expect(await pending).toMatchObject({ phase: 'delivery_confirmed', message_id: accepted.message_id });
   advance(30_000);
-  expire();
-  expect(await pending).toMatchObject({ phase: 'bytes_sent', message_id: accepted.message_id, staged: true });
 
   await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'target', comm_tokens: [commTokenForMessageId(accepted.message_id)] });
   expect(tmux.sends('council:custodes')).toEqual([
@@ -87,15 +84,15 @@ test('a replayed frame after delivery assertion records one deduped fact and nev
     content: 'identical already-delivered orientation frame',
   };
 
-  expect(await daemon.promptSubmitted(frame)).toMatchObject({ asserted: [accepted.message_id] });
+  expect(await daemon.promptSubmitted(frame)).toMatchObject({ observed: [accepted.message_id] });
   advance(30_000);
-  expect(await daemon.promptSubmitted(frame)).toMatchObject({ asserted: [] });
+  expect(await daemon.promptSubmitted(frame)).toMatchObject({ observed: [] });
 
   const events = await store.readAll();
   expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted'
     && event.payload.message_id === accepted.message_id)).toHaveLength(1);
   expect(events.filter((event) => event.event_type === 'act.receipt_deduped'
-    && event.payload.of === 'comm_delivery_asserted'
+    && event.payload.of === 'comm_observed'
     && event.payload.message_id === accepted.message_id)).toHaveLength(1);
   expect(events.filter((event) => event.payload.input_class === 'delivery_confirmation'
     && Array.isArray(event.payload.message_ids)

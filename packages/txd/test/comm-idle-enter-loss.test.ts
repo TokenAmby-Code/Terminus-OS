@@ -64,7 +64,7 @@ async function rig() {
   };
 }
 
-test('behavioral pin: a staged idle-target frame still intact at the receipt deadline is completed by one driven Enter and a typed event', async () => {
+test('behavioral pin: an asserted staged frame is never resubmitted at the old receipt deadline', async () => {
   const { daemon, store, tmux, advance, schedules, fire } = await rig();
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'target',
@@ -76,7 +76,7 @@ test('behavioral pin: a staged idle-target frame still intact at the receipt dea
   const receipt = (await store.readAll()).find((event) =>
     event.event_type === 'act.comm_bytes_sent' && event.entity_id === accepted.message_id);
   expect(receipt?.payload).toMatchObject({ submit_verdict: 'staged', target_turn: 'awaiting_input' });
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 
   // One wake armed at the persisted tier-1 ceiling — never a novel interval.
   expect(schedules.map((row) => row.delayMs)).toEqual([30_000]);
@@ -86,19 +86,9 @@ test('behavioral pin: a staged idle-target frame still intact at the receipt dea
   advance(30_000);
   await fire(0);
 
-  expect(tmux.entersDriven('palace:W')).toBe(1);
+  expect(tmux.entersDriven('palace:W')).toBe(0);
   const driven = (await store.readAll()).filter((event) => event.event_type === 'act.comm_submit_driven');
-  expect(driven).toHaveLength(1);
-  expect(driven[0]?.payload).toMatchObject({
-    message_id: accepted.message_id,
-    target_agent_id: 'target',
-    seat_id: 'palace:W',
-    frame_observation: 'frame_present',
-  });
-
-  // The driven Enter is transport, not delivery: still undelivered until the
-  // engine's own UserPromptSubmit attests it.
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect(driven).toHaveLength(0);
   await daemon.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'target', comm_tokens: [commTokenForMessageId(accepted.message_id)] });
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 });

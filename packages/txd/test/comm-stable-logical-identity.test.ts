@@ -146,12 +146,13 @@ test('a retired generation cannot redeem a stable identity snapshot resolved to 
     agent_id: 'pax-instance-old',
     comm_tokens,
   })).rejects.toThrow('message_target_mismatch');
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBeFalse();
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBeTrue();
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toEqual([]);
 
   await expect(daemon.promptSubmitted({
     schema_version: SCHEMA_VERSION,
     agent_id: 'pax-instance-new',
     comm_tokens,
-  })).resolves.toMatchObject({ asserted: [accepted.message_id] });
+  })).resolves.toMatchObject({ observed: [accepted.message_id] });
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBeTrue();
 });
