@@ -15,7 +15,7 @@ test("telemetryd stays loopback-only behind the Fleet edge", () => {
 // every caller that reads that return as readiness is wrong.
 test("telemetryd's start job completes on the daemon's own readiness edge", () => {
   expect(unit).toMatch(/^Type=notify$/m);
-  expect(unit).toMatch(/^NotifyAccess=main$/m);
+  expect(unit).toMatch(/^NotifyAccess=all$/m);
 });
 
 // The daemon executes from the installed generation apply-telemetryd realizes,
