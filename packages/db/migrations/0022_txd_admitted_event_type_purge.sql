@@ -20,6 +20,7 @@ DELETE FROM txd.events
    'reg.binding_aborted',
    'reg.bound',
    'reg.comm_accepted',
+   'reg.comm_refused',
    'reg.comm_target_snapshotted',
    'reg.composer_observation_prepared',
    'reg.contradiction_flagged',
