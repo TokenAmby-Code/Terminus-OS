@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { SQL } from 'bun';
-import { PostgresJournalPublisher } from './journal/publisher.ts';
+import { PostgresJournalPublisher } from '@tokenamby-code/stc-contract/journal/publisher';
 
 export type TxdPublishedEventType =
   | 'agent.dispatch_attested'

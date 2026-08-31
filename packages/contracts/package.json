@@ -16,7 +16,6 @@
     "./txd": "./src/txd.ts",
     "./hooks": "./src/hooks.ts",
     "./desktop-telemetry": "./src/desktop-telemetry.ts",
-    "./fleet-time": "./src/fleet-time.ts",
     "./replay": "./src/replay.ts"
   },
   "dependencies": {

@@ -5,7 +5,7 @@ import { findTmuxIdInIdentifiers } from '@terminus-os/contracts';
 import type { ObservationClient } from '@tokenamby-code/stc-contract/client';
 import { runningRuntimeMarker } from '@tokenamby-code/stc-contract/version';
 import { SERVICE_IDENTITY, SERVICE_VERSION } from '@terminus-os/txd/identity';
-import { loadFleetTimezone, renderHumanText, stringifyHuman } from '@terminus-os/contracts/fleet-time';
+import { loadFleetTimezone, renderHumanText, stringifyHuman } from '@tokenamby-code/stc-contract/fleet-time';
 import { createTxdObservationClient } from './observation.ts';
 
 export type CliDependencies = {

@@ -12,11 +12,13 @@ import {
   type Probe,
 } from '@tokenamby-code/stc-contract/observation';
 import { runningRuntimeMarker } from '@tokenamby-code/stc-contract/version';
+import type {
+  DurableJournalConsumer,
+  PgNotificationListener,
+} from '@tokenamby-code/stc-contract/journal/consumer';
 import type { Daemon } from './core.ts';
 import type { EventStore } from './store.ts';
 import type { TmuxControlPlane } from './tmux.ts';
-import type { DurableJournalConsumer } from './journal/durable-consumer.ts';
-import type { PgNotificationListener } from './journal/pg-listener.ts';
 import { SERVICE_IDENTITY } from './identity.ts';
 
 const FIVE_MINUTE_OBSERVATION_CEILING = {

@@ -11,9 +11,11 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { SQL } from 'bun';
 import { connectDb, DbEndpoint, MIGRATIONS_DIR, runMigrations, type DbEndpointT } from '@terminus-os/db';
-import { createTxdEventLane } from '../src/event-journal.ts';
-import { PostgresJournalConsumerStore } from '../src/journal/durable-consumer.ts';
-import { JournalPoisonDispositionError } from '../src/journal/durable-consumer.ts';
+import {
+  JournalPoisonDispositionError,
+  PostgresJournalConsumerStore,
+} from '@tokenamby-code/stc-contract/journal/consumer';
+import { createTxdEventLane, createTxdJournalPoisonDisposer } from '../src/event-journal.ts';
 import type { Daemon } from '../src/core.ts';
 
 function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpointT | null {
@@ -112,7 +114,7 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
   });
 
   test('a foreign journal event type is never inspected, never poisoned, and the cursor passes it', async () => {
-    const store = new PostgresJournalConsumerStore(raw, 'txd');
+    const store = new PostgresJournalConsumerStore({ cursorSql: raw, scanSql: raw, serviceSchema: 'txd' });
     await store.initializeLane(lane);
 
     const foreignSeq = await plant('githubd.convergence_attested', {
@@ -142,7 +144,7 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
   });
 
   test('one poison disposition records the required reason, actor identity, and disposal time', async () => {
-    const store = new PostgresJournalConsumerStore(raw, 'txd');
+    const store = createTxdJournalPoisonDisposer(raw);
     const eventSeq = 990_001;
     await raw`
       INSERT INTO txd.journal_poison
@@ -171,7 +173,7 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
   });
 
   test('disposing an absent poison event sequence is a typed refusal', async () => {
-    const store = new PostgresJournalConsumerStore(raw, 'txd');
+    const store = createTxdJournalPoisonDisposer(raw);
     await expect(store.disposePoison({
       event_seq: '990002',
       source_agent_id: 'custodes-worker',
@@ -180,7 +182,7 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
   });
 
   test('disposing a poison event sequence twice is a typed refusal and preserves the first disposition', async () => {
-    const store = new PostgresJournalConsumerStore(raw, 'txd');
+    const store = createTxdJournalPoisonDisposer(raw);
     const eventSeq = 990_003;
     await raw`
       INSERT INTO txd.journal_poison

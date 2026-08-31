@@ -10,4 +10,3 @@ export * from "./desktop-telemetry.ts";
 export * from "./phone-telemetry.ts";
 export * from "./replay.ts";
 export * from "./lcd.ts";
-export * from "./fleet-time.ts";

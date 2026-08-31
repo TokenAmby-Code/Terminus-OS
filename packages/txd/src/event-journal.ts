@@ -7,16 +7,20 @@ import {
   RegistrationAbortedSchema,
 } from '@tokenamby-code/agent-contract/events';
 import type { DbEndpointT } from '@terminus-os/db';
-import type { Daemon } from './core.ts';
-import { makeJournalReceipt } from './journal-receipt.ts';
+import type { JournalPoisonDispositionRequest } from '@terminus-os/contracts';
 import {
   DurableJournalConsumer,
   PoisonEventError,
   PostgresJournalConsumerStore,
+  PgNotificationListener,
+  disposeJournalPoison,
   type JournalEvent,
   type JournalLane,
-} from './journal/durable-consumer.ts';
-import { PgNotificationListener } from './journal/pg-listener.ts';
+  type JournalPoisonDisposition,
+  type JournalPoisonDispositionRow,
+} from '@tokenamby-code/stc-contract/journal/consumer';
+import type { Daemon } from './core.ts';
+import { makeJournalReceipt } from './journal-receipt.ts';
 
 export type TxdJournalEvent = JournalEvent & { seq: number };
 
@@ -25,7 +29,30 @@ export type TxdEventJournal = {
   lane: JournalLane<TxdJournalEvent>;
   consumer: DurableJournalConsumer;
   listener: PgNotificationListener;
+  poisonDisposer: TxdJournalPoisonDisposer;
 };
+
+export type TxdJournalPoisonDisposer = {
+  disposePoison(
+    request: Pick<JournalPoisonDispositionRequest, 'event_seq' | 'source_agent_id' | 'reason'>,
+  ): Promise<{ ok: true; event_seq: string } & Omit<JournalPoisonDisposition, 'event_seq'>>;
+};
+
+export function createTxdJournalPoisonDisposer(sql: SQL): TxdJournalPoisonDisposer {
+  return {
+    async disposePoison(request) {
+      const disposition = await disposeJournalPoison({
+        query: async (text, params) => await sql.unsafe(text, params) as unknown as JournalPoisonDispositionRow[],
+        schema: 'txd',
+        lane: 'txd-events',
+        eventSeq: request.event_seq,
+        reason: request.reason,
+        actor: request.source_agent_id,
+      });
+      return { ok: true, ...disposition, event_seq: String(disposition.event_seq) };
+    },
+  };
+}
 
 const PHYSICAL_REFUSALS = new Set([
   'physical_registration_unconfigured',
@@ -145,7 +172,11 @@ export function createTxdEventJournal(options: {
   const lane = createTxdEventLane({ machine: options.machine, daemon: options.daemon });
   const consumer = new DurableJournalConsumer({
     lanes: [lane],
-    store: new PostgresJournalConsumerStore(options.sql, 'txd'),
+    store: new PostgresJournalConsumerStore({
+      cursorSql: options.sql,
+      scanSql: options.sql,
+      serviceSchema: 'txd',
+    }),
   });
   const listener = new PgNotificationListener({
     endpoint: { kind: 'unix', path: `${options.endpoint.socket_dir}/.s.PGSQL.${options.endpoint.port}` },
@@ -156,5 +187,11 @@ export function createTxdEventJournal(options: {
     reconnectDelayMs: ({ attempt }) => Math.min(30_000, 250 * (2 ** Math.min(attempt, 7))),
     onDrainRequested: () => consumer.requestDrain(),
   });
-  return { sql: options.sql, lane, consumer, listener };
+  return {
+    sql: options.sql,
+    lane,
+    consumer,
+    listener,
+    poisonDisposer: createTxdJournalPoisonDisposer(options.sql),
+  };
 }
