@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { RealTmux } from '../src/tmux.ts';
-import { TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
+import { COUNCIL_GEOMETRY, TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
 
 const conf = new URL('../tmux/tx.conf', import.meta.url).pathname;
 const reflowCouncil = new URL('../tmux/reflow-council', import.meta.url).pathname;
@@ -64,6 +64,24 @@ async function paneLayoutHeights(socket: string, page: string): Promise<Record<s
     const height = heights.get(pane);
     if (height === undefined) throw new Error(`layout omitted ${seat}: ${layout}`);
     return [seat, height];
+  }));
+}
+
+async function paneLayout(socket: string, page: string): Promise<Record<string, Pane>> {
+  const layout = await tmux(socket, 'display-message', '-p', '-t', `main:${page}`, '#{window_layout}');
+  const geometry = new Map([...layout.matchAll(/(\d+)x(\d+),(\d+),(\d+),(\d+)/g)]
+    .map((match) => [`%${match[5]}`, {
+      width: Number(match[1]),
+      height: Number(match[2]),
+      left: Number(match[3]),
+      top: Number(match[4]),
+    }]));
+  const rows = await tmux(socket, 'list-panes', '-t', `main:${page}`, '-F', '#{@canonical_id}\t#{pane_id}');
+  return Object.fromEntries(rows.split('\n').map((row) => {
+    const [seat = '', pane = ''] = row.split('\t');
+    const observed = geometry.get(pane);
+    if (!observed) throw new Error(`layout omitted ${seat}: ${layout}`);
+    return [seat, { seat, ...observed }];
   }));
 }
 
@@ -148,7 +166,7 @@ describe('disposable canonical estate geometry', () => {
     expect(await control.rebuildPage('council')).toBe(true);
   });
 
-  test('81x66 Council construction and acceptance agree on the nearest two-thirds split', async () => {
+  test('81x66 Council construction and acceptance agree on stacked two-thirds pairs', async () => {
     const socket = `txd-council-81x66-${process.pid}`;
     sockets.push(socket);
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
@@ -158,10 +176,10 @@ describe('disposable canonical estate geometry', () => {
     expect(await control.rebuildPage('council')).toBe(true);
 
     expect(await paneLayoutHeights(socket, 'council')).toEqual({
-      'council:custodes': 43,
-      'council:fabricator-general': 22,
-      'council:pax': 43,
-      'council:orchestrator': 22,
+      'council:custodes': 21,
+      'council:fabricator-general': 11,
+      'council:pax': 21,
+      'council:orchestrator': 10,
     });
     expect(await control.estateDivergences()).toEqual([]);
   });
@@ -183,6 +201,83 @@ describe('disposable canonical estate geometry', () => {
     }]);
   });
 
+  test('191x37 observed client dimensions select the canonical two-column Council without drift', async () => {
+    const socket = `txd-council-wide-observed-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '191', '-y', '37');
+    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+
+    const council = await paneLayout(socket, 'council');
+    expect(council['council:custodes']).toMatchObject({ left: 0, top: 0, height: 24 });
+    expect(council['council:fabricator-general']).toMatchObject({ left: 0, top: 25, height: 12 });
+    expect(council['council:pax']!.left).toBeGreaterThan(0);
+    expect(council['council:pax']).toMatchObject({ top: 0, height: 24 });
+    expect(council['council:orchestrator']).toMatchObject({ left: council['council:pax']!.left, top: 25, height: 12 });
+    expect(await control.estateDivergences()).toEqual([]);
+  });
+
+  test('phone-width observed dimensions select the canonical single-column Council without drift', async () => {
+    const socket = `txd-council-phone-observed-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '120', '-y', '72');
+    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+
+    const council = await paneLayout(socket, 'council');
+    const physical = ['council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator'];
+    expect(physical.map((seat) => council[seat]!.top)).toEqual([0, 24, 37, 61]);
+    expect(physical.map((seat) => council[seat]!.height)).toEqual([23, 12, 23, 11]);
+    expect(physical.map((seat) => council[seat]!.left)).toEqual([0, 0, 0, 0]);
+    expect(physical.map((seat) => council[seat]!.width)).toEqual([120, 120, 120, 120]);
+    expect(await control.estateDivergences()).toEqual([]);
+  });
+
+  test('current narrow dimensions with wrong Council proportions report geometry drift', async () => {
+    const socket = `txd-council-phone-proportion-drift-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '120', '-y', '72');
+    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+
+    await tmux(socket, 'resize-pane', '-D', '-t', await paneId(socket, 'council:custodes'), '1');
+    expect(await control.estateDivergences()).toMatchObject([{ page: 'council', clause: 'geometry' }]);
+  });
+
+  test('wide to narrow to wide client resize re-derives Council shape without page-drift contradictions', async () => {
+    const socket = `txd-council-responsive-sequence-${process.pid}`;
+    sockets.push(socket);
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    const { MemoryEventStore } = await import('../src/store.ts');
+    const { Daemon } = await import('../src/core.ts');
+    const store = new MemoryEventStore();
+    const daemon = new Daemon(store, control);
+    await daemon.constructEstate();
+    const before = await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}');
+
+    for (const [width, height, expectedColumns] of [[191, 37, 2], [120, 72, 1], [191, 37, 2]] as const) {
+      await tmux(socket, 'resize-window', '-t', 'main:council', '-x', String(width), '-y', String(height));
+      await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+      const council = Object.values(await paneLayout(socket, 'council'));
+      expect(new Set(council.map((pane) => pane.left)).size).toBe(expectedColumns);
+      expect(await control.estateDivergences()).toEqual([]);
+      await daemon.reconcile();
+    }
+
+    expect((await store.readAll()).filter((event) =>
+      event.event_type === 'reg.contradiction_flagged' && event.payload.kind === 'page_drift')).toEqual([]);
+    expect(await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
+  });
+
   test('a small-client window resize preserves Council two-thirds geometry and pane processes', async () => {
     const socket = `txd-council-small-client-${process.pid}`;
     sockets.push(socket);
@@ -197,10 +292,10 @@ describe('disposable canonical estate geometry', () => {
     await tmux(socket, 'run-shell', reflowCouncil);
 
     expect(await paneLayoutHeights(socket, 'council')).toEqual({
-      'council:custodes': 15,
-      'council:fabricator-general': 8,
-      'council:pax': 15,
-      'council:orchestrator': 8,
+      'council:custodes': 7,
+      'council:fabricator-general': 4,
+      'council:pax': 7,
+      'council:orchestrator': 3,
     });
     expect(await control.estateDivergences()).toEqual([]);
     expect(await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
@@ -230,10 +325,10 @@ describe('disposable canonical estate geometry', () => {
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('0');
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{@txd_council_reflow_pending}')).toBe('');
     expect(await paneLayoutHeights(socket, 'council')).toEqual({
-      'council:custodes': 15,
-      'council:fabricator-general': 8,
-      'council:pax': 15,
-      'council:orchestrator': 8,
+      'council:custodes': 7,
+      'council:fabricator-general': 4,
+      'council:pax': 7,
+      'council:orchestrator': 3,
     });
     expect(await control.estateDivergences()).toEqual([]);
     expect(await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
@@ -252,10 +347,10 @@ describe('disposable canonical estate geometry', () => {
 
     expect(await control.ensureEstate()).toEqual({ state: 'existing', rebuilt_pages: [], diverged_pages: [] });
     expect(await paneLayoutHeights(socket, 'council')).toEqual({
-      'council:custodes': 15,
-      'council:fabricator-general': 8,
-      'council:pax': 15,
-      'council:orchestrator': 8,
+      'council:custodes': 7,
+      'council:fabricator-general': 4,
+      'council:pax': 7,
+      'council:orchestrator': 3,
     });
     expect(await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
   });
@@ -286,7 +381,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   for (const [label, width, height] of [
-    ['narrow', 80, 24],
+    ['narrow', 80, 48],
     ['normal', 160, 48],
     ['wide', 240, 72],
   ] as const) {
@@ -323,14 +418,16 @@ describe('disposable canonical estate geometry', () => {
       const council = Object.fromEntries(geometry.council.map((pane) => [pane.seat, pane]));
       const north = Math.min(...geometry.council.map((pane) => pane.top));
       expect(council['council:custodes']).toMatchObject({ left: 0, top: north });
-      expect(council['council:fabricator-general']!.left).toBe(0);
-      expect(council['council:fabricator-general']!.top).toBeGreaterThan(0);
-      expect(council['council:pax']!.left).toBeGreaterThan(0);
-      expect(council['council:pax']!.top).toBe(north);
-      expect(council['council:orchestrator']!.left).toBeGreaterThan(0);
-      expect(council['council:orchestrator']!.top).toBeGreaterThan(0);
-      for (const pane of geometry.council) {
-        expectRatio(pane.width, width, 0.45, 0.52);
+      const stacked = width < (2 * COUNCIL_GEOMETRY.pane.minimumUsableColumns) + COUNCIL_GEOMETRY.verticalBorders;
+      if (stacked) {
+        expect(geometry.council.every((pane) => pane.left === 0 && pane.width === width)).toBe(true);
+        expect(geometry.council.map((pane) => pane.top)).toEqual([...geometry.council.map((pane) => pane.top)].sort((a, b) => a - b));
+      } else {
+        expect(council['council:fabricator-general']!.left).toBe(0);
+        expect(council['council:pax']!.left).toBeGreaterThan(0);
+        expect(council['council:pax']!.top).toBe(north);
+        expect(council['council:orchestrator']!.left).toBeGreaterThan(0);
+        for (const pane of geometry.council) expectRatio(pane.width, width, 0.45, 0.52);
       }
       const westContentHeight = council['council:custodes']!.height + council['council:fabricator-general']!.height;
       const eastContentHeight = council['council:pax']!.height + council['council:orchestrator']!.height;

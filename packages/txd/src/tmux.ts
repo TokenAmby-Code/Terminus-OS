@@ -12,6 +12,7 @@
 
 import {
   COUNCIL_GEOMETRY,
+  councilGeometry,
   councilGeometryRows,
   isStackPage,
   seatBelongsToPage,
@@ -989,13 +990,64 @@ export class RealTmux implements TmuxControlPlane {
 
   private async declareCouncilGeometry(target: string): Promise<void> {
     const options = {
+      '@txd_council_minimum_usable_columns': String(COUNCIL_GEOMETRY.pane.minimumUsableColumns),
       '@txd_council_top_numerator': String(COUNCIL_GEOMETRY.top.numerator),
       '@txd_council_top_denominator': String(COUNCIL_GEOMETRY.top.denominator),
       '@txd_council_horizontal_borders': String(COUNCIL_GEOMETRY.horizontalBorders),
+      '@txd_council_vertical_borders': String(COUNCIL_GEOMETRY.verticalBorders),
     } as const;
     for (const [name, value] of Object.entries(options)) {
       await this.checked(['set-option', '-w', '-t', target, name, value], 'declare council geometry', 'council');
     }
+  }
+
+  private static layoutChecksum(layout: string): string {
+    let checksum = 0;
+    for (const character of layout) {
+      checksum = ((checksum >>> 1) + ((checksum & 1) << 15) + character.charCodeAt(0)) & 0xffff;
+    }
+    return checksum.toString(16).padStart(4, '0');
+  }
+
+  private static councilLayout(
+    windowWidth: number,
+    windowHeight: number,
+    panes: readonly [string, string, string, string],
+  ): string {
+    const desired = councilGeometry(windowWidth, windowHeight);
+    const leaf = (index: number): string => {
+      const pane = panes[index]!;
+      const geometry = desired.panes[index]!;
+      return `${geometry.width}x${geometry.height},${geometry.left},${geometry.top},${pane.replace(/^%/, '')}`;
+    };
+    const body = desired.shape === 'columns'
+      ? `${windowWidth}x${windowHeight},0,0{`
+        + `${desired.panes[0].width}x${windowHeight},0,0[${leaf(0)},${leaf(1)}],`
+        + `${desired.panes[2].width}x${windowHeight},${desired.panes[2].left},0[${leaf(2)},${leaf(3)}]}`
+      : `${windowWidth}x${windowHeight},0,0[${leaf(0)},${leaf(1)},${leaf(2)},${leaf(3)}]`;
+    return `${RealTmux.layoutChecksum(body)},${body}`;
+  }
+
+  private async applyCouncilGeometry(target: string): Promise<void> {
+    const dimensions = await this.checked(
+      ['display-message', '-p', '-t', target, '#{window_width}\t#{window_height}'],
+      'observe council window dimensions',
+      'council',
+    );
+    const [rawWidth = '', rawHeight = ''] = dimensions.split('\t');
+    const width = Number(rawWidth);
+    const height = Number(rawHeight);
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 7) {
+      throw new Error(`txd tmux council window has invalid dimensions: ${dimensions}`);
+    }
+    const resolved = await Promise.all(TXD_WINDOWS.council.map((seat) => this.resolvePane(seat)));
+    if (resolved.some((pane) => pane === null)) throw new Error('txd cannot apply Council geometry with a missing seat');
+    const panes = resolved as unknown as [string, string, string, string];
+    await this.checked(
+      ['select-layout', '-t', target, RealTmux.councilLayout(width, height, panes)],
+      'apply council geometry',
+      'council',
+    );
   }
 
   /**
@@ -1060,25 +1112,18 @@ export class RealTmux implements TmuxControlPlane {
     if (seats.some((seat) => !bySeat.has(seat))) return false;
 
     if (window === 'council' && seats.length === 4) {
-      const nw = bySeat.get(seats[0]!)!;
-      const sw = bySeat.get(seats[1]!)!;
-      const ne = bySeat.get(seats[2]!)!;
-      const se = bySeat.get(seats[3]!)!;
-      const originTop = Math.min(...panes.map((pane) => pane.top));
-      return nw.left === 0 && nw.top === originTop
-        && sw.left === 0 && sw.top === nw.top + nw.height + 1
-        && ne.left === nw.width + 1 && ne.top === originTop
-        && se.left === ne.left && se.top === ne.top + ne.height + 1
-        && nw.width === sw.width && ne.width === se.width
-        && nw.height === ne.height && sw.height === se.height
-        // COUNCIL_GEOMETRY rounds the two-thirds share to the nearest integer.
-        // That admits only the unavoidable integer-row error (at most 1/3 row)
-        // and rejects the adjacent integer (at least 2/3 row from the ideal).
-        && nw.height === councilGeometryRows(nw.windowHeight).top
-        && sw.height === councilGeometryRows(nw.windowHeight).bottom
-        && ne.left + ne.width === nw.windowWidth
-        && sw.top + sw.height === nw.windowHeight
-        && se.top + se.height === nw.windowHeight;
+      const first = bySeat.get(seats[0]!)!;
+      const desired = councilGeometry(first.windowWidth, first.windowHeight);
+      return seats.every((seat, index) => {
+        const observed = bySeat.get(seat)!;
+        const expected = desired.panes[index]!;
+        return observed.left === expected.left
+          && observed.top === expected.top
+          && observed.width === expected.width
+          && observed.height === expected.height
+          && observed.windowWidth === first.windowWidth
+          && observed.windowHeight === first.windowHeight;
+      });
     }
     if (window === 'council' && seats.length === 5) {
       // The preceding constructor repeatedly split the original top pane.
@@ -1118,7 +1163,7 @@ export class RealTmux implements TmuxControlPlane {
     const ne = bySeat.get(seats[2]!)!;
     const se = bySeat.get(seats[3]!)!;
     const originTop = Math.min(...panes.map((pane) => pane.top));
-    const intact = nw.left === 0 && nw.top === originTop
+    const columns = nw.left === 0 && nw.top === originTop
       && sw.left === 0 && sw.top === nw.top + nw.height + 1
       && ne.left === nw.width + 1 && ne.top === originTop
       && se.left === ne.left && se.top === ne.top + ne.height + 1
@@ -1127,20 +1172,14 @@ export class RealTmux implements TmuxControlPlane {
       && ne.left + ne.width === nw.windowWidth
       && sw.top + sw.height === nw.windowHeight
       && se.top + se.height === nw.windowHeight;
-    if (!intact) return;
-    const desired = councilGeometryRows(nw.windowHeight);
-    if (nw.height === desired.top && sw.height === desired.bottom) return;
-    const paneBorderStatus = await this.checked(
-      ['show-options', '-wv', '-t', `${TXD_SESSION}:=council`, 'pane-border-status'],
-      'observe council pane border status',
-      'council',
-    );
-    const requestedTop = desired.top - (paneBorderStatus === 'off' ? 0 : 1);
-    for (const seat of [seats[0], seats[2]]) {
-      const pane = await this.resolvePane(seat);
-      if (!pane) throw new Error(`txd cannot reflow missing Council seat ${seat}`);
-      await this.checked(['resize-pane', '-t', pane, '-y', String(requestedTop)], 'reflow council geometry', seat);
-    }
+    const stack = [nw, sw, ne, se].every((pane, index, ordered) =>
+      pane.left === 0
+      && pane.width === pane.windowWidth
+      && pane.top === (index === 0 ? originTop : ordered[index - 1]!.top + ordered[index - 1]!.height + 1),
+    ) && se.top + se.height === nw.windowHeight;
+    if (!columns && !stack) return;
+    if (this.pageGeometryMatches('council', seats, rows)) return;
+    await this.applyCouncilGeometry(`${TXD_SESSION}:=council`);
   }
 
   private isCanonicalEstate(rows: EstateRow[]): boolean {
@@ -1329,6 +1368,7 @@ export class RealTmux implements TmuxControlPlane {
       throw new Error(`txd refused unknown page ${page}`);
     }
     await Promise.all(seats.map((seat, index) => this.tag(panes[index]!, seat)));
+    if (page === 'council') await this.applyCouncilGeometry(`${TXD_SESSION}:=council`);
     return panes;
   }
 
@@ -1587,6 +1627,7 @@ export class RealTmux implements TmuxControlPlane {
       );
       const councilPanes = [council, councilSW, councilNE, councilSE];
       await Promise.all(TXD_WINDOWS.council.map((seat, index) => this.tag(councilPanes[index]!, seat)));
+      await this.applyCouncilGeometry(`${TXD_SESSION}:=council`);
 
       for (const page of ['palace_fleet', 'somnium_fleet'] as const) {
         const pane = await this.estateChecked(
