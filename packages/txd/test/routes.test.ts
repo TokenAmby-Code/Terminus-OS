@@ -9,7 +9,7 @@ import { Daemon } from '../src/core.ts';
 import { resolveSshSeatTargets } from '../src/config.ts';
 import { EnvelopeInventoryError } from '../src/envelopes.ts';
 import { ProjectionMismatchError } from '../src/event-log-compaction.ts';
-import { JournalPoisonDispositionError } from '../src/journal/durable-consumer.ts';
+import { JournalPoisonDispositionError } from '@tokenamby-code/stc-contract/journal/consumer';
 import { buildRoutes, deferredJson, makeServer } from '../src/server.ts';
 import { commFrame, commTokenForMessageId } from '../src/comm-frame.ts';
 

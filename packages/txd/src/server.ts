@@ -58,11 +58,8 @@ import { ProjectionMismatchError } from './event-log-compaction.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 import { readHookDiagnostics } from './diagnostics.ts';
 import type { ObservationHandler } from '@tokenamby-code/stc-contract/observation';
-import {
-  JournalPoisonDispositionError,
-  type DurableJournalConsumer,
-} from './journal/durable-consumer.ts';
-
+import { JournalPoisonDispositionError } from '@tokenamby-code/stc-contract/journal/consumer';
+import type { TxdJournalPoisonDisposer } from './event-journal.ts';
 
 export type Route = {
   method: string;
@@ -255,7 +252,7 @@ export function buildRoutes(
   daemon: Daemon,
   machine: string,
   hookDiagnostics: (limit: number) => Promise<HookDiagnostic[]> = readHookDiagnostics,
-  journalPoisonDisposer?: Pick<DurableJournalConsumer, 'disposePoison'>,
+  journalPoisonDisposer?: TxdJournalPoisonDisposer,
 ): Route[] {
   const routes: Route[] = [
     // ── /ctl/* — daemon ops ─────────────────────────────────────────────────
@@ -569,7 +566,7 @@ export function buildRoutes(
         } catch (error) {
           if (error instanceof JournalPoisonDispositionError) {
             return json(
-              { ok: false, error: error.code, event_seq: error.event_seq },
+              { ok: false, error: error.code, event_seq: String(error.eventSeq) },
               error.code === 'journal_poison_absent' ? 404 : 409,
             );
           }
@@ -707,7 +704,7 @@ export function makeServer(opts: {
   machine: string;
   observation?: ObservationHandler;
   hookDiagnostics?: (limit: number) => Promise<HookDiagnostic[]>;
-  journalPoisonDisposer?: Pick<DurableJournalConsumer, 'disposePoison'>;
+  journalPoisonDisposer?: TxdJournalPoisonDisposer;
 }): ReturnType<typeof Bun.serve> {
   const routes = buildRoutes(opts.daemon, opts.machine, opts.hookDiagnostics, opts.journalPoisonDisposer);
   return Bun.serve({

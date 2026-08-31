@@ -4,7 +4,7 @@ import { PostgresObservationStore } from "@tokenamby-code/stc-contract/observati
 import { SERVICE_VERSION } from "./identity.ts";
 import { makeServer } from "./server.ts";
 import { PostgresTelemetryStore } from "./store.ts";
-import { loadFleetTimezone } from "@terminus-os/contracts/fleet-time";
+import { loadFleetTimezone } from "@tokenamby-code/stc-contract/fleet-time";
 
 await loadFleetTimezone();
 

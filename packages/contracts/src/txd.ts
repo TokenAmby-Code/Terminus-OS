@@ -396,13 +396,6 @@ export const JournalPoisonDispositionRequestSchema = z.strictObject({
 });
 export type JournalPoisonDispositionRequest = z.infer<typeof JournalPoisonDispositionRequestSchema>;
 
-export type JournalPoisonDispositionResponse = {
-  ok: true;
-  event_seq: string;
-  disposition: string;
-  disposed_at: string;
-};
-
 // ── Projections (spec §10) — all three rebuilt by replay, nobody writes them ─
 export const CurrentBindingSchema = z.object({
   seat_id: z.string(),

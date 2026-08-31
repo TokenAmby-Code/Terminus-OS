@@ -6,7 +6,7 @@
       "name": "terminus-os",
       "devDependencies": {
         "@tokenamby-code/agent-contract": "1.1.0",
-        "@tokenamby-code/stc-contract": "1.5.1",
+        "@tokenamby-code/stc-contract": "1.6.5",
         "@types/bun": "latest",
         "typescript": "^5.7.0",
       },
@@ -36,7 +36,7 @@
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
-        "@tokenamby-code/stc-contract": "1.5.1",
+        "@tokenamby-code/stc-contract": "1.6.5",
       },
     },
     "packages/tx": {
@@ -48,7 +48,7 @@
       "dependencies": {
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/txd": "workspace:*",
-        "@tokenamby-code/stc-contract": "1.5.1",
+        "@tokenamby-code/stc-contract": "1.6.5",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
@@ -62,7 +62,7 @@
         "@terminus-os/contracts": "workspace:*",
         "@terminus-os/db": "workspace:*",
         "@tokenamby-code/agent-contract": "1.2.0",
-        "@tokenamby-code/stc-contract": "1.5.1",
+        "@tokenamby-code/stc-contract": "1.6.5",
       },
       "devDependencies": {
         "@types/bun": "^1.3.14",
@@ -83,7 +83,7 @@
 
     "@tokenamby-code/agent-contract": ["@tokenamby-code/agent-contract@1.1.0", "https://npm.pkg.github.com/download/@tokenamby-code/agent-contract/1.1.0/cf921feffd9dd44afdf7244fdab930293f341135", { "dependencies": { "zod": "^4.4.3" } }, "sha512-Q1EAnjcHd6N4BlHC7VP0aWIDRikxqGmrchDXoC0euLmgWTJDEK6017d5D+cJiRzvLIA9udchqiibxQX9hneOoQ=="],
 
-    "@tokenamby-code/stc-contract": ["@tokenamby-code/stc-contract@1.5.1", "https://npm.pkg.github.com/download/@tokenamby-code/stc-contract/1.5.1/6665f48a528a968ec2ab947c2a48bc3e47c7fb7c", { "dependencies": { "zod": "^4.4.3" } }, "sha512-04fjZ5jXyk9xOa9Tnno/ggG5OJdweL7D+8iJnjcSdMTez+BTMA2u4Qnq010HhtJr0G4VxjbjK5AJVHhhAyjazQ=="],
+    "@tokenamby-code/stc-contract": ["@tokenamby-code/stc-contract@1.6.5", "https://npm.pkg.github.com/download/@tokenamby-code/stc-contract/1.6.5/99895483c877e19e719f115ea85f046d8fd648b7", { "dependencies": { "zod": "^4.4.3" } }, "sha512-rp+5jqXL5veWK+WqkStBKxAkS9dPoCwx2YVkkV9JpHE/HB3399oEr0xPtd3sjseaLq/LDWV5GJeAOs2qs92W9g=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
