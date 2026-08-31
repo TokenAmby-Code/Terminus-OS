@@ -383,6 +383,22 @@ export const EventLogCompactionRequestSchema = z.strictObject({
 });
 export type EventLogCompactionRequest = z.infer<typeof EventLogCompactionRequestSchema>;
 
+export const JournalPoisonDispositionRequestSchema = z.strictObject({
+  schema_version: z.number().int(),
+  source_agent_id: z.string().min(1),
+  event_seq: z.string().regex(/^[1-9][0-9]*$/)
+    .refine((value) => BigInt(value) <= 9_223_372_036_854_775_807n),
+  reason: z.string().trim().min(1),
+});
+export type JournalPoisonDispositionRequest = z.infer<typeof JournalPoisonDispositionRequestSchema>;
+
+export type JournalPoisonDispositionResponse = {
+  ok: true;
+  event_seq: string;
+  disposition: string;
+  disposed_at: string;
+};
+
 // ── Projections (spec §10) — all three rebuilt by replay, nobody writes them ─
 export const CurrentBindingSchema = z.object({
   seat_id: z.string(),

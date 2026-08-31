@@ -2,10 +2,11 @@ import { COMMANDS, type Command } from './commands.ts';
 import { createClient, type TxdRequest } from './client.ts';
 import { createLocalClipboard, type LocalClipboard } from './clipboard.ts';
 import { findTmuxIdInIdentifiers } from '@terminus-os/contracts';
-import { createObservationClient, type ObservationClient } from '@tokenamby-code/stc-contract/client';
+import type { ObservationClient } from '@tokenamby-code/stc-contract/client';
 import { runningRuntimeMarker } from '@tokenamby-code/stc-contract/version';
 import { SERVICE_IDENTITY, SERVICE_VERSION } from '@terminus-os/txd/identity';
 import { loadFleetTimezone, renderHumanText, stringifyHuman } from '@terminus-os/contracts/fleet-time';
+import { createTxdObservationClient } from './observation.ts';
 
 export type CliDependencies = {
   request: TxdRequest;
@@ -57,7 +58,7 @@ export async function runCli(
     return 0;
   }
   if (argv.length === 1 && (argv[0] === 'health' || argv[0] === 'inspect' || argv[0] === 'version')) {
-    const observation = deps.observation ?? createObservationClient({
+    const observation = deps.observation ?? createTxdObservationClient({
       baseUrl: process.env.TXD_URL ?? 'http://127.0.0.1:7781',
     });
     let timezone: string | undefined;

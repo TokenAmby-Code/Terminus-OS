@@ -1,4 +1,8 @@
 import type { SQL, TransactionSQL } from "bun";
+import type {
+  JournalPoisonDispositionRequest,
+  JournalPoisonDispositionResponse,
+} from "@terminus-os/contracts";
 
 export type JournalEvent = {
   seq: string | number;
@@ -43,6 +47,18 @@ export type DrainResult = {
 export interface JournalConsumerStore {
   initializeLane(lane: JournalLane<any>): Promise<void>;
   drainLane(lane: JournalLane<any>): Promise<DrainResult>;
+  disposePoison(request: Omit<JournalPoisonDispositionRequest, "schema_version">): Promise<JournalPoisonDispositionResponse>;
+}
+
+export type JournalPoisonDispositionErrorCode =
+  | "journal_poison_absent"
+  | "journal_poison_already_disposed";
+
+export class JournalPoisonDispositionError extends Error {
+  constructor(readonly code: JournalPoisonDispositionErrorCode, readonly event_seq: string) {
+    super(code);
+    this.name = "JournalPoisonDispositionError";
+  }
 }
 
 export class PoisonEventError extends Error {
@@ -112,6 +128,42 @@ export class PostgresJournalConsumerStore implements JournalConsumerStore {
         || (lane.seed.kind === "now" && (storedSeed < 0 || storedSeed > head))) {
         throw new Error(`lane ${lane.name} seed declaration mismatch`);
       }
+    });
+  }
+
+  async disposePoison(
+    request: Omit<JournalPoisonDispositionRequest, "schema_version">,
+  ): Promise<JournalPoisonDispositionResponse> {
+    return await this.sql.begin(async (transaction) => {
+      const rows = await transaction.unsafe(
+        `SELECT disposition
+         FROM ${this.#schema}.journal_poison
+         WHERE lane = 'txd-events' AND event_seq = $1
+         FOR UPDATE`,
+        [request.event_seq],
+      ) as Array<{ disposition: string | null }>;
+      if (rows.length === 0) {
+        throw new JournalPoisonDispositionError("journal_poison_absent", request.event_seq);
+      }
+      if (rows.length !== 1) throw new Error("journal_poison_event_seq_ambiguous");
+      if (rows[0]!.disposition !== null) {
+        throw new JournalPoisonDispositionError("journal_poison_already_disposed", request.event_seq);
+      }
+      const disposition = `actor=${request.source_agent_id}; reason=${request.reason}`;
+      const updated = await transaction.unsafe(
+        `UPDATE ${this.#schema}.journal_poison
+         SET disposition = $2, disposed_at = clock_timestamp()
+         WHERE lane = 'txd-events' AND event_seq = $1 AND disposition IS NULL
+         RETURNING event_seq, disposition, disposed_at::text`,
+        [request.event_seq, disposition],
+      ) as Array<{ event_seq: number | bigint | string; disposition: string; disposed_at: string }>;
+      if (updated.length !== 1) throw new Error("journal_poison_disposition_write_failed");
+      return {
+        ok: true,
+        event_seq: String(updated[0]!.event_seq),
+        disposition: updated[0]!.disposition,
+        disposed_at: updated[0]!.disposed_at,
+      };
     });
   }
 
@@ -238,6 +290,10 @@ export class DurableJournalConsumer {
 
   async initialize(): Promise<void> {
     for (const lane of this.#lanes) await this.#store.initializeLane(lane);
+  }
+
+  disposePoison(request: Omit<JournalPoisonDispositionRequest, "schema_version">): Promise<JournalPoisonDispositionResponse> {
+    return this.#store.disposePoison(request);
   }
 
   requestDrain(): Promise<void> {

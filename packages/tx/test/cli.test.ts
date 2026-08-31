@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { runCli, type CliDependencies } from '../src/cli.ts';
+import { createTxdObservationClient } from '../src/observation.ts';
 
 const testTimezone = async () => 'America/Phoenix';
 
@@ -34,6 +35,47 @@ test('health, inspect, and version use the STC observation client', async () => 
   expect(calls).toEqual(['health', 'inspect']);
 });
 
+test('inspect accepts the current STC envelope through an additive funnel mouth', async () => {
+  const probe = {
+    name: 'postgres',
+    rung: 'dependency' as const,
+    state: 'ready' as const,
+    detail: '',
+    observed_at: '2026-08-30T15:30:00.000Z',
+    elapsed_ms: 1,
+    deadline_ms: 300_000,
+    deadline_derived_from: 'fleet stop floor',
+    caveats: ['read-only SELECT'],
+    evidence: { select_1: 1 },
+  };
+  const envelope = {
+    identity: { service: 'txd', daemon: 'txd', cli: 'tx' },
+    version: '0.1.0',
+    stc_version: '1.4.1',
+    machine: 'k12-personal',
+    probes: [probe],
+    holdings: [],
+    observation_ring: {
+      capacity_per_probe: 4,
+      capacity_derived_from: 'bounded retained evidence',
+      probes: [{ name: 'postgres', failure_onset_at: null, readings: [probe] }],
+    },
+    additive_envelope_field: { introduced_after_this_client: true },
+  };
+  const h = harness();
+  const observation = createTxdObservationClient({
+    baseUrl: 'http://127.0.0.1:7781',
+    fetch: async () => new Response(JSON.stringify(envelope), { status: 200 }),
+  });
+  expect(await runCli(['inspect'], { ...h.deps, observation })).toBe(0);
+  expect(h.stderr).toEqual([]);
+  const rendered = JSON.parse(h.stdout[0]!);
+  expect(Object.keys(rendered).sort()).toEqual([
+    'holdings', 'identity', 'machine', 'observation_ring', 'probes', 'stc_version', 'version',
+  ]);
+  expect(rendered.observation_ring.probes[0].name).toBe('postgres');
+});
+
 test('the shared router supports nested subcommands', async () => {
   const h = harness();
   expect(await runCli(['estate', 'missing'], h.deps)).toBe(2);
@@ -47,6 +89,51 @@ test('help is deterministic and lists extension points', async () => {
   expect(h.stdout.join('\n')).toContain('command=<name>|skill=<name> [-- args]');
   expect(h.stdout.join('\n')).toContain('caller supplies no /, $, or engine flag');
   expect(h.stdout.join('\n')).toContain('tx inspect hooks');
+});
+
+test('journal dispose sends one exact event sequence, required reason, and actor identity', async () => {
+  const prior = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'custodes-worker';
+  const h = harness({ ok: true, event_seq: 417, disposition: 'actor=custodes-worker; reason=invalid v8 backfill conflict' });
+  try {
+    expect(await runCli([
+      'journal', 'dispose', '417', '--reason', 'invalid v8 backfill conflict',
+    ], h.deps)).toBe(0);
+    expect(h.calls).toEqual([{
+      method: 'POST',
+      path: '/ctl/journal/poison/dispose',
+      body: {
+        schema_version: 13,
+        source_agent_id: 'custodes-worker',
+        event_seq: '417',
+        reason: 'invalid v8 backfill conflict',
+      },
+    }]);
+  } finally {
+    if (prior === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = prior;
+  }
+});
+
+test('journal dispose preserves the full PostgreSQL bigint event sequence over JSON', async () => {
+  const prior = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'custodes-worker';
+  const h = harness({ ok: false, error: 'journal_poison_absent', event_seq: '9223372036854775807' });
+  try {
+    expect(await runCli([
+      'journal', 'dispose', '9223372036854775807', '--reason', 'nonexistent-control',
+    ], h.deps)).toBe(0);
+    expect(h.calls[0]?.body).toMatchObject({ event_seq: '9223372036854775807' });
+  } finally {
+    if (prior === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = prior;
+  }
+});
+
+test('journal dispose has no bulk shape and refuses a missing reason before transport', async () => {
+  const h = harness();
+  expect(await runCli(['journal', 'dispose', '417'], h.deps)).toBe(1);
+  expect(await runCli(['journal', 'dispose', '*', '--reason', 'anything'], h.deps)).toBe(1);
+  expect(await runCli(['journal', 'dispose', '417', '418', '--reason', 'anything'], h.deps)).toBe(1);
+  expect(h.calls).toEqual([]);
 });
 
 test('inspect hooks returns bounded typed journal diagnostics', async () => {

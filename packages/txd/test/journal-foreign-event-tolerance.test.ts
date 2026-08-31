@@ -13,6 +13,7 @@ import type { SQL } from 'bun';
 import { connectDb, DbEndpoint, MIGRATIONS_DIR, runMigrations, type DbEndpointT } from '@terminus-os/db';
 import { createTxdEventLane } from '../src/event-journal.ts';
 import { PostgresJournalConsumerStore } from '../src/journal/durable-consumer.ts';
+import { JournalPoisonDispositionError } from '../src/journal/durable-consumer.ts';
 import type { Daemon } from '../src/core.ts';
 
 function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpointT | null {
@@ -138,5 +139,62 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
     // The quarantine is durable: nothing is re-inspected, the drain stays healthy.
     const second = await store.drainLane(lane);
     expect(second).toEqual({ cursor: quarantinedSeq, frontier: quarantinedSeq, inspected: 0, applied: 0, poisoned: 0 });
+  });
+
+  test('one poison disposition records the required reason, actor identity, and disposal time', async () => {
+    const store = new PostgresJournalConsumerStore(raw, 'txd');
+    const eventSeq = 990_001;
+    await raw`
+      INSERT INTO txd.journal_poison
+        (lane, event_seq, event_id, event_type, schema_version, error_code, detail)
+      VALUES ('txd-events', ${eventSeq}, gen_random_uuid(), 'agent.registered', 1,
+              'invalid_registered_agent', '{}'::jsonb)`;
+
+    const result = await store.disposePoison({
+      event_seq: String(eventSeq),
+      source_agent_id: 'custodes-worker',
+      reason: 'invalid v8 backfill conflict',
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      event_seq: String(eventSeq),
+      disposition: 'actor=custodes-worker; reason=invalid v8 backfill conflict',
+    });
+    expect(Date.parse(result.disposed_at)).not.toBeNaN();
+    const rows = (await raw`
+      SELECT disposition, disposed_at::text FROM txd.journal_poison WHERE event_seq = ${eventSeq}`) as
+      Array<{ disposition: string; disposed_at: string }>;
+    expect(rows).toEqual([{
+      disposition: 'actor=custodes-worker; reason=invalid v8 backfill conflict',
+      disposed_at: result.disposed_at,
+    }]);
+  });
+
+  test('disposing an absent poison event sequence is a typed refusal', async () => {
+    const store = new PostgresJournalConsumerStore(raw, 'txd');
+    await expect(store.disposePoison({
+      event_seq: '990002',
+      source_agent_id: 'custodes-worker',
+      reason: 'invalid v8 backfill conflict',
+    })).rejects.toEqual(new JournalPoisonDispositionError('journal_poison_absent', '990002'));
+  });
+
+  test('disposing a poison event sequence twice is a typed refusal and preserves the first disposition', async () => {
+    const store = new PostgresJournalConsumerStore(raw, 'txd');
+    const eventSeq = 990_003;
+    await raw`
+      INSERT INTO txd.journal_poison
+        (lane, event_seq, event_id, event_type, schema_version, error_code, detail,
+         disposition, disposed_at)
+      VALUES ('txd-events', ${eventSeq}, gen_random_uuid(), 'agent.registered', 1,
+              'invalid_registered_agent', '{}'::jsonb, 'actor=prior; reason=prior ruling', now())`;
+    await expect(store.disposePoison({
+      event_seq: String(eventSeq),
+      source_agent_id: 'custodes-worker',
+      reason: 'overwrite attempt',
+    })).rejects.toEqual(new JournalPoisonDispositionError('journal_poison_already_disposed', String(eventSeq)));
+    const rows = (await raw`
+      SELECT disposition FROM txd.journal_poison WHERE event_seq = ${eventSeq}`) as Array<{ disposition: string }>;
+    expect(rows).toEqual([{ disposition: 'actor=prior; reason=prior ruling' }]);
   });
 });

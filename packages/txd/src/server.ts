@@ -39,6 +39,7 @@ import {
   EstateRotateRequestSchema,
   EstateAbandonRequestSchema,
   EventLogCompactionRequestSchema,
+  JournalPoisonDispositionRequestSchema,
   LaunchRequestSchema,
   ModeTransitionRequestSchema,
   RunRequestSchema,
@@ -56,6 +57,10 @@ import { ProjectionMismatchError } from './event-log-compaction.ts';
 import { assertNoTmuxIdInIdentifiers, sanitizeTmuxIds } from './ids.ts';
 import { readHookDiagnostics } from './diagnostics.ts';
 import type { ObservationHandler } from '@tokenamby-code/stc-contract/observation';
+import {
+  JournalPoisonDispositionError,
+  type DurableJournalConsumer,
+} from './journal/durable-consumer.ts';
 
 
 export type Route = {
@@ -249,6 +254,7 @@ export function buildRoutes(
   daemon: Daemon,
   machine: string,
   hookDiagnostics: (limit: number) => Promise<HookDiagnostic[]> = readHookDiagnostics,
+  journalPoisonDisposer?: Pick<DurableJournalConsumer, 'disposePoison'>,
 ): Route[] {
   const routes: Route[] = [
     // ── /ctl/* — daemon ops ─────────────────────────────────────────────────
@@ -539,6 +545,30 @@ export function buildRoutes(
     },
     {
       method: 'POST',
+      match: exact('/ctl/journal/poison/dispose'),
+      label: 'POST /ctl/journal/poison/dispose',
+      handler: async (req) => {
+        const parsed = await parseMutation(req, JournalPoisonDispositionRequestSchema, 'invalid_journal_poison_disposition_request');
+        if (parsed instanceof Response) return parsed;
+        if (parsed.schema_version !== SCHEMA_VERSION) {
+          return json({ ok: false, error: 'schema_version_mismatch' }, 409);
+        }
+        if (!journalPoisonDisposer) throw new Error('journal_poison_disposer_unconfigured');
+        try {
+          return json(await journalPoisonDisposer.disposePoison(parsed));
+        } catch (error) {
+          if (error instanceof JournalPoisonDispositionError) {
+            return json(
+              { ok: false, error: error.code, event_seq: error.event_seq },
+              error.code === 'journal_poison_absent' ? 404 : 409,
+            );
+          }
+          throw error;
+        }
+      },
+    },
+    {
+      method: 'POST',
       match: exact('/agents/launch'),
       label: 'POST /agents/launch',
       handler: async (req) => {
@@ -667,8 +697,9 @@ export function makeServer(opts: {
   machine: string;
   observation?: ObservationHandler;
   hookDiagnostics?: (limit: number) => Promise<HookDiagnostic[]>;
+  journalPoisonDisposer?: Pick<DurableJournalConsumer, 'disposePoison'>;
 }): ReturnType<typeof Bun.serve> {
-  const routes = buildRoutes(opts.daemon, opts.machine, opts.hookDiagnostics);
+  const routes = buildRoutes(opts.daemon, opts.machine, opts.hookDiagnostics, opts.journalPoisonDisposer);
   return Bun.serve({
     hostname: opts.bind,
     port: opts.port,
