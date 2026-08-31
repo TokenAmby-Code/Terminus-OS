@@ -36,13 +36,13 @@ StartLimitIntervalSec=60
 StartLimitBurst=5
 
 [Service]
-# The daemon writes sd_notify READY=1 once the control plane is serving, and
-# that write is what completes the start job — so a caller's `systemctl restart
+# The daemon asks systemd-notify to send READY=1 once the control plane is
+# serving, and that write is what completes the start job — so a caller's `systemctl restart
 # txd.service` returns on the serving edge instead of at fork. The estate rung
 # runs after the signal on purpose: txd must stay reachable while an estate is
 # unresolved, because /health is the surface that says so.
 Type=notify
-NotifyAccess=main
+NotifyAccess=all
 # The daemon executes from the installed generation apply-txd realizes with
 # terminus-install-generation, never from the deploy checkout: the checkout is a
 # synchronization target whose dependency install first destroys every

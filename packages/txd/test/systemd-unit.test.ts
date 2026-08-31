@@ -40,7 +40,7 @@ describe('systemd/txd.service pins', () => {
   // every caller reading that return as readiness is wrong.
   test('the start job completes on the daemon\'s own serving edge', () => {
     expect(lines.filter((line) => line.startsWith('Type='))).toEqual(['Type=notify']);
-    pin('NotifyAccess=main');
+    pin('NotifyAccess=all');
   });
 
   test('missing config skips the unit via ConditionPathExists — no crashloop', () => {

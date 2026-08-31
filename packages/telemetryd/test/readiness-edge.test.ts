@@ -10,7 +10,7 @@ const daemon = await Bun.file(new URL("../src/daemon.ts", import.meta.url).pathn
 describe("telemetryd readiness edge", () => {
   test("signals after the ingress is serving, never before", () => {
     const listening = daemon.indexOf('event: "listening"');
-    const signal = daemon.indexOf("notifyReady()");
+    const signal = daemon.indexOf('notifySystemd("ready")');
     expect(listening).toBeGreaterThan(-1);
     expect(signal).toBeGreaterThan(listening);
   });

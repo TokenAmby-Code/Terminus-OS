@@ -1,5 +1,5 @@
 import { DEFAULT_DB_CONFIG, describeEndpoint } from "@terminus-os/db";
-import { notifyReady } from "@terminus-os/systemd";
+import { notifySystemd } from "@tokenamby-code/stc-contract/systemd-notify";
 import { PostgresObservationStore } from "@tokenamby-code/stc-contract/observation";
 import { SERVICE_VERSION } from "./identity.ts";
 import { makeServer } from "./server.ts";
@@ -39,7 +39,7 @@ console.log(JSON.stringify({ level: "info", event: "listening", service: "teleme
 // start job, so `systemctl restart telemetryd.service` returns here rather than
 // at fork — which is what makes a deploy leg's restart a readiness fact instead
 // of a fork fact.
-notifyReady();
+await notifySystemd("ready");
 
 async function shutdown(): Promise<void> {
   await server.stop();

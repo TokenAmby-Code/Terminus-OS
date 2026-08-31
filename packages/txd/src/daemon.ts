@@ -2,7 +2,7 @@
 // Source-run under Bun, no build step. systemd user unit owns the process.
 
 import { describeEndpoint } from '@terminus-os/db';
-import { notifyReady } from '@terminus-os/systemd';
+import { notifySystemd } from '@tokenamby-code/stc-contract/systemd-notify';
 import { PostgresObservationStore } from '@tokenamby-code/stc-contract/observation';
 import { loadConfig } from './config.ts';
 import { PostgresEventStore } from './store.ts';
@@ -169,7 +169,7 @@ console.log(
 // surface an operator reads to see that the estate is what is wrong. The rung
 // below already treats an unresolved estate as a legitimate state rather than
 // a failure.
-notifyReady();
+await notifySystemd('ready');
 
 // Stand the canonical persistent estate declaratively (rung 2). A predecessor
 // topology deliberately left in place for an operator-owned rotation remains
@@ -199,6 +199,7 @@ if (est === null) {
 }
 
 async function shutdown() {
+  await notifySystemd('stopping');
   // Graceful, but bounded: let in-flight requests finish, yet never let a stuck
   // request block termination — close the store and exit after 5s regardless.
   const failures: unknown[] = [];

@@ -51,7 +51,7 @@ test('inspect accepts the current STC envelope through an additive funnel mouth'
   const envelope = {
     identity: { service: 'txd', daemon: 'txd', cli: 'tx' },
     version: '0.1.0',
-    stc_version: '1.4.1',
+    stc_version: '1.5.1',
     machine: 'k12-personal',
     probes: [probe],
     holdings: [],
