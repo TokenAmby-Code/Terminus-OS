@@ -51,6 +51,7 @@ import {
 } from '@terminus-os/contracts';
 import { WrapperStartHookSchema } from '@tokenamby-code/agent-contract/agent';
 import { commFrameTokens } from './comm-frame.ts';
+import { CommTargetUnresolvableError } from './comm-identity.ts';
 import type { CommAdmission, Daemon } from './core.ts';
 import { EnvelopeInventoryError } from './envelopes.ts';
 import { ProjectionMismatchError } from './event-log-compaction.ts';
@@ -326,6 +327,15 @@ export function buildRoutes(
           });
           return json(await admission);
         } catch (error) {
+          if (error instanceof CommTargetUnresolvableError) {
+            return json({
+              ok: false,
+              error: error.code,
+              attempted_target: error.attemptedTarget,
+              softened_forms: error.softenedForms,
+              refusal_event_id: error.refusalEventId,
+            }, 422);
+          }
           const detail = error instanceof Error ? error.message : String(error);
           return json({ ok: false, error: 'comm_refused', detail }, 422);
         }

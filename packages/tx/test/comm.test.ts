@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { runCli, type CliDependencies } from '../src/cli.ts';
+import { createClient } from '../src/client.ts';
 
 const testTimezone = async () => 'America/Phoenix';
 
@@ -205,6 +206,40 @@ test('behavioral pin: comm admission refusal exits non-zero without requesting a
     expect(calls).toEqual(['/agents/comm']);
     expect(JSON.parse(stdout[0]!)).toEqual({ ok: false, error: 'Unable to connect', bytes_sent: 0 });
   } finally {
+    if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('behavioral pin: an unresolvable comm target exits non-zero and prints the typed refusal', async () => {
+  const old = process.env.AGENT_ID;
+  process.env.AGENT_ID = 'source';
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    fetch: () => Response.json({
+      ok: false,
+      error: 'comm_target_unresolvable',
+      attempted_target: 'imperial-fists',
+      softened_forms: ['imperial-fists'],
+      refusal_event_id: 100829,
+    }, { status: 422 }),
+  });
+  try {
+    expect(await runCli(['comm', 'imperial-fists', 'ping'], {
+      request: createClient(`http://127.0.0.1:${server.port}`),
+      stdout: (line) => stdout.push(line),
+      stderr: (line) => stderr.push(line),
+      timezone: testTimezone,
+    })).toBe(1);
+    expect(stdout).toEqual([]);
+    expect(stderr).toHaveLength(1);
+    expect(stderr[0]).toContain('comm_target_unresolvable');
+    expect(stderr[0]).toContain('imperial-fists');
+    expect(stderr[0]).toContain('100829');
+  } finally {
+    server.stop(true);
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }
 });

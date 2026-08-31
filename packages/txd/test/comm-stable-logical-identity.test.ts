@@ -76,10 +76,11 @@ test('a stable perpetual identity cannot snapshot a retired occupant', async () 
     message: 'must have no transport effect',
     ask: false,
     reply: false,
-  })).rejects.toThrow('identity_absent: council:pax');
+  })).rejects.toThrow('comm_target_unresolvable: pax; softened_forms=["pax","council:pax"]');
 
   const events = await store.readAll();
   expect(events.some((event) => event.event_type === 'reg.comm_target_snapshotted')).toBeFalse();
+  expect(events.some((event) => String(event.event_type) === 'reg.comm_refused')).toBeTrue();
   expect(tmux.sends('council:pax')).toEqual([]);
 });
 

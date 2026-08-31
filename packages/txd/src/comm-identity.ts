@@ -31,9 +31,10 @@
 // widen what reaches a seat.
 //
 // Softness is not guessing. A bare name the roster does not carry is left
-// exactly as the caller sent it, to meet the same loud `identity_absent`
-// refusal any other unknown identity meets; a bare name the roster carries
-// twice refuses loudly here and names both candidates rather than pick one.
+// exactly as the caller sent it, so the daemon can record the terminal
+// `comm_target_unresolvable` refusal with the caller spelling and all softened
+// forms tried; a bare name the roster carries twice refuses loudly here and
+// names both candidates rather than pick one.
 
 import { TXD_WINDOWS } from './estate.ts';
 
@@ -55,6 +56,19 @@ export type AcceptedCommIdentity =
   | { kind: 'stable_seat'; seat_id: string }
   | { kind: 'binding'; identity: string };
 
+export class CommTargetUnresolvableError extends Error {
+  readonly code = 'comm_target_unresolvable';
+
+  constructor(
+    readonly attemptedTarget: string,
+    readonly softenedForms: string[],
+    readonly refusalEventId: number,
+  ) {
+    super(`comm_target_unresolvable: ${attemptedTarget}; softened_forms=${JSON.stringify(softenedForms)}`);
+    this.name = 'CommTargetUnresolvableError';
+  }
+}
+
 export function acceptCommIdentity(
   raw: string,
   roster: readonly string[] = COUNCIL_ROSTER,
@@ -66,4 +80,14 @@ export function acceptCommIdentity(
     throw new Error(`identity_ambiguous: ${raw} — names seats ${seats.join(', ')}; address one by its seat id`);
   }
   return { kind: 'stable_seat', seat_id: seats[0]! };
+}
+
+/** The caller spelling and every distinct canonical form the funnel tried. */
+export function commIdentitySoftenedForms(
+  raw: string,
+  accepted: AcceptedCommIdentity,
+): string[] {
+  const forms = new Set([raw, raw.toLowerCase()]);
+  if (accepted.kind === 'stable_seat') forms.add(accepted.seat_id);
+  return [...forms];
 }
