@@ -7,6 +7,7 @@ if (event !== 'window-resized' && event !== 'window-layout-changed') process.exi
 
 const target = 'main:=council';
 const lock = 'txd-council-reflow';
+const dimensionsWitness = '@txd_council_geometry_dimensions';
 
 function tmux(args: string[]): string | null {
   const result = Bun.spawnSync(['tmux', ...args], { stdout: 'pipe', stderr: 'ignore' });
@@ -33,6 +34,8 @@ function reflow(): void {
     const width = Number(rawWidth);
     const height = Number(rawHeight);
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 7) return;
+    const observedDimensions = `${width}x${height}`;
+    if (tmux(['show-options', '-wv', '-t', target, dimensionsWitness]) === observedDimensions) return;
 
     const zoomed = tmux(['display-message', '-p', '-t', target, '#{window_zoomed_flag}']) === '1';
     const focusedPane = zoomed ? tmux(['display-message', '-p', '-t', target, '#{pane_id}']) : null;
@@ -59,9 +62,10 @@ function reflow(): void {
       if (tmux(['select-layout', '-t', target, layout]) === null) return;
       if (zoomed && focusedPane) {
         if (tmux(['select-pane', '-t', focusedPane]) === null) return;
-        tmux(['resize-pane', '-Z', '-t', focusedPane]);
+        if (tmux(['resize-pane', '-Z', '-t', focusedPane]) === null) return;
       }
     }
+    tmux(['set-option', '-w', '-t', target, dimensionsWitness, observedDimensions]);
   } finally {
     tmux(['wait-for', '-U', lock]);
   }

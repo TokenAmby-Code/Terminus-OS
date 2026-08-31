@@ -21,20 +21,9 @@ async function tmux(socket: string, ...args: string[]): Promise<string> {
   // source-tree fixtures must keep their disposable hooks on the candidate
   // script or an older installed reflow can mutate the test server.
   if (args.includes('start-server')) {
-    // Geometry-divergence specimens deliberately move a border and must stay
-    // observable until RealTmux evaluates them. Production config owns the
-    // automatic layout-change hook; these fixtures exercise reflow explicitly.
-    const unsetLayoutHook = Bun.spawn(['tmux', '-L', socket, 'set-hook', '-gu', 'window-layout-changed'], {
-      stdout: 'ignore', stderr: 'pipe',
-    });
-    const [unsetStderr, unsetCode] = await Promise.all([
-      new Response(unsetLayoutHook.stderr).text(), unsetLayoutHook.exited,
-    ]);
-    if (unsetCode !== 0) {
-      throw new Error(`disposable tmux hook removal failed: window-layout-changed: ${unsetStderr.trim()}`);
-    }
     const hooks: Array<[string, string]> = [
       ['window-resized', `run-shell -b "${reflowCouncil} window-resized"`],
+      ['window-layout-changed', `run-shell -b "${reflowCouncil} window-layout-changed"`],
     ];
     for (const [hook, command] of hooks) {
       const installed = Bun.spawn(['tmux', '-L', socket, 'set-hook', '-g', hook, command], {

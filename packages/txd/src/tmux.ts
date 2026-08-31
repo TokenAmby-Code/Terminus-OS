@@ -1044,6 +1044,11 @@ export class RealTmux implements TmuxControlPlane {
       'apply council geometry',
       'council',
     );
+    await this.checked(
+      ['set-option', '-w', '-t', target, '@txd_council_geometry_dimensions', `${width}x${height}`],
+      'record council geometry dimensions',
+      'council',
+    );
   }
 
   /**
