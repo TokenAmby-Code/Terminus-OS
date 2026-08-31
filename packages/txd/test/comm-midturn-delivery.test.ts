@@ -1,5 +1,5 @@
-// Behavioral-pin lane: mid-turn comm delivery truth is the staged transport
-// fact joined with engine attestation. A frame staged into a WORKING engine
+// Behavioral-pin lane: mid-turn delivery is asserted from staged transport;
+// engine engagement remains an independent observation. A WORKING engine
 // produces no UserPromptSubmit (live specimens 994854e0, b9c1ca52, 2a243960;
 // e5757301 pinned the send-time observation racing the busy engine's repaint),
 // so the join reads its evidence when the target's own stop lands: the engine
@@ -42,7 +42,7 @@ async function targetWorking(store: MemoryEventStore) {
   });
 }
 
-test('behavioral pin: a mid-turn staged frame absent from the composer at the target stop asserts delivery', async () => {
+test('behavioral pin: a mid-turn staged frame is delivered at injection and observed at target stop', async () => {
   const { store, tmux, daemon } = await rig();
   await targetWorking(store);
 
@@ -55,9 +55,7 @@ test('behavioral pin: a mid-turn staged frame absent from the composer at the ta
     reply: false,
   });
   expect(accepted.staged).toBe(true);
-  // No UserPromptSubmit fires for a frame queued into a working session; the
-  // receipt alone never means delivered.
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 
   // At the stop the engine paints its idle composer, the frame long consumed.
   tmux.setPaneText('palace:W', IDLE_COMPOSER);
@@ -67,7 +65,7 @@ test('behavioral pin: a mid-turn staged frame absent from the composer at the ta
   const delivery = await daemon.commDelivery(accepted.message_id);
   expect(delivery.complete).toBe(true);
   const assertion = (await store.readAll()).find((event) =>
-    event.event_type === 'act.comm_delivery_asserted'
+    event.event_type === 'act.comm_observed'
     && event.payload.message_id === accepted.message_id);
   expect(assertion?.payload).toMatchObject({
     message_id: accepted.message_id,
@@ -77,7 +75,7 @@ test('behavioral pin: a mid-turn staged frame absent from the composer at the ta
   });
 });
 
-test('behavioral pin: the stop join cannot assert for a receiver absent from the target snapshot', async () => {
+test('behavioral pin: the stop join cannot observe a receiver absent from the target snapshot', async () => {
   const { store, tmux, daemon } = await rig();
   await targetWorking(store);
   const messageId = crypto.randomUUID();
@@ -109,7 +107,7 @@ test('behavioral pin: the stop join cannot assert for a receiver absent from the
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   expect((await store.readAll()).filter((event) =>
-    event.event_type === 'act.comm_delivery_asserted'
+    event.event_type === 'act.comm_observed'
     && event.payload.message_id === messageId)).toEqual([]);
 });
 
@@ -138,7 +136,7 @@ test('behavioral pin: the bytes-sent receipt records the target turn at send', a
   });
 });
 
-test('behavioral pin: a frame the first stop could not clear asserts on a later fresh stop that can', async () => {
+test('behavioral pin: a frame the first stop could not observe is observed on a later fresh stop that can', async () => {
   const { store, tmux, daemon } = await rig();
   await targetWorking(store);
   const accepted = await daemon.comm({
@@ -152,7 +150,8 @@ test('behavioral pin: a frame the first stop could not clear asserts on a later 
 
   // First stop: the pane is unobservable — no evidence, no assertion.
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
-  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toEqual([]);
 
   // The engine works again, then stops with the frame verifiably gone.
   await targetWorking(store);
@@ -160,6 +159,7 @@ test('behavioral pin: a frame the first stop could not clear asserts on a later 
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toHaveLength(1);
   const receipts = (await store.readAll()).filter((event) =>
     event.event_type === 'act.comm_bytes_sent' && event.entity_id === accepted.message_id);
   expect(receipts).toHaveLength(1); // reconciled to confirmed with no duplicate send
@@ -182,7 +182,7 @@ test('behavioral pin: the idle-target UserPromptSubmit hook join is unchanged', 
     comm_tokens: [commTokenForMessageId(accepted.message_id)],
   });
 
-  expect(hook.asserted).toEqual([accepted.message_id]);
+  expect(hook.observed).toEqual([accepted.message_id]);
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 });
 
@@ -207,7 +207,7 @@ test('behavioral pin: a hook-asserted delivery is not re-asserted by the later s
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   const assertions = (await store.readAll()).filter((event) =>
-    event.event_type === 'act.comm_delivery_asserted'
+    event.event_type === 'act.comm_observed'
     && event.payload.message_id === accepted.message_id);
   expect(assertions).toHaveLength(1);
 });

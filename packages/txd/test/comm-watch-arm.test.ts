@@ -292,7 +292,7 @@ test('behavioral pin: every new ordinary message receipt is typed while historic
   expect((await store.readAll()).find((event) => event.entity_id === 'historical')?.payload.kind).toBeUndefined();
 });
 
-test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on its submit hook', async () => {
+test('behavioral pin: a multi-KB opaque comm asserts at injection and is later observed on submit', async () => {
   const { store, tmux, d } = await fixture(async () => undefined);
   const message = `first line\n${"quoted='yes' Unicode Ω 漢字 🛡️\n".repeat(256)}last line`;
 
@@ -313,7 +313,7 @@ test('behavioral pin: a multi-KB opaque comm stages whole and asserts only on it
       rendered_frame: expectedFrame,
       submit_verdict: 'staged',
     });
-  expect((await d.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(true);
 
   await d.promptSubmitted({
     schema_version: SCHEMA_VERSION,
@@ -341,7 +341,7 @@ test('behavioral pin: prompt-submit admission cannot wait behind composer stagin
       content: frame,
     });
     hookReturned = true;
-    expect(result.asserted).toEqual([]);
+    expect(result.observed).toEqual([]);
     return { bytes: Buffer.byteLength(frame), verdict: 'staged' as const };
   };
 
@@ -525,7 +525,7 @@ test('behavioral pin: a hook that beats the staged receipt still asserts the int
 // message that was never submitted — the exact `UserPromptSubmit` join has to
 // stay one-to-one. An ambiguous hook is non-delivery evidence: it asserts
 // nothing and consumes nothing.
-test('behavioral pin: identical intent frames to one target assert neither without a unique witness', async () => {
+test('behavioral pin: identical intent frames are delivered but neither is observed without a unique witness', async () => {
   const { store, tmux, d } = await fixture(async () => undefined);
   await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
   const rendered = '/compact hard';
@@ -545,9 +545,10 @@ test('behavioral pin: identical intent frames to one target assert neither witho
     schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: [], content: rendered,
   })).rejects.toThrow('message_target_mismatch');
 
-  expect((await d.commDelivery(first)).complete).toBe(false);
-  expect((await d.commDelivery(second)).complete).toBe(false);
-  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(0);
+  expect((await d.commDelivery(first)).complete).toBe(true);
+  expect((await d.commDelivery(second)).complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(2);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toHaveLength(0);
 });
 
 // Uniqueness has to be a stable property of the accepted intents, not of the
@@ -556,7 +557,7 @@ test('behavioral pin: identical intent frames to one target assert neither witho
 // identical intents asserts, the second becomes the only survivor, and the
 // spent hook that named the first then reads as a unique witness for a message
 // the engine never submitted. A hook is spent once it has asserted.
-test('behavioral pin: a spent intent hook does not assert the next identical intent', async () => {
+test('behavioral pin: a spent intent hook does not observe the next identical intent', async () => {
   const { store, tmux, d } = await fixture(async () => undefined);
   await bindEngine(store, tmux, 'palace:W', 'worker', 'claude');
   const rendered = '/compact hard';
@@ -583,8 +584,9 @@ test('behavioral pin: a spent intent hook does not assert the next identical int
 
   const second = await send();
 
-  expect((await d.commDelivery(second)).complete).toBe(false);
-  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+  expect((await d.commDelivery(second)).complete).toBe(true);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(2);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toHaveLength(1);
 });
 
 // ── Delivery attempts first: a gate TRANSPORT failure is not a verdict ──────
@@ -615,10 +617,9 @@ test('a gate transport failure with an observed-interactive composer attempts de
   const accepted = await d.comm({ schema_version: SCHEMA_VERSION, source_agent_id: 'sender', target: 'worker', message: 'attempted first', ask: false, reply: false });
 
   expect(tmux.sends('palace:W').length).toBe(1); // the bytes were attempted
-  // …and nothing is claimed that was not observed: no hook fact arrived, so
-  // the delivery remains unasserted.
-  expect((await d.commDelivery(accepted.message_id)).complete).toBe(false);
-  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted')).toHaveLength(0);
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(true);
+  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
+  expect((await store.readAll()).filter((e) => e.event_type === 'act.comm_observed')).toHaveLength(0);
   const unarmed = (await store.readAll()).filter((e) => e.event_type === 'act.comm_watch_unarmed');
   expect(unarmed.length).toBe(1);
   expect(unarmed[0]!.payload.target_agent_id).toBe('worker');
@@ -654,7 +655,7 @@ test('a gate ceiling expiry after lifecycled owns the watch still attempts deliv
   });
 
   expect(tmux.sends('palace:W')).toHaveLength(1);
-  expect((await d.commDelivery(accepted.message_id)).complete).toBe(false);
+  expect((await d.commDelivery(accepted.message_id)).complete).toBe(true);
   // A client-side response ceiling is not evidence that the server-side watch
   // is unarmed. Do not turn absence of the final HTTP answer into that claim.
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_watch_unarmed')).toEqual([]);

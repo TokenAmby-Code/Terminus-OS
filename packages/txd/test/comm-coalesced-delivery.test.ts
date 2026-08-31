@@ -96,11 +96,11 @@ test('every message in a coalesced flush gets its own delivery fact', async () =
   const { d, send, asserted } = await fixture();
   const first = await send('dispatch brief');
   const second = await send('status request');
-  expect(await asserted()).toEqual([]);
+  expect(await asserted()).toEqual([first, second]);
 
   const result = await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([first, second]) });
 
-  expect(result.asserted).toEqual([first, second]);
+  expect(result.observed).toEqual([first, second]);
   expect(await asserted()).toEqual([first, second]);
 });
 
@@ -112,7 +112,7 @@ test('re-delivery of the same flush adds nothing — the assertion is idempotent
 
   const again = await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([first, second]) });
 
-  expect(again.asserted).toEqual([]);
+  expect(again.observed).toEqual([]);
   expect(await asserted()).toEqual([first, second]);
 });
 
@@ -164,7 +164,7 @@ test('a busy sender leaves no parked confirmation and hook replay dedupes withou
 
   senderInteractive = true;
   await expect(d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([messageId]) }))
-    .resolves.toMatchObject({ asserted: [] });
+    .resolves.toMatchObject({ observed: [] });
 
   events = await store.readAll();
   expect(events.filter((event) => event.event_type === 'act.comm_delivery_asserted')).toHaveLength(1);
@@ -172,7 +172,7 @@ test('a busy sender leaves no parked confirmation and hook replay dedupes withou
     && event.payload.input_class === 'delivery_confirmation').map((event) => event.payload.submit_verdict))
     .toEqual(['transport_failed']);
   expect(events.filter((event) => event.event_type === 'act.receipt_deduped'
-    && event.payload.of === 'comm_delivery_asserted'
+    && event.payload.of === 'comm_observed'
     && event.payload.message_id === messageId)).toHaveLength(1);
   expect(confirmationAttempts).toBe(1);
   expect(fakeTmux.sends('council:custodes')).toEqual([]);
@@ -187,7 +187,7 @@ test("a frame addressed to someone else is skipped in silence, and does not cost
     comm_tokens: tokens(['00000000-0000-4000-8000-000000000000', mine]),
   });
 
-  expect(result.asserted).toEqual([mine]);
+  expect(result.observed).toEqual([mine]);
   expect(await asserted()).toEqual([mine]);
 });
 
@@ -207,8 +207,8 @@ test('delivery is readable per target, and says so only once the fact exists', a
   const messageId = await send('brief');
 
   const before = await d.commDelivery(messageId);
-  expect(before.complete).toBe(false);
-  expect(before.deliveries).toMatchObject([{ delivered: false, asserted_at: null, assertion_event_id: null }]);
+  expect(before.complete).toBe(true);
+  expect(before.deliveries).toMatchObject([{ delivered: true }]);
   expect(before.deliveries[0]!.target.seat_id).toBe('palace:W');
 
   await d.promptSubmitted({ schema_version: SCHEMA_VERSION, agent_id: 'worker', comm_tokens: tokens([messageId]) });

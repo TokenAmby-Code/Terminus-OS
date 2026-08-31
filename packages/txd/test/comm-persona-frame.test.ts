@@ -136,20 +136,20 @@ test('the receiving join redeems a token only for its exact snapshotted receiver
     agent_id: 'other-id',
     comm_tokens: [token],
   })).rejects.toThrow('message_target_mismatch');
-  expect((await d.commDelivery(accepted.message_id)).complete).toBeFalse();
+  expect((await d.commDelivery(accepted.message_id)).complete).toBeTrue();
 
   await expect(d.promptSubmitted({
     schema_version: SCHEMA_VERSION,
     agent_id: 'worker-id',
     comm_tokens: ['AAAAAAAAAAAAAAAAAAAAAA'],
   })).rejects.toThrow('message_target_mismatch');
-  expect((await d.commDelivery(accepted.message_id)).complete).toBeFalse();
+  expect((await d.commDelivery(accepted.message_id)).complete).toBeTrue();
 
   await expect(d.promptSubmitted({
     schema_version: SCHEMA_VERSION,
     agent_id: 'worker-id',
     comm_tokens: [token],
-  })).resolves.toMatchObject({ asserted: [accepted.message_id] });
+  })).resolves.toMatchObject({ observed: [accepted.message_id] });
 });
 
 test('a receiver the target snapshot does not carry redeems nothing, even when the accepted fact names it', async () => {
@@ -202,5 +202,5 @@ test('concurrent comms receive distinct tokens and one coalesced hook asserts bo
     agent_id: 'worker-id',
     comm_tokens: tokens,
   });
-  expect(result.asserted).toEqual([first.message_id, second.message_id]);
+  expect(result.observed).toEqual([first.message_id, second.message_id]);
 });

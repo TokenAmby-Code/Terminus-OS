@@ -36,6 +36,7 @@ DELETE FROM txd.events
    'act.comm_bytes_sent',
    'act.agent_input_injected',
    'act.comm_delivery_asserted',
+   'act.comm_observed',
    'act.comm_delivery_confirmation_dead_lettered',
    'act.comm_delivery_failed',
    'act.comm_submit_driven',

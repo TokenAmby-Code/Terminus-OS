@@ -1856,6 +1856,26 @@ export class Daemon {
             }, provenance: this.prov('observer', transportReceipt), occurred_at: this.now() });
           event_ids.push(event.seq);
           allStaged &&= sent.verdict === 'staged';
+          if (sent.verdict === 'staged') {
+            const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
+            const events = await this.events();
+            if (!events.some((candidate) => candidate.entity_id === assertionId
+              && candidate.event_type === 'act.comm_delivery_asserted')) {
+              const assertion = await this.store.append({
+                entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+                payload: {
+                  message_id: prepared.messageId,
+                  target_agent_id: plan.target.agent_id,
+                  receiving_agent_id: plan.target.agent_id,
+                  source_agent_id: req.source_agent_id,
+                  transport_receipt_seq: event.seq,
+                },
+                provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+              });
+              event_ids.push(assertion.seq);
+              this.wakeDelivery(prepared.messageId);
+            }
+          }
           // The lost-Enter watch (live specimen 29fb6cc0). tmux exit 0 proves
           // the Enter was handed to the pane, never that the engine consumed
           // it. A staged frame in an AWAITING_INPUT engine whose Enter had no
@@ -1885,20 +1905,20 @@ export class Daemon {
             // rendered frame is the only thing that names it. Enter is driven
             // outside the journal mutex, so that hook can land before this
             // receipt exists — the hook then sees no staged transport and
-            // declines, and matching here by message id alone would lose the
-            // delivery with both facts present.
+            // declines, and this post-receipt join preserves the engine
+            // observation when both facts are present.
             //
             // But a frame names an intent only while ONE intent carries it. Two
             // identical sends to one target share it byte for byte, and reading
-            // such a hook as this message's would assert a delivery the engine
-            // never made. The frame arm therefore holds only while this message
+            // such a hook as this message's would record an observation the
+            // engine never made. The frame arm therefore holds only while this message
             // is the single intent wearing that frame for that target; ambiguity
-            // falls back to the message-id join and stays undelivered.
+            // falls back to the message-id join and stays unobserved.
             //
             // Uniqueness counts every ACCEPTED intent with that frame, including
-            // ones already delivered. Counting only the undelivered would let the
+            // ones already delivered. Counting only the unobserved would let the
             // set shrink as deliveries land: the first of two identical intents
-            // asserts, the second becomes the lone survivor, and the spent hook
+            // is observed, the second becomes the lone survivor, and the spent hook
             // that named the first would then read as a unique witness for a
             // message the engine never submitted.
             const intentFrame = prepared.renderedIntent?.frame;
@@ -1918,20 +1938,21 @@ export class Daemon {
                   && typeof candidate.payload.content === 'string'
                   && candidate.payload.content.includes(plan.frame))
                 || (frameNamesThisMessage && candidate.payload.content === intentFrame)));
-            const assertionId = `${prepared.messageId}:${plan.target.agent_id}`;
-            if (submitted && !events.some((candidate) => candidate.entity_id === assertionId
-              && candidate.event_type === 'act.comm_delivery_asserted')) {
-              const assertion = await this.store.append({
-                entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+            const observationId = `comm-observed:${prepared.messageId}:${plan.target.agent_id}`;
+            if (submitted && !events.some((candidate) => candidate.entity_id === observationId
+              && candidate.event_type === 'act.comm_observed')) {
+              const observation = await this.store.append({
+                entity_type: 'assertion', entity_id: observationId, event_type: 'act.comm_observed',
                 payload: {
                   message_id: prepared.messageId,
                   target_agent_id: plan.target.agent_id,
+                  receiving_agent_id: plan.target.agent_id,
                   source_agent_id: req.source_agent_id,
+                  attestation: 'prompt_submitted_before_receipt',
                 },
-                provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+                provenance: this.prov('hook', transportReceipt), occurred_at: this.now(),
               });
-              event_ids.push(assertion.seq);
-              this.wakeDelivery(prepared.messageId);
+              event_ids.push(observation.seq);
             }
           }
         }
@@ -1974,10 +1995,9 @@ export class Daemon {
    * pane generation, the target still at rest (a capture against a busy
    * engine proves nothing, specimen e5757301) — and then only when the tmux
    * plane observes the exact staged frame intact in the at-rest composer.
-   * Driving Enter there completes the transport transaction that staged the
-   * frame; delivery is still asserted exclusively by the engine's own
-   * UserPromptSubmit. Every other observation is a zero-effect refusal that
-   * leaves the message honestly undelivered.
+   * Driving Enter there completed the old engine-coupled transaction. Under
+   * transport assertions an already staged receipt is already delivered, so
+   * this guard refuses the obsolete recovery action with zero effect.
    */
   private async completeLostEnter(arm: LostEnterArm): Promise<void> {
     const go = await this.locked(async () => {
@@ -2335,6 +2355,44 @@ export class Daemon {
     return drain;
   }
 
+  /**
+   * Deploy reconciliation for the assertion-vocabulary split. A successful
+   * staged receipt is txd's durable injection witness, including receipts
+   * written by an older daemon that still waited for engine pickup. Refused
+   * deliveries are terminal history and are never rewritten.
+   */
+  private async reconcileInjectedCommDeliveries(): Promise<void> {
+    const events = await this.events();
+    for (const receipt of events) {
+      if (receipt.event_type !== 'act.comm_bytes_sent'
+        || receipt.payload.submit_verdict !== 'staged') continue;
+      const messageId = receipt.entity_id;
+      const targetAgentId = receiptDeliveryTargetAgentId(receipt);
+      const assertionId = `${messageId}:${targetAgentId}`;
+      if (events.some((event) => event.entity_id === assertionId
+        && event.event_type === 'act.comm_delivery_asserted')) continue;
+      if (events.some((event) => event.event_type === 'act.comm_delivery_failed'
+        && event.payload.message_id === messageId
+        && event.payload.target_agent_id === targetAgentId)) continue;
+      const accepted = events.find((event) => event.entity_id === messageId
+        && event.event_type === 'reg.comm_accepted');
+      if (!accepted) continue;
+      await this.store.append({
+        entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+        payload: {
+          message_id: messageId,
+          target_agent_id: targetAgentId,
+          receiving_agent_id: receipt.payload.target_agent_id,
+          source_agent_id: accepted.payload.source_agent_id,
+          transport_receipt_seq: receipt.seq,
+          reconciliation: true,
+        },
+        provenance: this.prov('observer', null), occurred_at: this.now(),
+      });
+      this.wakeDelivery(messageId);
+    }
+  }
+
   private nextPendingCommRedelivery(
     attempted: ReadonlySet<string>,
   ): Promise<PendingCommRedelivery | null> {
@@ -2453,29 +2511,45 @@ export class Daemon {
         });
         if (sent.verdict === 'staged') {
           const afterReceipt = await this.events();
+          const assertionId = `${pending.messageId}:${pending.deliveryTarget.agent_id}`;
+          if (!afterReceipt.some((event) => event.entity_id === assertionId
+            && event.event_type === 'act.comm_delivery_asserted')) {
+            await this.store.append({
+              entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+              payload: {
+                message_id: pending.messageId,
+                target_agent_id: pending.deliveryTarget.agent_id,
+                receiving_agent_id: pending.binding.agent_id,
+                source_agent_id: pending.sourceAgentId,
+                redelivery: true,
+              },
+              provenance: this.prov('observer', null), occurred_at: this.now(),
+            });
+            this.wakeDelivery(pending.messageId);
+          }
           const submitted = afterReceipt.some((event) => event.event_type === 'act.prompt_submitted'
             && event.payload.agent_id === pending.binding.agent_id
             && ((Array.isArray(event.payload.message_ids)
                 && event.payload.message_ids.includes(pending.messageId))
               || (typeof event.payload.content === 'string'
                 && event.payload.content.includes(pending.frame))));
-          const assertionId = `${pending.messageId}:${pending.deliveryTarget.agent_id}`;
-          if (submitted && !afterReceipt.some((event) => event.entity_id === assertionId
-            && event.event_type === 'act.comm_delivery_asserted')) {
+          const observationId = `comm-observed:${pending.messageId}:${pending.deliveryTarget.agent_id}`;
+          if (submitted && !afterReceipt.some((event) => event.entity_id === observationId
+            && event.event_type === 'act.comm_observed')) {
             await this.store.append({
               entity_type: 'assertion',
-              entity_id: assertionId,
-              event_type: 'act.comm_delivery_asserted',
+              entity_id: observationId,
+              event_type: 'act.comm_observed',
               payload: {
                 message_id: pending.messageId,
                 target_agent_id: pending.deliveryTarget.agent_id,
                 receiving_agent_id: pending.binding.agent_id,
                 source_agent_id: pending.sourceAgentId,
+                attestation: 'prompt_submitted_before_receipt',
               },
-              provenance: this.prov('observer', null),
+              provenance: this.prov('hook', null),
               occurred_at: this.now(),
             });
-            this.wakeDelivery(pending.messageId);
           }
         }
       });
@@ -2530,7 +2604,7 @@ export class Daemon {
   // of belongs to someone else's correspondence and is skipped in silence; only
   // a flush that matched NOTHING is a refusal, so an ordinary prompt still
   // fails deterministically instead of wedging the lane.
-  promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; asserted: string[]; dead_lettered: string[] }> {
+  promptSubmitted(hook: CommHook, receipt: string | null = null): Promise<{ ok: true; observed: string[]; dead_lettered: string[] }> {
     return this.locked(async () => {
       // The hook names frames by their compact comm tokens — the only identity
       // the frame carries. The event stream records canonical ids, so each
@@ -2559,7 +2633,7 @@ export class Daemon {
         provenance: this.prov('hook', receipt), occurred_at: this.now(),
       });
       const events = await this.events();
-      const asserted: string[] = [];
+      const observed: string[] = [];
       const matchedMessageIds: string[] = [];
       const confirmations = new Map<string, string[]>();
       let matched = false;
@@ -2605,16 +2679,16 @@ export class Daemon {
         if (!deliveryTarget) continue;
         matched = true;
         if (stagedReceipts.length === 0) continue;
-        const assertionId = `${messageId}:${deliveryTarget.agent_id}`;
-        if (events.some((event) => event.entity_id === assertionId
-          && event.event_type === 'act.comm_delivery_asserted')) {
+        const observationId = `comm-observed:${messageId}:${deliveryTarget.agent_id}`;
+        if (events.some((event) => event.entity_id === observationId
+          && event.event_type === 'act.comm_observed')) {
           await this.store.append({
             entity_type: 'assertion',
-            entity_id: assertionId,
+            entity_id: observationId,
             event_type: 'act.receipt_deduped',
             payload: {
-              of: 'comm_delivery_asserted',
-              reason: 'already_asserted',
+              of: 'comm_observed',
+              reason: 'already_observed',
               message_id: messageId,
               target_agent_id: deliveryTarget.agent_id,
               receiving_agent_id: hook.agent_id,
@@ -2625,15 +2699,14 @@ export class Daemon {
           continue;
         }
         matchedMessageIds.push(messageId);
-        await this.store.append({ entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+        await this.store.append({ entity_type: 'assertion', entity_id: observationId, event_type: 'act.comm_observed',
           payload: {
             message_id: messageId,
             target_agent_id: deliveryTarget.agent_id,
             receiving_agent_id: hook.agent_id,
             source_agent_id: accepted.payload.source_agent_id,
           }, provenance: this.prov('hook', receipt), occurred_at: this.now() });
-        asserted.push(messageId);
-        this.wakeDelivery(messageId);
+        observed.push(messageId);
         const sourceAgentId = String(accepted.payload.source_agent_id);
         const confirmationStaged = events.some((event) => event.event_type === 'act.agent_input_injected'
           && event.payload.input_class === 'delivery_confirmation'
@@ -2690,7 +2763,7 @@ export class Daemon {
           });
           deadLettered.push(messageId);
         }
-        return { ok: true, asserted, dead_lettered: deadLettered };
+        return { ok: true, observed, dead_lettered: deadLettered };
       }
       // One line per sender, not one per message: the confirmation lands in a
       // composer that coalesces exactly like the one it is reporting on, and a
@@ -2712,14 +2785,12 @@ export class Daemon {
           }, provenance: this.prov('observer', receipt), occurred_at: this.now() });
         if (sent.verdict !== 'staged') throw new Error(`delivery_confirmation_not_staged:${sent.verdict}`);
       }
-      return { ok: true, asserted, dead_lettered: [] };
+      return { ok: true, observed, dead_lettered: [] };
     });
   }
 
   // Phase two, read back. The delivery fact for one message and every target it
-  // was snapshotted against, derived from `act.comm_delivery_asserted` alone —
-  // never from the bytes that were staged, which is the conflation this surface
-  // exists to end.
+  // was snapshotted against, derived from the durable transport assertion.
   async commDelivery(messageId: string): Promise<CommDeliveryReadResponse> {
     const events = await this.events();
     const accepted = events.find((e) => e.entity_id === messageId && e.event_type === 'reg.comm_accepted');
@@ -3258,6 +3329,7 @@ export class Daemon {
     });
     await this.announceVacantPerpetualSeats();
     await this.assertOccupancyCensus();
+    await this.locked(() => this.reconcileInjectedCommDeliveries());
     await this.requestCommRedelivery();
     return result;
   }
@@ -3659,7 +3731,7 @@ export class Daemon {
         occurred_at: this.now(),
       });
 
-      // The turn-stop delivery join. A mid-turn comm frame produces NO
+      // The turn-stop observation join. A mid-turn comm frame produces NO
       // UserPromptSubmit — the engine queues it into the running turn (live
       // specimens 994854e0, b9c1ca52, 2a243960) — so the hook join above can
       // never speak for it. The full evidence chain substitutes: the frame was
@@ -3669,7 +3741,7 @@ export class Daemon {
       // — it left it into the queue the finished turn consumed. The capture
       // happens HERE, at the stop, because the engine is at rest: a capture at
       // send time races the busy engine's repaint and proves nothing
-      // (specimen e5757301). Any partial chain stays undelivered — a frame an
+      // (specimen e5757301). Any partial chain stays unobserved — a frame an
       // interrupted turn left painted refuses as frame_present, an invisible
       // composer refuses as unobservable, and a later fresh stop retries with
       // fresh evidence. A deduped or refused stop never reaches this join.
@@ -3686,15 +3758,15 @@ export class Daemon {
           && event.payload.message_id === messageId);
         const snapshotTargets = (snapshot?.payload.targets ?? []) as CommTarget[];
         if (!snapshotTargets.some((target) => target.agent_id === req.agent_id)) continue;
-        const assertionId = `${messageId}:${req.agent_id}`;
-        if (events.some((event) => event.entity_id === assertionId && event.event_type === 'act.comm_delivery_asserted')) continue;
+        const observationId = `comm-observed:${messageId}:${req.agent_id}`;
+        if (events.some((event) => event.entity_id === observationId && event.event_type === 'act.comm_observed')) continue;
         const observation = await this.tmux.observeFrameAbsence(
           String(receipt.payload.seat_id),
           String(receipt.payload.rendered_frame),
         );
         if (observation !== 'frame_absent') continue;
         await this.store.append({
-          entity_type: 'assertion', entity_id: assertionId, event_type: 'act.comm_delivery_asserted',
+          entity_type: 'assertion', entity_id: observationId, event_type: 'act.comm_observed',
           payload: {
             message_id: messageId,
             target_agent_id: req.agent_id,
@@ -3706,7 +3778,6 @@ export class Daemon {
           },
           provenance: this.prov('hook', transportReceipt), occurred_at: this.now(),
         });
-        this.wakeDelivery(messageId);
       }
 
       return { ok: true, agent_id: req.agent_id, recorded: true, deduped: false, turn: 'awaiting_input' };
