@@ -139,11 +139,13 @@ describe('tmux/tx.conf', () => {
     }
   });
 
-  test('defers Council reflow while zoomed and drains it on the zoom-clear command event', () => {
+  test('reflows Council after the window changes without owning operator zoom', () => {
     expect(conf).toContain('set -g window-size latest');
     expect(conf).not.toContain('set -g window-size manual');
-    expect(conf).toContain("set-hook -g client-resized 'run-shell -b \"$HOME/.bun/bin/bun $HOME/.local/lib/terminus-os/txd/packages/txd/tmux/reflow-council client-resized\"'");
-    expect(conf).toContain("set-hook -g after-resize-pane 'run-shell -b \"$HOME/.bun/bin/bun $HOME/.local/lib/terminus-os/txd/packages/txd/tmux/reflow-council after-resize-pane #{window_zoomed_flag}\"'");
+    expect(conf).toContain("set-hook -g window-resized 'run-shell -b \"$HOME/.bun/bin/bun $HOME/.local/lib/terminus-os/txd/packages/txd/tmux/reflow-council window-resized\"'");
+    expect(conf).toContain("set-hook -g window-layout-changed 'run-shell -b \"$HOME/.bun/bin/bun $HOME/.local/lib/terminus-os/txd/packages/txd/tmux/reflow-council window-layout-changed\"'");
+    expect(conf).not.toContain('set-hook -g client-resized');
+    expect(conf).not.toContain('reflow-council after-resize-pane');
   });
 
   test('leaves daemon-owned lifecycle hooks untouched on config reload', () => {
