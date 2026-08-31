@@ -74,9 +74,9 @@ describe("apply leg and installed unit agree", () => {
 
   test("txd: the tx CLI is its own generation, linked through the current pointer", () => {
     const source = read("bin/apply-txd");
-    expect(source).toContain('"$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts');
-    expect(source).toContain('tx_main="$install_root/tx/packages/tx/src/main.ts"');
-    expect(source).toContain('ln -sfn "$tx_main" "$user_bin_dir/tx"');
+    expect(source).toContain('"$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts --launcher tx src/main.ts');
+    expect(source).toContain('tx_launcher="$install_root/tx/bin/tx"');
+    expect(source).toContain('ln -sfn "$tx_launcher" "$user_bin_dir/tx"');
     // The tmux estate loads the same generation's configuration; nothing the
     // estate or the CLI executes points back into the deploy checkout.
     expect(source).toContain('tmux_conf="$install_root/txd/packages/txd/tmux/tx.conf"');
@@ -85,6 +85,12 @@ describe("apply leg and installed unit agree", () => {
     }
     expect(read("packages/txd/systemd/tx-estate.service")).toContain("-f %h/.local/lib/terminus-os/txd/packages/txd/tmux/tx.conf");
     expect(read("packages/txd/tmux/tx.conf")).toContain("$HOME/.local/lib/terminus-os/tx/packages/tx/bin/tx-selection");
+  });
+
+  test("telemetryd: tm links to its baked generation launcher", () => {
+    const source = read("bin/apply-telemetryd");
+    expect(source).toContain('src/daemon.ts --launcher tm src/cli.ts');
+    expect(source).toContain('ln -sfn "$install_root/telemetryd/bin/tm" "$HOME/.local/bin/tm"');
   });
 
   test.each(SERVICES)("$service: the leg carries no restart-control branch", ({ leg }) => {
