@@ -319,6 +319,16 @@ test('behavioral pin: a zero-byte restart interruption redelivers once when tran
   const restarted = new Daemon(store, tmux, undefined, undefined, null, null, async () => {});
   await restarted.constructEstate();
   expect(tmux.sends('council:orchestrator')).toHaveLength(1);
+  expect(await restarted.commDelivery(accepted.message_id)).toMatchObject({
+    deliveries: [{
+      target: {
+        agent_id: REBOUND_TARGET_AGENT,
+        seat_id: 'council:orchestrator',
+        logical_identity: { kind: 'stable_seat', seat_id: 'council:orchestrator' },
+      },
+      delivered: true,
+    }],
+  });
 
   await restarted.promptSubmitted({
     schema_version: SCHEMA_VERSION,
