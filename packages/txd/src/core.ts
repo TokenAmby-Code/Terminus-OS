@@ -2806,8 +2806,13 @@ export class Daemon {
       // stop being the only answer.
       const failure = events.find((e) => e.event_type === 'act.comm_delivery_failed'
         && e.payload.message_id === messageId && e.payload.target_agent_id === target.agent_id);
+      const receivingAgentId = assertion?.payload.receiving_agent_id
+        ?? failure?.payload.receiving_agent_id;
+      const receivingTarget = typeof receivingAgentId === 'string'
+        ? { ...target, agent_id: receivingAgentId }
+        : target;
       return {
-        target, delivered: assertion !== undefined,
+        target: receivingTarget, delivered: assertion !== undefined,
         asserted_at: assertion?.occurred_at ?? null,
         assertion_event_id: assertion?.seq ?? null,
         failed: assertion === undefined && failure !== undefined,
@@ -2840,6 +2845,12 @@ export class Daemon {
         receiptDeliveryTargetAgentId(event),
         Date.parse(String(event.payload.receipt_deadline_at ?? '')),
       ]));
+      for (const event of sent) {
+        const receivingAgentId = event.payload.target_agent_id;
+        if (typeof receivingAgentId === 'string') {
+          deadlineByTarget.set(receivingAgentId, Date.parse(String(event.payload.receipt_deadline_at ?? '')));
+        }
+      }
       const timely = delivery.complete && delivery.deliveries.every((row) => {
         const targetDeadline = deadlineByTarget.get(row.target.agent_id);
         const assertedAt = Date.parse(row.asserted_at ?? '');
