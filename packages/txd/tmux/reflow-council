@@ -2,12 +2,10 @@
 
 import { councilGeometry, TXD_WINDOWS } from '../src/estate.ts';
 
-const event = process.argv[2] ?? 'client-resized';
-const eventZoom = process.argv[3] ?? '';
-if (event !== 'client-resized' && event !== 'after-resize-pane') process.exit(0);
+const event = process.argv[2] ?? 'window-resized';
+if (event !== 'window-resized' && event !== 'window-layout-changed') process.exit(0);
 
 const target = 'main:=council';
-const pending = '@txd_council_reflow_pending';
 const lock = 'txd-council-reflow';
 
 function tmux(args: string[]): string | null {
@@ -36,15 +34,8 @@ function reflow(): void {
     const height = Number(rawHeight);
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 7) return;
 
-    const zoomed = tmux(['display-message', '-p', '-t', target, '#{window_zoomed_flag}']);
-    if (event === 'after-resize-pane') {
-      if (eventZoom !== '0') return;
-      if (tmux(['show-options', '-wv', '-t', target, pending]) !== '1') return;
-      if (zoomed !== '0') return;
-    } else if (zoomed === '1') {
-      tmux(['set-option', '-w', '-t', target, pending, '1']);
-      return;
-    }
+    const zoomed = tmux(['display-message', '-p', '-t', target, '#{window_zoomed_flag}']) === '1';
+    const focusedPane = zoomed ? tmux(['display-message', '-p', '-t', target, '#{pane_id}']) : null;
 
     const observed = tmux(['list-panes', '-t', target, '-F', '#{@canonical_id}\t#{pane_id}']);
     if (!observed) return;
@@ -63,8 +54,14 @@ function reflow(): void {
         + `${desired.panes[0].width}x${height},0,0[${leaf(0)},${leaf(1)}],`
         + `${desired.panes[2].width}x${height},${desired.panes[2].left},0[${leaf(2)},${leaf(3)}]}`
       : `${width}x${height},0,0[${leaf(0)},${leaf(1)},${leaf(2)},${leaf(3)}]`;
-    if (tmux(['select-layout', '-t', target, `${checksum(body)},${body}`]) === null) return;
-    tmux(['set-option', '-wu', '-t', target, pending]);
+    const layout = `${checksum(body)},${body}`;
+    if (tmux(['display-message', '-p', '-t', target, '#{window_layout}']) !== layout) {
+      if (tmux(['select-layout', '-t', target, layout]) === null) return;
+      if (zoomed && focusedPane) {
+        if (tmux(['select-pane', '-t', focusedPane]) === null) return;
+        tmux(['resize-pane', '-Z', '-t', focusedPane]);
+      }
+    }
   } finally {
     tmux(['wait-for', '-U', lock]);
   }

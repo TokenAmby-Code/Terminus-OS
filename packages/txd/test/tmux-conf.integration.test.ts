@@ -66,16 +66,18 @@ test('prefix arrows enter the same Enter-to-zoom table as prefix h/j/k/l', () =>
   expect(new TextDecoder().decode(tmux('list-keys', '-T', 'pane-select', 'Enter').stdout)).toContain('resize-pane -Z');
 });
 
-test('client resize defers Council reflow until a zoom-clear command event', () => {
+test('post-resize hooks reflow Council beneath operator zoom', () => {
   expect(new TextDecoder().decode(tmux('show-options', '-g', '-v', 'window-size').stdout).trim()).toBe('latest');
-  const hook = new TextDecoder().decode(tmux('show-hooks', '-g', 'client-resized').stdout);
-  expect(hook).toContain('packages/txd/tmux/reflow-council');
-  expect(hook).toContain('client-resized');
-  expect(hook).not.toMatch(/select-layout|even-vertical|tiled/);
+  const resizeHook = new TextDecoder().decode(tmux('show-hooks', '-g', 'window-resized').stdout);
+  expect(resizeHook).toContain('packages/txd/tmux/reflow-council');
+  expect(resizeHook).toContain('window-resized');
+
+  const layoutHook = new TextDecoder().decode(tmux('show-hooks', '-g', 'window-layout-changed').stdout);
+  expect(layoutHook).toContain('packages/txd/tmux/reflow-council');
+  expect(layoutHook).toContain('window-layout-changed');
+  expect(resizeHook).not.toMatch(/select-layout|even-vertical|tiled/);
   const drain = new TextDecoder().decode(tmux('show-hooks', '-g', 'after-resize-pane').stdout);
-  expect(drain).toContain('packages/txd/tmux/reflow-council');
-  expect(drain).toContain('after-resize-pane');
-  expect(drain).toContain('window_zoomed_flag');
+  expect(drain).not.toContain('packages/txd/tmux/reflow-council');
 });
 
 // The estate hooks only parse under the k12 socket guard, and a server boot

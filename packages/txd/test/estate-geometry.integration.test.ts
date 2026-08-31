@@ -22,8 +22,7 @@ async function tmux(socket: string, ...args: string[]): Promise<string> {
   // script or an older installed reflow can mutate the test server.
   if (args.includes('start-server')) {
     const hooks: Array<[string, string]> = [
-      ['client-resized', `run-shell -b "${reflowCouncil} client-resized"`],
-      ['after-resize-pane', `run-shell -b "${reflowCouncil} after-resize-pane #{window_zoomed_flag}"`],
+      ['window-resized', `run-shell -b "${reflowCouncil} window-resized"`],
     ];
     for (const [hook, command] of hooks) {
       const installed = Bun.spawn(['tmux', '-L', socket, 'set-hook', '-g', hook, command], {
@@ -209,7 +208,7 @@ describe('disposable canonical estate geometry', () => {
     await control.ensureEstate();
 
     await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '191', '-y', '37');
-    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+    await tmux(socket, 'run-shell', `${reflowCouncil} window-resized`);
 
     const council = await paneLayout(socket, 'council');
     expect(council['council:custodes']).toMatchObject({ left: 0, top: 0, height: 24 });
@@ -228,7 +227,7 @@ describe('disposable canonical estate geometry', () => {
     await control.ensureEstate();
 
     await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '120', '-y', '72');
-    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+    await tmux(socket, 'run-shell', `${reflowCouncil} window-resized`);
 
     const council = await paneLayout(socket, 'council');
     const physical = ['council:custodes', 'council:fabricator-general', 'council:pax', 'council:orchestrator'];
@@ -246,7 +245,7 @@ describe('disposable canonical estate geometry', () => {
     const control = new RealTmux(socket);
     await control.ensureEstate();
     await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '120', '-y', '72');
-    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+    await tmux(socket, 'run-shell', `${reflowCouncil} window-resized`);
 
     await tmux(socket, 'resize-pane', '-D', '-t', await paneId(socket, 'council:custodes'), '1');
     expect(await control.estateDivergences()).toMatchObject([{ page: 'council', clause: 'geometry' }]);
@@ -266,7 +265,7 @@ describe('disposable canonical estate geometry', () => {
 
     for (const [width, height, expectedColumns] of [[191, 37, 2], [120, 72, 1], [191, 37, 2]] as const) {
       await tmux(socket, 'resize-window', '-t', 'main:council', '-x', String(width), '-y', String(height));
-      await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+      await tmux(socket, 'run-shell', `${reflowCouncil} window-resized`);
       const council = Object.values(await paneLayout(socket, 'council'));
       expect(new Set(council.map((pane) => pane.left)).size).toBe(expectedColumns);
       expect(await control.estateDivergences()).toEqual([]);
@@ -301,7 +300,7 @@ describe('disposable canonical estate geometry', () => {
     expect(await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
   });
 
-  test('a client resize preserves Council zoom and applies deferred two-thirds geometry after unzoom', async () => {
+  test('a client resize reflows beneath Council zoom without consuming zoom or focus', async () => {
     const socket = `txd-council-zoomed-client-${process.pid}`;
     sockets.push(socket);
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
@@ -310,20 +309,18 @@ describe('disposable canonical estate geometry', () => {
     await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '81', '-y', '66');
     expect(await control.rebuildPage('council')).toBe(true);
     const before = await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}');
-    await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, 'council:custodes'));
+    const focused = await paneId(socket, 'council:custodes');
+    await tmux(socket, 'resize-pane', '-Z', '-t', focused);
     await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '81', '-y', '24');
-    await tmux(socket, 'run-shell', `${reflowCouncil} client-resized`);
+    await tmux(socket, 'run-shell', `${reflowCouncil} window-resized`);
 
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('1');
-    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{@txd_council_reflow_pending}')).toBe('1');
-
-    await tmux(socket, 'resize-pane', '-Z', '-t', await paneId(socket, 'council:custodes'));
-    // The installed after-resize-pane hook dispatches this exact drain in the
-    // background so the hook never recursively blocks tmux. Invoke the same
-    // event consumer synchronously here to make completion deterministic.
-    await tmux(socket, 'run-shell', `${reflowCouncil} after-resize-pane 0`);
-    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('0');
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{pane_id}')).toBe(focused);
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{@txd_council_reflow_pending}')).toBe('');
+
+    // Inspect the layout reflowed underneath the preserved operator zoom.
+    await tmux(socket, 'resize-pane', '-Z', '-t', focused);
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:council', '#{window_zoomed_flag}')).toBe('0');
     expect(await paneLayoutHeights(socket, 'council')).toEqual({
       'council:custodes': 7,
       'council:fabricator-general': 4,
