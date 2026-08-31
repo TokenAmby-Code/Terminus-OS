@@ -67,6 +67,7 @@ test('prefix arrows enter the same Enter-to-zoom table as prefix h/j/k/l', () =>
 });
 
 test('client resize defers Council reflow until a zoom-clear command event', () => {
+  expect(new TextDecoder().decode(tmux('show-options', '-g', '-v', 'window-size').stdout).trim()).toBe('latest');
   const hook = new TextDecoder().decode(tmux('show-hooks', '-g', 'client-resized').stdout);
   expect(hook).toContain('packages/txd/tmux/reflow-council');
   expect(hook).toContain('client-resized');
