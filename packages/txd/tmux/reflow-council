@@ -1,52 +1,73 @@
-#!/bin/sh
-set -eu
+#!/usr/bin/env bun
 
-event=${1:-client-resized}
-event_zoom=${2:-}
-case "$event" in
-  client-resized|after-resize-pane) ;;
-  *) exit 0 ;;
-esac
+import { councilGeometry, TXD_WINDOWS } from '../src/estate.ts';
 
-target='main:=council'
-pending='@txd_council_reflow_pending'
-lock='txd-council-reflow'
-tmux wait-for -L "$lock"
-trap 'tmux wait-for -U "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+const event = process.argv[2] ?? 'client-resized';
+const eventZoom = process.argv[3] ?? '';
+if (event !== 'client-resized' && event !== 'after-resize-pane') process.exit(0);
 
-height=$(tmux display-message -p -t "$target" '#{window_height}' 2>/dev/null) || exit 0
-numerator=$(tmux show-options -wv -t "$target" @txd_council_top_numerator 2>/dev/null) || exit 0
-denominator=$(tmux show-options -wv -t "$target" @txd_council_top_denominator 2>/dev/null) || exit 0
-borders=$(tmux show-options -wv -t "$target" @txd_council_horizontal_borders 2>/dev/null) || exit 0
-zoomed=$(tmux display-message -p -t "$target" '#{window_zoomed_flag}' 2>/dev/null) || exit 0
+const target = 'main:=council';
+const pending = '@txd_council_reflow_pending';
+const lock = 'txd-council-reflow';
 
-if [ "$event" = after-resize-pane ]; then
-  # Hook commands run in the background. The captured event state prevents a
-  # delayed zoom-in event from draining a debt recorded by a later resize.
-  [ "$event_zoom" = 0 ] || exit 0
-  deferred=$(tmux show-options -wv -t "$target" "$pending" 2>/dev/null) || exit 0
-  [ "$deferred" = 1 ] || exit 0
-  [ "$zoomed" = 0 ] || exit 0
-elif [ "$zoomed" = 1 ]; then
-  tmux set-option -w -t "$target" "$pending" 1
-  exit 0
-fi
+function tmux(args: string[]): string | null {
+  const result = Bun.spawnSync(['tmux', ...args], { stdout: 'pipe', stderr: 'ignore' });
+  if (result.exitCode !== 0) {
+    return null;
+  }
+  return new TextDecoder().decode(result.stdout).trim();
+}
 
-top=$(((((height - borders) * numerator) + (denominator / 2)) / denominator))
-pane_border_status=$(tmux show-options -wv -t "$target" pane-border-status)
-if [ "$pane_border_status" = off ]; then
-  requested_top=$top
-else
-  requested_top=$((top - 1))
-fi
+function checksum(layout: string): string {
+  let value = 0;
+  for (const character of layout) {
+    value = ((value >>> 1) + ((value & 1) << 15) + character.charCodeAt(0)) & 0xffff;
+  }
+  return value.toString(16).padStart(4, '0');
+}
 
-tmux list-panes -t "$target" -F '#{@canonical_id}	#{pane_id}' |
-while IFS="$(printf '\t')" read -r seat pane; do
-  case "$seat" in
-    council:custodes|council:pax) tmux resize-pane -t "$pane" -y "$requested_top" ;;
-  esac
-done
+function reflow(): void {
+  if (tmux(['wait-for', '-L', lock]) === null) return;
+  try {
+    const dimensions = tmux(['display-message', '-p', '-t', target, '#{window_width}\t#{window_height}']);
+    if (!dimensions) return;
+    const [rawWidth = '', rawHeight = ''] = dimensions.split('\t');
+    const width = Number(rawWidth);
+    const height = Number(rawHeight);
+    if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 7) return;
 
-# Clear only after both columns converge. after-resize-pane deliveries caused
-# by these writes serialize on the tmux wait-for lock, then observe no debt.
-tmux set-option -wu -t "$target" "$pending" 2>/dev/null || true
+    const zoomed = tmux(['display-message', '-p', '-t', target, '#{window_zoomed_flag}']);
+    if (event === 'after-resize-pane') {
+      if (eventZoom !== '0') return;
+      if (tmux(['show-options', '-wv', '-t', target, pending]) !== '1') return;
+      if (zoomed !== '0') return;
+    } else if (zoomed === '1') {
+      tmux(['set-option', '-w', '-t', target, pending, '1']);
+      return;
+    }
+
+    const observed = tmux(['list-panes', '-t', target, '-F', '#{@canonical_id}\t#{pane_id}']);
+    if (!observed) return;
+    const bySeat = new Map(observed.split('\n').map((row) => row.split('\t') as [string, string]));
+    const paneIds = TXD_WINDOWS.council.map((seat) => bySeat.get(seat));
+    if (paneIds.some((pane) => !pane) || bySeat.size !== TXD_WINDOWS.council.length) return;
+
+    const desired = councilGeometry(width, height);
+    const leaf = (index: number): string => {
+      const pane = paneIds[index]!.replace(/^%/, '');
+      const geometry = desired.panes[index]!;
+      return `${geometry.width}x${geometry.height},${geometry.left},${geometry.top},${pane}`;
+    };
+    const body = desired.shape === 'columns'
+      ? `${width}x${height},0,0{`
+        + `${desired.panes[0].width}x${height},0,0[${leaf(0)},${leaf(1)}],`
+        + `${desired.panes[2].width}x${height},${desired.panes[2].left},0[${leaf(2)},${leaf(3)}]}`
+      : `${width}x${height},0,0[${leaf(0)},${leaf(1)},${leaf(2)},${leaf(3)}]`;
+    if (tmux(['select-layout', '-t', target, `${checksum(body)},${body}`]) === null) return;
+    tmux(['set-option', '-wu', '-t', target, pending]);
+  } finally {
+    tmux(['wait-for', '-U', lock]);
+  }
+}
+
+reflow();
