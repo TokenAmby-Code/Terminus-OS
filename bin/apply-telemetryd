@@ -53,14 +53,14 @@ sha="$(git -C "$terminus" rev-parse HEAD)"
 # the daemon — alone. The checkout SHA reaches the daemon as its build stamp
 # through a drop-in the digest does not fold, so /health names the checkout a
 # running generation was realized from without every merge forcing a restart.
-generation="$("$terminus/bin/terminus-install-generation" "$terminus" telemetryd src/daemon.ts)"
+generation="$("$terminus/bin/terminus-install-generation" "$terminus" telemetryd src/daemon.ts --launcher tm src/cli.ts)"
 new_hash="$({ cat "$unit_src"; printf 'generation=%s\n' "$generation"; } | sha256sum | cut -d' ' -f1)"
 old_hash="$(cat "$stamp" 2>/dev/null || true)"
 
 mkdir -p "$unit_dir" "$(dirname "$generation_dropin")" "$state_dir" "$HOME/.local/bin"
 # tm links through the current-generation pointer, so the CLI is current the
 # moment its generation is, without a relink and without a daemon restart.
-ln -sfn "$working_directory/src/cli.ts" "$HOME/.local/bin/tm"
+ln -sfn "$install_root/telemetryd/bin/tm" "$HOME/.local/bin/tm"
 cp -f "$unit_src" "$unit_dst"
 printf '[Service]\nEnvironment=GIT_SHA=%s\nWorkingDirectory=%s\n' "$sha" "$working_directory" >"$generation_dropin"
 systemctl --user daemon-reload

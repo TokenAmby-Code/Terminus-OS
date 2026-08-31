@@ -145,11 +145,11 @@ sha="$(git -C "$terminus" rev-parse HEAD)"
 # answer rev-parse, so without the stamp /ctl/health git_sha would read
 # unknown after every deploy.
 txd_generation="$("$terminus/bin/terminus-install-generation" "$terminus" txd src/daemon.ts)"
-tx_generation="$("$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts)"
-tx_main="$install_root/tx/packages/tx/src/main.ts"
+tx_generation="$("$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts --launcher tx src/main.ts)"
+tx_launcher="$install_root/tx/bin/tx"
 tmux_conf="$install_root/txd/packages/txd/tmux/tx.conf"
 working_directory="$install_root/txd/packages/txd"
-[[ -f "$tx_main" ]] || { echo "apply($machine): tx generation ${tx_generation:0:12} does not carry src/main.ts" >&2; exit 1; }
+[[ -x "$tx_launcher" ]] || { echo "apply($machine): tx generation ${tx_generation:0:12} does not carry its executable launcher" >&2; exit 1; }
 [[ -f "$tmux_conf" ]] || { echo "apply($machine): txd generation ${txd_generation:0:12} does not carry tmux/tx.conf" >&2; exit 1; }
 new_hash="$({
   printf 'generation=%s\n' "$txd_generation"
@@ -164,7 +164,7 @@ fi
 
 # ── 3. install the estate unit owners ────────────────────────────────────────
 mkdir -p "$user_unit_dir" "$user_bin_dir" "$state_dir" "$(dirname "$generation_dropin")"
-ln -sfn "$tx_main" "$user_bin_dir/tx"
+ln -sfn "$tx_launcher" "$user_bin_dir/tx"
 cp -f "$txd_src" "$txd_dst"
 cp -f "$estate_src" "$estate_dst"
 printf '[Service]\nEnvironment=GIT_SHA=%s\nWorkingDirectory=%s\n' "$sha" "$working_directory" >"$generation_dropin"

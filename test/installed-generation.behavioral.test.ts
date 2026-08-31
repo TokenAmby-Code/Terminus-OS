@@ -33,6 +33,10 @@ beforeAll(() => {
     '#!/usr/bin/env bash\nset -euo pipefail\n[[ "$1" == install ]] || exit 64\nproject="$2"; shift 2\ncd "$project" && exec bun install "$@"\n',
     { mode: 0o755 },
   );
+  mkdirSync(join(fleet, "machines/k12-common"), { recursive: true });
+  writeFileSync(join(fleet, "machines/k12-common/runtime-baseline.json"), JSON.stringify({
+    host_baseline: { timezone: "America/Phoenix" },
+  }));
 });
 
 afterAll(() => {
@@ -44,6 +48,10 @@ const run = (...args: string[]) =>
     encoding: "utf8",
     env: { ...process.env, TERMINUS_INSTALL_ROOT: installRoot, FLEET_CHECKOUT: fleet },
   });
+
+const telemetryGenerationArgs = () => [
+  root, "telemetryd", "src/daemon.ts", "--launcher", "tm", "src/cli.ts",
+];
 
 const generations = () => join(installRoot, "generations/telemetryd");
 const walk = (directory: string): string[] =>
@@ -57,7 +65,7 @@ describe("an installed generation", () => {
   let digest: string;
 
   test("is realized from the closure, current by symlink, and named by its content", () => {
-    const first = run(root, "telemetryd", "src/daemon.ts");
+    const first = run(...telemetryGenerationArgs());
     expect(first.stderr).toBe("");
     expect(first.status).toBe(0);
     digest = first.stdout.trim();
@@ -81,15 +89,32 @@ describe("an installed generation", () => {
     expect(existsSync(join(tree, "packages/txd/src"))).toBe(false);
   });
 
-  test("carries no tests and no apply leg: the restart key is what the daemon loads", () => {
+  test("a CLI launcher invoked with an empty environment resolves the fleet baseline", () => {
+    const realized = run(root, "tx", "src/main.ts", "--launcher", "tx", "src/main.ts");
+    expect(realized.stderr).toBe("");
+    expect(realized.status).toBe(0);
+    const launcher = join(installRoot, "tx/bin/tx");
+    expect(existsSync(launcher)).toBe(true);
+
+    const invoked = spawnSync(launcher, ["version"], { encoding: "utf8", env: {} });
+    expect(invoked.stderr).toBe("");
+    expect(invoked.status).toBe(0);
+    expect(JSON.parse(invoked.stdout)).toMatchObject({ service: "txd", daemon: "txd", cli: "tx" });
+  });
+
+  test("carries its declared launcher but no tests or apply leg", () => {
     const files = walk(join(generations(), digest));
     expect(files.filter((path) => path.endsWith("/test"))).toEqual([]);
     expect(files.filter((path) => path.split("/").pop()!.startsWith("apply-"))).toEqual([]);
-    expect(existsSync(join(generations(), digest, "bin"))).toBe(false);
+    expect(readdirSync(join(generations(), digest, "bin"))).toEqual(["tm"]);
+    const invoked = spawnSync(join(installRoot, "telemetryd/bin/tm"), ["version"], { encoding: "utf8", env: {} });
+    expect(invoked.stderr).toBe("");
+    expect(invoked.status).toBe(0);
+    expect(JSON.parse(invoked.stdout)).toMatchObject({ service: "telemetryd", daemon: "telemetryd", cli: "tm" });
   });
 
   test("re-realizing the same sources yields the same digest and no second generation", () => {
-    const second = run(root, "telemetryd", "src/daemon.ts");
+    const second = run(...telemetryGenerationArgs());
     expect(second.status).toBe(0);
     expect(second.stdout.trim()).toBe(digest);
     expect(readdirSync(generations()).filter((name) => !name.startsWith("."))).toEqual([digest]);
@@ -103,7 +128,7 @@ describe("an installed generation", () => {
     const resident = spawn("sleep", ["30"], { cwd: join(occupied, "packages/telemetryd"), stdio: "ignore" });
     try {
       await new Promise((resolve) => resident.once("spawn", resolve));
-      const pass = run(root, "telemetryd", "src/daemon.ts");
+      const pass = run(...telemetryGenerationArgs());
       expect(pass.status).toBe(0);
       expect(existsSync(stale)).toBe(false);
       expect(existsSync(occupied)).toBe(true);
@@ -125,7 +150,9 @@ describe("an installed generation", () => {
     edit(checkout);
     const isolated = mkdtempSync(join(scratch, "install-"));
     try {
-      const pass = spawnSync(installer, [checkout, "telemetryd", "src/daemon.ts"], {
+      const pass = spawnSync(installer, [
+        checkout, "telemetryd", "src/daemon.ts", "--launcher", "tm", "src/cli.ts",
+      ], {
         encoding: "utf8",
         env: { ...process.env, TERMINUS_INSTALL_ROOT: isolated, FLEET_CHECKOUT: fleet },
       });

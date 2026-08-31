@@ -4,6 +4,7 @@
 # outside the deploy checkout, identified by the content of the tree.
 #
 #   terminus-install-generation <terminus-checkout> <package> <entrypoint>
+#     [--launcher <name> <entrypoint>]...
 #
 # Prints the digest of the generation now current for <package>.
 #
@@ -38,7 +39,32 @@ export LC_ALL=C
 
 terminus="${1:?usage: terminus-install-generation <terminus-checkout> <package> <entrypoint>}"
 package="${2:?usage: terminus-install-generation <terminus-checkout> <package> <entrypoint>}"
-entrypoint="${3:?usage: terminus-install-generation <terminus-checkout> <package> <entrypoint>}"
+entrypoint="${3:?usage: terminus-install-generation <terminus-checkout> <package> <entrypoint> [--launcher <name> <entrypoint>]...}"
+shift 3
+
+declare -A launchers=()
+while (($# > 0)); do
+  [[ "$1" == "--launcher" ]] || {
+    echo "terminus-install-generation($package): unknown argument: $1" >&2
+    exit 64
+  }
+  (($# >= 3)) || {
+    echo "terminus-install-generation($package): --launcher requires <name> <entrypoint>" >&2
+    exit 64
+  }
+  launcher_name="$2"
+  launcher_entrypoint="$3"
+  [[ "$launcher_name" =~ ^[a-z][a-z0-9_-]*$ ]] || {
+    echo "terminus-install-generation($package): invalid launcher name: $launcher_name" >&2
+    exit 64
+  }
+  [[ -z "${launchers[$launcher_name]:-}" ]] || {
+    echo "terminus-install-generation($package): duplicate launcher: $launcher_name" >&2
+    exit 64
+  }
+  launchers["$launcher_name"]="$launcher_entrypoint"
+  shift 3
+done
 
 fleet="${FLEET_CHECKOUT:-$HOME/runtimes/Token-Fleet/live}"
 install_root="${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}"
@@ -59,6 +85,20 @@ for workspace_file in package.json bun.lock bunfig.toml tsconfig.json; do
 done
 [[ -f "$terminus/packages/$package/$entrypoint" ]] \
   || die "entrypoint packages/$package/$entrypoint does not exist in $terminus"
+for launcher_name in "${!launchers[@]}"; do
+  launcher_entrypoint="${launchers[$launcher_name]}"
+  [[ -f "$terminus/packages/$package/$launcher_entrypoint" ]] \
+    || die "launcher $launcher_name entrypoint packages/$package/$launcher_entrypoint does not exist in $terminus"
+done
+
+machine_config_root=""
+if ((${#launchers[@]} > 0)); then
+  configured_machine_root="$fleet/machines"
+  machine_config_root="$(realpath -e "$configured_machine_root")" \
+    || die "fleet machine configuration root does not resolve: $configured_machine_root"
+  [[ -f "$machine_config_root/k12-common/runtime-baseline.json" ]] \
+    || die "fleet runtime baseline is absent from $machine_config_root"
+fi
 
 # The transitive `workspace:*` closure is the fingerprint helper's enumeration:
 # what a generation carries is exactly what a restart key walks.
@@ -112,8 +152,36 @@ if ! resolve_report="$(cd "$candidate/packages/$package" \
 fi
 rm -rf "$resolve_output"
 
+# CLI entrypoints execute outside systemd and must not inherit their machine
+# configuration by accident from an invoking shell. Each declared launcher is
+# part of the immutable generation and carries the resolved configuration root
+# that built it. Absolute interpreter/tool paths keep an empty environment from
+# becoming an undeclared dependency.
+if ((${#launchers[@]} > 0)); then
+  install -d "$candidate/bin"
+  for launcher_name in "${!launchers[@]}"; do
+    launcher_entrypoint="${launchers[$launcher_name]}"
+    launcher_resolve_output="$(mktemp -d)"
+    if ! launcher_resolve_report="$(cd "$candidate/packages/$package" \
+      && "$bun" build "$launcher_entrypoint" --target=bun --outdir="$launcher_resolve_output" 2>&1)"; then
+      rm -rf "$launcher_resolve_output"
+      printf '%s\n' "$launcher_resolve_report" >&2
+      die "launcher $launcher_name entrypoint packages/$package/$launcher_entrypoint does not resolve from the installed closure"
+    fi
+    rm -rf "$launcher_resolve_output"
+    {
+      printf '%s\n' '#!/usr/bin/bash' 'set -euo pipefail'
+      printf 'export TOKEN_FLEET_MACHINE_CONFIG_ROOT=%q\n' "$machine_config_root"
+      printf '%s\n' 'launcher="$(/usr/bin/readlink -f -- "$0")"' 'generation="${launcher%/bin/*}"'
+      printf 'exec %q "$generation/packages/%s/%s" "$@"\n' "$bun" "$package" "$launcher_entrypoint"
+    } >"$candidate/bin/$launcher_name"
+    chmod 0755 "$candidate/bin/$launcher_name"
+  done
+fi
+
 digest_members=(tsconfig.json bunfig.toml)
 for member in "${!closure[@]}"; do digest_members+=("packages/$member"); done
+if ((${#launchers[@]} > 0)); then digest_members+=(bin); fi
 digest="$(tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
   --format=gnu -cf - -C "$candidate" "${digest_members[@]}" | sha256sum | cut -d' ' -f1)"
 generation="$generations/$digest"
