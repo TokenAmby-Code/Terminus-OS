@@ -61,6 +61,7 @@ import {
 } from '@terminus-os/contracts';
 import {
   AGENT_SCHEMA_VERSION,
+  AgentIdSchema,
   AgentSchema,
   PLACEMENT_REFUSAL_REASONS,
   type RetirementCause,
@@ -109,6 +110,8 @@ import {
 } from './estate.ts';
 import {
   acceptCommIdentity,
+  commIdentitySoftenedForms,
+  CommTargetUnresolvableError,
   COUNCIL_ROSTER,
   sameIdentity,
   type AcceptedCommIdentity,
@@ -1594,7 +1597,37 @@ export class Daemon {
         const canonicalIdentity = targetIdentity!.kind === 'stable_seat'
           ? targetIdentity!.seat_id
           : targetIdentity!.identity;
-        if (targets.length === 0) throw new Error(`identity_absent: ${canonicalIdentity}`);
+        if (targets.length === 0) {
+          // An exact incarnation id is a stable kind of address even after
+          // that incarnation dies. Preserve its existing identity_absent
+          // refusal. A direct caller label that has never named an agent id,
+          // however, exhausted the funnel mouth without resolving: record
+          // that terminal outcome before returning it loudly.
+          const directTarget = req.target;
+          const exactAgentInstance = directTarget !== undefined
+            && (AgentIdSchema.safeParse(directTarget).success
+              || events.some((event) => event.entity_type === 'agent'
+                && event.event_type === 'reg.agent_registered'
+                && sameIdentity(event.entity_id, directTarget)));
+          if (directTarget !== undefined && directTarget !== '--self' && !exactAgentInstance) {
+            const softenedForms = commIdentitySoftenedForms(directTarget, targetIdentity!);
+            const refusal = await this.store.append({
+              entity_type: 'message',
+              entity_id: crypto.randomUUID(),
+              event_type: 'reg.comm_refused',
+              payload: {
+                reason: 'comm_target_unresolvable',
+                source_agent_id: req.source_agent_id,
+                attempted_target: directTarget,
+                softened_forms: softenedForms,
+              },
+              provenance: this.prov('wrapper', transportReceipt),
+              occurred_at: this.now(),
+            });
+            throw new CommTargetUnresolvableError(directTarget, softenedForms, refusal.seq);
+          }
+          throw new Error(`identity_absent: ${canonicalIdentity}`);
+        }
         if (targets.length > 1) throw new Error(AMBIGUOUS_IDENTITY(canonicalIdentity));
       }
       if (internal) {

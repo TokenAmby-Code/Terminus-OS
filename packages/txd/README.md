@@ -131,8 +131,9 @@ each route is the ruled daemon behavior, unchanged.
   `tmux wait-for` signal — armed before the line is typed, no polling loop, no
   deadline — after which the caller receives the exact captured stdout,
   stderr, and exit code (each stream bounded by `MAX_RUN_CAPTURE_BYTES`,
-  truncation reported). Refusals are loud and typed: `identity_absent`,
-  `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
+  truncation reported). Refusals are loud and typed:
+  `comm_target_unresolvable` (with the attempted target and softened forms),
+  `identity_absent`, `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
   `seat_binding_pending`, `scoped_reset_pending`, `pane_dead`,
   `seat_abandoned`, `engine_unattested`, `stage_failed`,
   `run_not_staged`, and a mid-run pane replacement fails the run with

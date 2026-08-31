@@ -90,9 +90,11 @@ test('acceptance softness never reaches the event stream: recorded targets stay 
   expect(JSON.stringify(accepted[0]!.payload)).not.toContain('Fabricator-General');
 });
 
-test('a bare name naming nobody keeps the loud typed absence refusal', async () => {
+test('a bare name naming nobody returns the loud unresolvable refusal', async () => {
   const { daemon } = await rig();
-  await expect(send(daemon, 'Ghost-Target')).rejects.toThrow('identity_absent: Ghost-Target');
+  await expect(send(daemon, 'Ghost-Target')).rejects.toThrow(
+    'comm_target_unresolvable: Ghost-Target; softened_forms=["Ghost-Target","ghost-target"]',
+  );
 });
 
 // A page name is not an identity. Nothing about it names one seat, so it must
@@ -100,7 +102,9 @@ test('a bare name naming nobody keeps the loud typed absence refusal', async () 
 test('a bare exclusive or fleet page name is not softened into a seat', async () => {
   const { daemon } = await rig();
   for (const page of ['mechanicus', 'inquisitor', 'palace_fleet', 'somnium_fleet']) {
-    await expect(send(daemon, page)).rejects.toThrow(`identity_absent: ${page}`);
+    await expect(send(daemon, page)).rejects.toThrow(
+      `comm_target_unresolvable: ${page}; softened_forms=["${page}"]`,
+    );
   }
 });
 
