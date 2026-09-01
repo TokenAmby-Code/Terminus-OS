@@ -128,6 +128,10 @@ for manifest in "$terminus"/packages/*/package.json; do
     cp "$manifest" "$candidate/packages/$member/package.json"
   fi
 done
+if [[ -n "${closure[txd]:-}" || -n "${closure[telemetryd]:-}" ]]; then
+  install -d "$candidate/migrations"
+  cp "$terminus"/migrations/*.sql "$candidate/migrations/"
+fi
 # Normalize what the daemon does not consume so a checkout whose modes drifted
 # under a shared worktree ACL cannot manufacture a new generation.
 find "$candidate" -type d -exec chmod 0755 {} +
@@ -181,6 +185,9 @@ fi
 
 digest_members=(tsconfig.json bunfig.toml)
 for member in "${!closure[@]}"; do digest_members+=("packages/$member"); done
+if [[ -n "${closure[txd]:-}" || -n "${closure[telemetryd]:-}" ]]; then
+  digest_members+=(migrations)
+fi
 if ((${#launchers[@]} > 0)); then digest_members+=(bin); fi
 digest="$(tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
   --format=gnu -cf - -C "$candidate" "${digest_members[@]}" | sha256sum | cut -d' ' -f1)"

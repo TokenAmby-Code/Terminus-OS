@@ -7,8 +7,9 @@
 # stamps. Repository HEAD is not a dependency of any single service, so an
 # unrelated package change restarted adjacent daemons and burned a converge.
 #
-# The stamps cannot simply drop HEAD. Services import @terminus-os/contracts
-# and @terminus-os/db, which live outside each daemon's own package directory.
+# The stamps cannot simply drop HEAD. Services import workspace contracts and
+# txd/telemetryd load the repository-owned PostgreSQL migration home outside
+# each daemon's own package directory.
 # HEAD was an over-broad but genuinely load-bearing proxy for "a package I
 # import changed". Deleting it outright would have traded spurious restarts for
 # missed restarts.
@@ -105,6 +106,10 @@ mapfile -d '' files < <(
       -type f -print0
   done < <(printf '%s\n' "${closure[@]}" | sort) | sort -z
 )
+if [[ -n "${seen[txd]:-}" || -n "${seen[telemetryd]:-}" ]]; then
+  while IFS= read -r -d '' migration; do files+=("$migration"); done \
+    < <(find "$terminus/migrations" -type f -print0 | sort -z)
+fi
 for file in "${files[@]}"; do
   emit "$file"
 done

@@ -30,7 +30,7 @@ test("phone hook payload is bound as a jsonb object, never a JSON string", async
 
 test("the database rejects every future non-object phone payload", async () => {
   const migration = await Bun.file(new URL(
-    "../../db/migrations/0018_phone_hook_payload_object.sql",
+    "../../../migrations/0018_phone_hook_payload_object.sql",
     import.meta.url,
   )).text();
 
