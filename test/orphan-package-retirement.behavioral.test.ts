@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, lstat, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -46,6 +46,10 @@ describe("orphan Terminus package retirement", () => {
     const log = join(root, "systemctl.log");
     await writeFile(systemctl, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${log}"\n`);
     await chmod(systemctl, 0o755);
+    const runuser = join(bin, "runuser");
+    const runuserLog = join(root, "runuser.log");
+    await writeFile(runuser, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> "${runuserLog}"\nwhile [[ "$1" != -- ]]; do shift; done\nshift\nexec "$@"\n`);
+    await chmod(runuser, 0o755);
 
     const proc = Bun.spawn([join(import.meta.dir, "..", "bin", "retire-orphan-packages"), "k12-personal"], {
       env: {
@@ -56,12 +60,15 @@ describe("orphan Terminus package retirement", () => {
         TERMINUS_STATE_DIR: state,
         TERMINUS_INSTALL_ROOT: installs,
         SYSTEMCTL: systemctl,
+        RUNUSER: runuser,
+        HOME: "/root/must-not-own-terminus-retirement",
       },
       stdout: "pipe",
       stderr: "pipe",
     });
     expect(await proc.exited).toBe(0);
 
+    expect(await Bun.file(runuserLog).text()).toContain(`--user tokenamby -- /usr/bin/env HOME=/home/tokenamby USER=tokenamby LOGNAME=tokenamby XDG_RUNTIME_DIR=/run/user/1000 ${systemctl} --user`);
     expect(await Bun.file(log).text()).toContain("--user disable --now orphan.service orphan-postgres.path");
     expect(await Bun.file(log).text()).toContain("--user disable --now checkout-orphan.service");
     expect(await Bun.file(log).text()).toContain("--user daemon-reload");
@@ -89,5 +96,8 @@ describe("orphan Terminus package retirement", () => {
       join(state, "keeper.applied.sha256"),
       join(installs, "keeper"),
     ]) expect(await pathExists(path)).toBe(true);
+
+    const script = await readFile(join(import.meta.dir, "..", "bin", "retire-orphan-packages"), "utf8");
+    expect(script).not.toContain("$HOME");
   });
 });
