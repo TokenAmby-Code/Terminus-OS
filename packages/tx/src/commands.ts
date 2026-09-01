@@ -11,6 +11,12 @@ import {
   type ClipboardPushResponse,
 } from '@terminus-os/contracts';
 import type { LocalClipboard } from './clipboard.ts';
+import {
+  isFailure,
+  readStdinContent,
+  tokenize,
+  type Invocation,
+} from '@tokenamby-code/stc-contract/cli';
 
 export type CommandContext = {
   args: string[];
@@ -25,6 +31,39 @@ export type Command = {
   run: (context: CommandContext) => Promise<number>;
 };
 
+export class CliGrammarError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'CliGrammarError';
+  }
+}
+
+export function parseInvocation(args: string[], allowed: readonly string[]): Invocation {
+  const parsed = tokenize(args, (name) => allowed.includes(name), 'tx');
+  if (isFailure(parsed)) throw new CliGrammarError(parsed.code, parsed.message);
+  for (const name of Object.keys(parsed.params)) {
+    if (!allowed.includes(name)) {
+      throw new CliGrammarError('unknown_parameter', `unknown parameter ${name}=`);
+    }
+  }
+  return parsed;
+}
+
+function booleanParameter(parsed: Invocation, name: string): boolean {
+  const value = parsed.params[name];
+  if (value === undefined) return false;
+  if (value !== 'true') {
+    throw new CliGrammarError('invalid_parameter', `${name}= accepts exactly true`);
+  }
+  return true;
+}
+
+function positionalOnly(args: string[]): string[] {
+  const parsed = parseInvocation(args, []);
+  if (parsed.content !== undefined) throw new CliGrammarError('unexpected_content', 'this command accepts no content');
+  return parsed.args;
+}
+
 function agentSource(verb: string): string {
   const value = process.env.AGENT_ID;
   if (!value) throw new Error(`AGENT_ID is required for tx ${verb}`);
@@ -32,53 +71,55 @@ function agentSource(verb: string): string {
 }
 
 async function comm({ args, request, write }: CommandContext): Promise<number> {
-  let ask = false;
-  let page: string | undefined;
-  let reply = false;
-  const positional: string[] = [];
-  for (let index = 0; index < args.length; index += 1) {
-    if ((page || reply) && positional.length === 0) {
-      positional.push(...args.slice(index));
-      break;
-    }
-    const arg = args[index]!;
-    if (arg === '--ask') ask = true;
-    else if (arg === '--self') positional.push(arg);
-    else if (arg === '--reply') reply = true;
-    else if (arg === '--page') {
-      page = args[++index];
-      if (!page) throw new Error('--page requires a page name');
-    } else if (arg.startsWith('-') && positional.length === 0) throw new Error(`unknown comm option: ${arg}`);
-    else {
-      positional.push(...args.slice(index));
-      break;
-    }
-  }
-  const intentToken = !reply && !page ? positional[1] : undefined;
-  const intentMatch = intentToken?.match(/^(command|skill)=(.*)$/);
+  const parsed = parseInvocation(args, ['ask', 'reply', 'self', 'page', 'command', 'skill']);
+  const ask = booleanParameter(parsed, 'ask');
+  const reply = booleanParameter(parsed, 'reply');
+  const self = booleanParameter(parsed, 'self');
+  const page = parsed.params.page;
+  if (page === '') throw new CliGrammarError('invalid_parameter', 'page= requires a page name');
+  const intentEntries = (['command', 'skill'] as const)
+    .filter((kind) => parsed.params[kind] !== undefined)
+    .map((kind) => [kind, parsed.params[kind]!] as const);
+  let suppliedContent = parsed.content === undefined
+    ? undefined
+    : parsed.content.source === 'stdin'
+      ? await readStdinContent()
+      : parsed.content.value;
   let intent: { kind: 'command' | 'skill'; name: string; args: string[] } | undefined;
-  if ((page || reply) && positional.some((value) => /^(command|skill)=/.test(value))) {
-    throw new Error('command and skill intents require one direct target');
-  }
-  if (intentMatch) {
-    if (ask || positional.length > 2 && positional[2] !== '--') {
+  if (intentEntries.length > 1) throw new Error('command and skill intents are mutually exclusive');
+  if (intentEntries.length === 1) {
+    if (page || reply || self || ask || parsed.args.length !== 1) {
       throw new Error('usage: tx comm <identity> command=<name> [-- args] | tx comm <identity> skill=<name> [-- args]');
     }
-    const name = intentMatch[2]!;
+    const [kind, name] = intentEntries[0]!;
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(name)) {
       throw new Error('command and skill names never include /, $, whitespace, or an engine selector');
     }
-    intent = { kind: intentMatch[1] as 'command' | 'skill', name, args: positional.slice(3) };
+    const intentArgs = suppliedContent === undefined ? [] : [suppliedContent];
+    intent = { kind, name, args: intentArgs };
   }
+  const positional = [...parsed.args];
+  if (!intent && suppliedContent === undefined) suppliedContent = positional.pop();
   if (reply) {
-    if (page || ask || positional.length !== 1) throw new Error('usage: tx comm --reply <message>');
+    if (page || self || ask || positional.length !== 0 || suppliedContent === undefined) {
+      throw new Error('usage: tx comm reply=true [message | content=... | -- ... | -]');
+    }
   } else if (page) {
-    if (positional.length !== 1) throw new Error('usage: tx comm [--ask] --page <page> <message>');
-  } else if (!intent && positional.length !== 2) throw new Error('usage: tx comm [--ask] <identity> <message>');
+    if (self || positional.length !== 0 || suppliedContent === undefined) {
+      throw new Error('usage: tx comm [ask=true] page=<page> [message | content=... | -- ... | -]');
+    }
+  } else if (self) {
+    if (positional.length !== 0 || suppliedContent === undefined) {
+      throw new Error('usage: tx comm self=true [ask=true] [message | content=... | -- ... | -]');
+    }
+  } else if (!intent && (positional.length !== 1 || suppliedContent === undefined)) {
+    throw new Error('usage: tx comm <identity> [ask=true] [message | content=... | -- ... | -]');
+  }
   const accepted = await request('POST', '/agents/comm', {
     schema_version: SCHEMA_VERSION, source_agent_id: agentSource('comm'),
-    ...(intent ? { intent } : { message: positional.at(-1)! }), ask, reply,
-    ...(page ? { page } : {}), ...(!page && !reply ? { target: positional[0] } : {}),
+    ...(intent ? { intent } : { message: suppliedContent! }), ask, reply,
+    ...(page ? { page } : {}), ...(self ? { target: '--self' } : {}),
+    ...(!page && !reply && !self ? { target: parsed.args[0] } : {}),
   }) as { ok?: boolean; message_id?: string; ask_id?: string | null };
   if (accepted.ok === false || !accepted.message_id) {
     write(accepted);
@@ -117,22 +158,25 @@ function decodedPush(response: ClipboardPushResponse): string {
 
 /** The single extension point: subcommands add one declarative entry here. */
 export const COMMANDS: readonly Command[] = [
-  { path: ['comm'], summary: '<identity> command=<name>|skill=<name> [-- args]; caller supplies no /, $, or engine flag', run: comm },
+  { path: ['comm'], summary: '<identity> [ask=true] <message>; page=/reply=/self=/command=/skill= and content/stdin use the fleet grammar; caller supplies no /, $, or engine flag', run: comm },
   {
     path: ['journal', 'dispose'],
     summary: 'Dispose one txd journal poison by event sequence with a required reason',
     run: async ({ args, request, write }) => {
-      const usage = 'usage: tx journal dispose <event-seq> --reason <reason>';
-      if (args.length !== 3 || args[1] !== '--reason' || !/^[1-9][0-9]*$/.test(args[0] ?? '') || !args[2]?.trim()) {
+      const usage = 'usage: tx journal dispose event-seq=<positive bigint> reason=<reason>';
+      const parsed = parseInvocation(args, ['event-seq', 'reason']);
+      const rawEventSeq = parsed.params['event-seq'];
+      const reason = parsed.params.reason;
+      if (parsed.args.length || parsed.content !== undefined || !/^[1-9][0-9]*$/.test(rawEventSeq ?? '') || !reason?.trim()) {
         throw new Error(usage);
       }
-      const eventSeq = args[0]!;
+      const eventSeq = rawEventSeq!;
       if (BigInt(eventSeq) > 9_223_372_036_854_775_807n) throw new Error(usage);
       write(await request('POST', '/ctl/journal/poison/dispose', {
         schema_version: SCHEMA_VERSION,
         source_agent_id: agentSource('journal dispose'),
         event_seq: eventSeq,
-        reason: args[2],
+        reason,
       }));
       return 0;
     },
@@ -141,19 +185,18 @@ export const COMMANDS: readonly Command[] = [
     path: ['inspect', 'hooks'],
     summary: 'Read bounded txd-owned tmux hook diagnostics from the system journal',
     run: async ({ args, request, write }) => {
-      let limit = 100;
-      if (args.length > 0) {
-        if (args.length !== 2 || args[0] !== '--limit' || !/^[0-9]+$/.test(args[1]!)) {
-          throw new Error('usage: tx inspect hooks [--limit <1-1000>]');
-        }
-        limit = Number(args[1]);
+      const parsed = parseInvocation(args, ['limit']);
+      const rawLimit = parsed.params.limit;
+      if (parsed.args.length || parsed.content !== undefined || (rawLimit !== undefined && !/^[0-9]+$/.test(rawLimit))) {
+        throw new Error('usage: tx inspect hooks [limit=<1-1000>]');
       }
-      if (limit < 1 || limit > 1000) throw new Error('usage: tx inspect hooks [--limit <1-1000>]');
-      const parsed = HookDiagnosticsResponseSchema.safeParse(
+      const limit = rawLimit === undefined ? 100 : Number(rawLimit);
+      if (limit < 1 || limit > 1000) throw new Error('usage: tx inspect hooks [limit=<1-1000>]');
+      const response = HookDiagnosticsResponseSchema.safeParse(
         await request('GET', `/tmux/read/diagnostics/hooks?limit=${limit}`),
       );
-      if (!parsed.success) throw new Error('txd returned invalid hook diagnostics');
-      write(parsed.data);
+      if (!response.success) throw new Error('txd returned invalid hook diagnostics');
+      write(response.data);
       return 0;
     },
   },
@@ -164,8 +207,9 @@ export const COMMANDS: readonly Command[] = [
     path: ['comm', 'delivery'],
     summary: 'Read the delivery fact for one comm by message id',
     run: async ({ args, request, write }) => {
-      const messageId = args[0];
-      if (!messageId || args.length > 1) throw new Error('usage: tx comm delivery <message-id>');
+      const positional = positionalOnly(args);
+      const messageId = positional[0];
+      if (!messageId || positional.length > 1) throw new Error('usage: tx comm delivery <message-id>');
       write(await request('GET', `/tmux/read/comm/${encodeURIComponent(messageId)}`));
       return 0;
     },
@@ -178,11 +222,12 @@ export const COMMANDS: readonly Command[] = [
     path: ['run'],
     summary: '<target> <command> — agent panes get the engine !-escape; bare panes execute and return output',
     run: async ({ args, request, write }) => {
-      if (args.length !== 2 || args[0]!.startsWith('-')) throw new Error('usage: tx run <target> <command>');
+      const positional = positionalOnly(args);
+      if (positional.length !== 2) throw new Error('usage: tx run <target> <command>');
       const result = await request('POST', '/agents/run', {
         schema_version: SCHEMA_VERSION,
-        target: args[0],
-        command: args[1],
+        target: positional[0],
+        command: positional[1],
       }) as { ok: boolean; detail?: string };
       // A pane run's body completes after the headers, so a late typed
       // refusal (the pane died mid-run) arrives as ok:false in a 200 body.
@@ -195,21 +240,13 @@ export const COMMANDS: readonly Command[] = [
     path: ['close'],
     summary: 'Close remote agents through the retirement chain (overseer verb)',
     run: async ({ args, request, write }) => {
-      const usage = 'usage: tx close <target> [<target> ...] [--force] | tx close --page <page> | tx close --all-idle';
-      let force = false;
-      let page: string | undefined;
-      let allIdle = false;
-      const targets: string[] = [];
-      for (let index = 0; index < args.length; index += 1) {
-        const arg = args[index]!;
-        if (arg === '--force' && !force) force = true;
-        else if (arg === '--page' && page === undefined) {
-          page = args[++index];
-          if (!page) throw new Error('--page requires a page name');
-        } else if (arg === '--all-idle' && !allIdle) allIdle = true;
-        else if (arg.startsWith('-')) throw new Error(usage);
-        else targets.push(arg);
-      }
+      const usage = 'usage: tx close <target> [<target> ...] [force=true] | tx close page=<page> | tx close all-idle=true';
+      const parsed = parseInvocation(args, ['force', 'page', 'all-idle']);
+      if (parsed.content !== undefined) throw new Error(usage);
+      const force = booleanParameter(parsed, 'force');
+      const page = parsed.params.page;
+      const allIdle = booleanParameter(parsed, 'all-idle');
+      const targets = parsed.args;
       const selectors = (targets.length ? 1 : 0) + (page ? 1 : 0) + (allIdle ? 1 : 0);
       // Exactly one selector; force is explicit-targets only (filters are
       // inherently graceful) — mirrors the daemon contract, refused pre-transport.
@@ -229,30 +266,18 @@ export const COMMANDS: readonly Command[] = [
     path: ['mode'],
     summary: 'Enter, toggle, or approve plan mode through txd event truth',
     run: async ({ args, request, write }) => {
-      const action = args[0];
-      let target: string | undefined;
-      let trigger: 'operator' | 'preplan' | 'context_cycle' = 'operator';
-      for (let index = 1; index < args.length; index += 1) {
-        const arg = args[index];
-        if (arg === '--target' && target === undefined) {
-          const value = args[++index];
-          if (!value || value.startsWith('--')) {
-            throw new Error('--target requires a logical identity');
-          }
-          target = value;
-        } else if (arg === '--trigger' && trigger === 'operator') {
-          const value = args[++index];
-          if (value !== 'preplan' && value !== 'context_cycle') {
-            throw new Error('--trigger must be preplan or context_cycle');
-          }
-          trigger = value;
-        } else {
-          throw new Error('usage: tx mode <enter | toggle | approve> --target <identity> [--trigger <preplan | context_cycle>]');
-        }
+      const parsed = parseInvocation(args, ['target', 'trigger']);
+      const action = parsed.args[0];
+      const target = parsed.params.target;
+      const rawTrigger = parsed.params.trigger;
+      if (rawTrigger !== undefined && rawTrigger !== 'preplan' && rawTrigger !== 'context_cycle') {
+        throw new Error('trigger= must be preplan or context_cycle');
       }
+      const trigger: 'operator' | 'preplan' | 'context_cycle' = rawTrigger ?? 'operator';
       if ((action !== 'enter' && action !== 'toggle' && action !== 'approve') || !target) {
-        throw new Error('usage: tx mode <enter | toggle | approve> --target <identity> [--trigger <preplan | context_cycle>]');
+        throw new Error('usage: tx mode <enter | toggle | approve> target=<identity> [trigger=<preplan | context_cycle>]');
       }
+      if (parsed.args.length !== 1 || parsed.content !== undefined) throw new Error('usage: tx mode <enter | toggle | approve> target=<identity> [trigger=<preplan | context_cycle>]');
       const intent = action === 'enter' ? 'enter_plan' : action === 'toggle' ? 'toggle_plan' : 'approve_plan';
       write(await request('POST', '/agents/mode', {
         schema_version: SCHEMA_VERSION,
@@ -267,7 +292,7 @@ export const COMMANDS: readonly Command[] = [
     path: ['clipboard', 'push'],
     summary: 'Set this device clipboard from the K12 tx-clipboard buffer',
     run: async ({ args, request, write, clipboard }) => {
-      if (args.length) throw new Error('usage: tx clipboard push');
+      if (positionalOnly(args).length) throw new Error('usage: tx clipboard push');
       const local = clipboard();
       const raw = await request('POST', '/ctl/clipboard/push', {
         schema_version: SCHEMA_VERSION,
@@ -285,7 +310,7 @@ export const COMMANDS: readonly Command[] = [
     path: ['clipboard', 'pull'],
     summary: 'Load this device clipboard into the K12 tx-clipboard buffer',
     run: async ({ args, request, write, clipboard }) => {
-      if (args.length) throw new Error('usage: tx clipboard pull');
+      if (positionalOnly(args).length) throw new Error('usage: tx clipboard pull');
       const local = clipboard();
       const content = await local.get();
       const bytes = new TextEncoder().encode(content);
@@ -309,22 +334,14 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'compact-events'],
     summary: 'Archive-attested compaction through a reset journal head',
     run: async ({ args, request, write }) => {
-      const usage = 'usage: tx estate compact-events --reset-journal-head <seq> --archive-attestation "<snapshot=path;restore-proof=journal.head=seq>"';
-      let resetJournalHead: number | undefined;
-      let archiveAttestation: string | undefined;
-      for (let index = 0; index < args.length; index += 1) {
-        const arg = args[index];
-        if (arg === '--reset-journal-head' && resetJournalHead === undefined) {
-          const raw = args[++index];
-          if (!raw || !/^[1-9][0-9]*$/.test(raw)) throw new Error(usage);
-          resetJournalHead = Number(raw);
-        } else if (arg === '--archive-attestation' && archiveAttestation === undefined) {
-          archiveAttestation = args[++index];
-          if (!archiveAttestation) throw new Error(usage);
-        } else {
-          throw new Error(usage);
-        }
-      }
+      const usage = 'usage: tx estate compact-events reset-journal-head=<seq> archive-attestation="<snapshot=path;restore-proof=journal.head=seq>"';
+      const parsed = parseInvocation(args, ['reset-journal-head', 'archive-attestation']);
+      const rawResetJournalHead = parsed.params['reset-journal-head'];
+      const archiveAttestation = parsed.params['archive-attestation'];
+      const resetJournalHead = rawResetJournalHead && /^[1-9][0-9]*$/.test(rawResetJournalHead)
+        ? Number(rawResetJournalHead)
+        : undefined;
+      if (parsed.args.length || parsed.content !== undefined) throw new Error(usage);
       if (!Number.isSafeInteger(resetJournalHead) || !archiveAttestation) throw new Error(usage);
       write(await request('POST', '/ctl/estate/compact-events', {
         schema_version: SCHEMA_VERSION,
@@ -339,7 +356,7 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'show'],
     summary: 'Show estate generation, compatibility, and seats',
     run: async ({ args, request, write }) => {
-      if (args.length) throw new Error('usage: tx estate show');
+      if (positionalOnly(args).length) throw new Error('usage: tx estate show');
       write(await request('GET', '/tmux/read/estate'));
       return 0;
     },
@@ -348,7 +365,7 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'zombies'],
     summary: 'List remote envelopes no live binding accounts for',
     run: async ({ args, request, write }) => {
-      if (args.length) throw new Error('usage: tx estate zombies');
+      if (positionalOnly(args).length) throw new Error('usage: tx estate zombies');
       write(await request('GET', '/tmux/read/zombies'));
       return 0;
     },
@@ -357,7 +374,7 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'reconcile'],
     summary: 'Observe and non-destructively reconcile the estate',
     run: async ({ args, request, write }) => {
-      if (args.length) throw new Error('usage: tx estate reconcile');
+      if (positionalOnly(args).length) throw new Error('usage: tx estate reconcile');
       write(await request('POST', '/ctl/reconcile', {}));
       return 0;
     },
@@ -366,13 +383,14 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'abandon'],
     summary: 'Attest already-flagged absent, unbound noncanonical seats abandoned',
     run: async ({ args, request, write }) => {
-      if (args.length === 0 || args.some((arg) => arg.startsWith('-'))) {
+      const positional = positionalOnly(args);
+      if (positional.length === 0) {
         throw new Error('usage: tx estate abandon <seat> [<seat> ...]');
       }
       const response = await request('POST', '/ctl/estate/abandon', {
         schema_version: SCHEMA_VERSION,
         source_agent_id: agentSource('estate abandon'),
-        seats: args,
+        seats: positional,
       }) as { ok: boolean };
       write(response);
       return response.ok ? 0 : 1;
@@ -382,18 +400,19 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'event'],
     summary: 'Forward a tmux pane lifecycle event to txd',
     run: async ({ args, request, write }) => {
-      const event = args[0];
-      const usage = 'usage: tx estate event <pane-died | pane-exited> --page <page> | tx estate event pane-killed';
+      const parsed = parseInvocation(args, ['page']);
+      const event = parsed.args[0];
+      const usage = 'usage: tx estate event <pane-died | pane-exited> page=<page> | tx estate event pane-killed';
       if (event === 'pane-killed') {
-        if (args.length !== 1) throw new Error(usage);
+        if (parsed.args.length !== 1 || Object.keys(parsed.params).length || parsed.content !== undefined) throw new Error(usage);
         write(await request('POST', '/ingress/tmux', { schema_version: SCHEMA_VERSION, event }));
         return 0;
       }
-      if ((event !== 'pane-died' && event !== 'pane-exited') || args[1] !== '--page' || args.length !== 3) {
+      if ((event !== 'pane-died' && event !== 'pane-exited') || parsed.args.length !== 1 || parsed.content !== undefined) {
         throw new Error(usage);
       }
-      const page = args[2];
-      if (!page) throw new Error('--page requires a page name');
+      const page = parsed.params.page;
+      if (!page) throw new Error('page= requires a page name');
       write(await request('POST', '/ingress/tmux', { schema_version: SCHEMA_VERSION, event, page }));
       return 0;
     },
@@ -402,23 +421,12 @@ export const COMMANDS: readonly Command[] = [
     path: ['estate', 'rotate'],
     summary: 'Explicitly reset the whole estate, one page, or one pane',
     run: async ({ args, request, write }) => {
-      let force = false;
-      let page: string | undefined;
-      let pane: string | undefined;
-      for (let index = 0; index < args.length; index += 1) {
-        const arg = args[index]!;
-        if (arg === '--force' && !force) force = true;
-        else if (arg === '--page' && page === undefined) {
-          page = args[++index];
-          if (!page) throw new Error('--page requires a page name');
-        } else if (arg === '--pane' && pane === undefined) {
-          pane = args[++index];
-          if (!pane) throw new Error('--pane requires a canonical pane name');
-        } else {
-          throw new Error('usage: tx estate rotate [--force] [--page <page> | --pane <canonical-pane>]');
-        }
-      }
-      if (page && pane) throw new Error('usage: tx estate rotate [--force] [--page <page> | --pane <canonical-pane>]');
+      const parsed = parseInvocation(args, ['force', 'page', 'pane']);
+      const force = booleanParameter(parsed, 'force');
+      const page = parsed.params.page;
+      const pane = parsed.params.pane;
+      const usage = 'usage: tx estate rotate [force=true] [page=<page> | pane=<canonical-pane>]';
+      if (parsed.args.length || parsed.content !== undefined || page === '' || pane === '' || (page && pane)) throw new Error(usage);
       write(await request('POST', '/ctl/estate/rotate', {
         schema_version: SCHEMA_VERSION,
         force,

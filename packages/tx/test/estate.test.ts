@@ -24,10 +24,10 @@ test('estate show and reconcile use the typed read/control routes', async () => 
   ]);
 });
 
-test('estate rotate is safe by default and --force is explicit typed input', async () => {
+test('estate rotate is safe by default and force=true is explicit typed input', async () => {
   const h = harness();
   expect(await runCli(['estate', 'rotate'], h.deps)).toBe(0);
-  expect(await runCli(['estate', 'rotate', '--force'], h.deps)).toBe(0);
+  expect(await runCli(['estate', 'rotate', 'force=true'], h.deps)).toBe(0);
   expect(h.calls).toEqual([
     { method: 'POST', path: '/ctl/estate/rotate', body: { schema_version: SCHEMA_VERSION, force: false, scope: 'estate' } },
     { method: 'POST', path: '/ctl/estate/rotate', body: { schema_version: SCHEMA_VERSION, force: true, scope: 'estate' } },
@@ -36,15 +36,15 @@ test('estate rotate is safe by default and --force is explicit typed input', asy
 
 test('estate rotate rejects every unrecognized or repeated option', async () => {
   const h = harness();
-  expect(await runCli(['estate', 'rotate', '--yes'], h.deps)).toBe(1);
-  expect(await runCli(['estate', 'rotate', '--force', '--force'], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'rotate', 'yes=true'], h.deps)).toBe(64);
+  expect(await runCli(['estate', 'rotate', 'force=true', 'force=true'], h.deps)).toBe(64);
   expect(h.calls).toEqual([]);
 });
 
 test('estate rotate targets one canonical page or pane without widening scope', async () => {
   const h = harness();
-  expect(await runCli(['estate', 'rotate', '--page', 'somnium', '--force'], h.deps)).toBe(0);
-  expect(await runCli(['estate', 'rotate', '--pane', 'somnium:NE', '--force'], h.deps)).toBe(0);
+  expect(await runCli(['estate', 'rotate', 'page=somnium', 'force=true'], h.deps)).toBe(0);
+  expect(await runCli(['estate', 'rotate', 'pane=somnium:NE', 'force=true'], h.deps)).toBe(0);
   expect(h.calls).toEqual([
     { method: 'POST', path: '/ctl/estate/rotate', body: { schema_version: SCHEMA_VERSION, force: true, scope: 'page', page: 'somnium' } },
     { method: 'POST', path: '/ctl/estate/rotate', body: { schema_version: SCHEMA_VERSION, force: true, scope: 'pane', pane: 'somnium:NE' } },
@@ -53,14 +53,14 @@ test('estate rotate targets one canonical page or pane without widening scope', 
 
 test('estate rotate rejects ambiguous or incomplete scoped options', async () => {
   const h = harness();
-  expect(await runCli(['estate', 'rotate', '--page'], h.deps)).toBe(1);
-  expect(await runCli(['estate', 'rotate', '--pane', 'somnium:NE', '--page', 'somnium'], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'rotate', 'page='], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'rotate', 'pane=somnium:NE', 'page=somnium'], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
 });
 
 test('tmux lifecycle events enter txd through a typed page event', async () => {
   const h = harness();
-  expect(await runCli(['estate', 'event', 'pane-exited', '--page', 'palace'], h.deps)).toBe(0);
+  expect(await runCli(['estate', 'event', 'pane-exited', 'page=palace'], h.deps)).toBe(0);
   expect(h.calls).toEqual([
     { method: 'POST', path: '/ingress/tmux', body: { schema_version: SCHEMA_VERSION, event: 'pane-exited', page: 'palace' } },
   ]);
@@ -78,8 +78,8 @@ test('event-log compaction requires an explicit archive attestation and reset he
   try {
     expect(await runCli([
       'estate', 'compact-events',
-      '--reset-journal-head', '8722',
-      '--archive-attestation', 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739',
+      'reset-journal-head=8722',
+      'archive-attestation=snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739',
     ], { request, stdout: (line) => output.push(JSON.parse(line)), stderr: () => {}, timezone: testTimezone })).toBe(0);
   } finally {
     if (env === undefined) delete process.env.AGENT_ID;
@@ -101,7 +101,7 @@ test('event-log compaction requires an explicit archive attestation and reset he
 test('event-log compaction refuses locally when archive attestation is absent', async () => {
   let requested = false;
   expect(await runCli(
-    ['estate', 'compact-events', '--reset-journal-head', '8722'],
+    ['estate', 'compact-events', 'reset-journal-head=8722'],
     { request: async () => { requested = true; }, stdout: () => {}, stderr: () => {}, timezone: testTimezone },
   )).toBe(1);
   expect(requested).toBe(false);
@@ -109,8 +109,8 @@ test('event-log compaction refuses locally when archive attestation is absent', 
 
 test('tmux lifecycle event input rejects unknown events and incomplete pages', async () => {
   const h = harness();
-  expect(await runCli(['estate', 'event', 'mystery', '--page', 'palace'], h.deps)).toBe(1);
-  expect(await runCli(['estate', 'event', 'pane-died', '--page'], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'event', 'mystery', 'page=palace'], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'event', 'pane-died', 'page='], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
 });
 
@@ -124,7 +124,7 @@ test('a kill-time event is page-less: tx forwards pane-killed with no page claim
 
 test('pane-killed refuses a page claim and process-death events still demand one', async () => {
   const h = harness();
-  expect(await runCli(['estate', 'event', 'pane-killed', '--page', 'palace'], h.deps)).toBe(1);
+  expect(await runCli(['estate', 'event', 'pane-killed', 'page=palace'], h.deps)).toBe(1);
   expect(await runCli(['estate', 'event', 'pane-exited'], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
 });

@@ -243,7 +243,7 @@ Every STC-generated CLI reads `AGENT_ID` into a typed `AgentContext` and adds
 it to service requests when present. `version`, `config:validate`, and health
 remain available without agent context. Agent-only operations call the common
 required-context guard and refuse when `AGENT_ID` is absent. Caller-selected
-`--agent-id` flags do not exist. `tx comm --self` resolves on the server from
+`--agent-id` flags do not exist. `tx comm self=true` resolves on the server from
 the implicitly supplied caller agent.
 
 ## Events
