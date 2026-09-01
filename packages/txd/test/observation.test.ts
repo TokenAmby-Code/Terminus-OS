@@ -51,13 +51,13 @@ function handler(observationSource = source()) {
   });
 }
 
-test('health and inspect are strict STC 1.7.0 envelopes with txd identity and ring evidence', async () => {
+test('health and inspect are strict STC 1.7.1 envelopes with txd identity and ring evidence', async () => {
   const observe = handler();
   const health = await observe(new Request('http://txd/health'));
   expect(health?.status).toBe(200);
   const healthBody = HealthResponseSchema.parse(await health!.json());
   expect(healthBody.identity).toEqual({ service: 'txd', daemon: 'txd', cli: 'tx' });
-  expect(healthBody.stc_version).toBe('1.7.0');
+  expect(healthBody.stc_version).toBe('1.7.1');
   expect(healthBody.probes.map((probe: { name: string; rung: string }) => [probe.name, probe.rung])).toEqual([
     ['postgres', 'dependency'],
     ['tmux-socket', 'dependency'],

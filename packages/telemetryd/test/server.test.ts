@@ -93,7 +93,7 @@ test("health is the shared walk over the declared postgres and ingress probes", 
   expect(response.status).toBe(200);
   expect(body.ok).toBe(true);
   // The marker is the executing package's own version, not a manifest read.
-  expect(body.stc_version).toBe("1.7.0");
+  expect(body.stc_version).toBe("1.7.1");
   // Every walk lands in the STC durable observation store, one reading per probe.
   expect(observationStores.at(-1)?.walks.map((walk) => walk.map((reading) => reading.name))).toEqual([
     ["postgres", "telemetry-ingress"],
@@ -116,7 +116,7 @@ test("inspect carries the STC 1.4 failure-ring evidence", async () => {
     stc_version: string;
     observation_ring: { probes: Array<{ name: string; readings: unknown[] }> };
   };
-  expect(inspect.stc_version).toBe("1.7.0");
+  expect(inspect.stc_version).toBe("1.7.1");
   expect(inspect.observation_ring.probes.map((probe) => probe.name)).toEqual(["postgres", "telemetry-ingress"]);
   expect(inspect.observation_ring.probes.every((probe) => probe.readings.length > 0)).toBe(true);
 });
