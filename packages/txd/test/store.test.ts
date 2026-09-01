@@ -4,12 +4,12 @@
 //    (FakeTmux's sibling), pinned to the same contract shape.
 //  - PostgresEventStore runs against a live PostgreSQL 18 when the
 //    TERMINUS_DB_TEST_* env is present (fleet dev: socket dir; CI: the
-//    postgres:18 service container) — the same gating as packages/db.
+//    postgres:18 service container) — the repository's PostgreSQL integration gate.
 //    Absent the env, the lane skips loudly.
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { SQL } from 'bun';
-import { connectDb, DbEndpoint, type DbEndpointT } from '@terminus-os/db';
+import { connectDb, DbEndpoint, type DbEndpointT } from '@tokenamby-code/stc-contract/pg';
 import { MemoryEventStore, PostgresEventStore } from '../src/store.ts';
 import { EVENT_TYPES, type EventInput } from '@terminus-os/contracts';
 import { buildProjections } from '../src/projections.ts';
@@ -89,6 +89,7 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       socket_dir: env.TERMINUS_DB_TEST_SOCKET_DIR,
       port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
       database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
+      schema: 'public',
       application_name: 'txd-store-integration',
       max: 1,
     });
@@ -100,6 +101,8 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
       database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
       username: env.TERMINUS_DB_TEST_USERNAME ?? 'postgres',
+      security: { mode: 'trust' },
+      schema: 'public',
       application_name: 'txd-store-integration',
       max: 1,
     });
@@ -294,7 +297,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     // later applied migrations would violate the runner's forward-only
     // contract and is not a valid production state.
     const migration = await Bun.file(
-      new URL("../../db/migrations/0005_txd_events_jsonb_normalize.sql", import.meta.url),
+      new URL("../../../migrations/0005_txd_events_jsonb_normalize.sql", import.meta.url),
     ).text();
     await raw.unsafe(migration);
     const rows = (await raw`
@@ -325,7 +328,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
               '2026-07-12T00:00:00.000Z', '2026-07-12T00:00:00.000Z')`;
     // Exercise the migration SQL directly, as the 0005 test does above.
     const migration = await Bun.file(
-      new URL("../../db/migrations/0022_txd_admitted_event_type_purge.sql", import.meta.url),
+      new URL("../../../migrations/0022_txd_admitted_event_type_purge.sql", import.meta.url),
     ).text();
     await raw.unsafe(migration);
     const counts = (await raw`

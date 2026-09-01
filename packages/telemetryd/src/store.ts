@@ -1,5 +1,10 @@
 import type { DesktopTelemetryEventT, PhoneMacroDroidHookRecordT } from "@terminus-os/contracts";
-import { connectDb, describeEndpoint, MIGRATIONS_DIR, runMigrations, type DbEndpointT } from "@terminus-os/db";
+import {
+  connectDb,
+  describeEndpoint,
+  runMigrations,
+  type DbEndpointT,
+} from "@tokenamby-code/stc-contract/pg";
 import type { Observation } from "@tokenamby-code/stc-contract/observation";
 import type { SQL } from "bun";
 
@@ -19,7 +24,10 @@ export class PostgresTelemetryStore implements TelemetryStore {
 
   static async connect(endpoint: DbEndpointT): Promise<PostgresTelemetryStore> {
     const sql = await connectDb(endpoint);
-    await runMigrations(sql, MIGRATIONS_DIR);
+    await runMigrations(sql, {
+      migrationsDir: new URL('../../../migrations/', import.meta.url).pathname,
+      schema: endpoint.schema,
+    });
     return new PostgresTelemetryStore(sql, describeEndpoint(endpoint));
   }
 

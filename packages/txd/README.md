@@ -218,7 +218,7 @@ Env/config-driven — no hardcoded machine values. A JSON file pointed at by
 `machine` has **no default**: a daemon that guesses its own box identity is a
 bug, so config load fails loud when it is unset.
 
-`db` is a `@terminus-os/db` endpoint object (strict-validated — unknown fields
+`db` is an `@tokenamby-code/stc-contract/pg` endpoint object (strict-validated — unknown fields
 refuse loud). On fleet boxes it is the sanctioned shape: the native PostgreSQL
 18 cluster's peer-auth unix socket — no password field exists.
 
@@ -247,7 +247,7 @@ The local event stream lives in the `terminus` database, schema `txd`, table
 | `recorded_at` | `text`   | daemon clock; skew vs `occurred_at` is visible    |
 
 Append-only is STRUCTURAL: triggers raise on `UPDATE`, `DELETE`, and
-`TRUNCATE`. The schema ships as `packages/db/migrations/0002_txd_events.sql`
+`TRUNCATE`. The schema ships as `migrations/0002_txd_events.sql`
 (the shared forward-only migrations home) and the daemon applies pending
 migrations at boot — a pristine database and a current one converge on the
 same shape.

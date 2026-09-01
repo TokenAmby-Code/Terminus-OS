@@ -1,7 +1,7 @@
 // Entrypoint. Wires config → event store → tmux control plane → core → server.
 // Source-run under Bun, no build step. systemd user unit owns the process.
 
-import { describeEndpoint } from '@terminus-os/db';
+import { describeEndpoint } from '@tokenamby-code/stc-contract/pg';
 import { notifySystemd } from '@tokenamby-code/stc-contract/systemd-notify';
 import { PostgresObservationStore } from '@tokenamby-code/stc-contract/observation';
 import { loadConfig } from './config.ts';

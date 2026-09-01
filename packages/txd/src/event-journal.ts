@@ -6,7 +6,7 @@ import {
   PhysicalDeclarationSchema,
   RegistrationAbortedSchema,
 } from '@tokenamby-code/agent-contract/events';
-import type { DbEndpointT } from '@terminus-os/db';
+import type { DbEndpointT } from '@tokenamby-code/stc-contract/pg';
 import type { JournalPoisonDispositionRequest } from '@terminus-os/contracts';
 import {
   DurableJournalConsumer,

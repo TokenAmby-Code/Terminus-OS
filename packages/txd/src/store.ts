@@ -13,13 +13,13 @@
 // Append-only is STRUCTURAL, not conventional: database triggers raise on any
 // UPDATE, DELETE, or TRUNCATE, so a stray writer cannot silently rewrite
 // history. The schema lives in the shared forward-only migrations
-// (packages/db/migrations, `0002_txd_events.sql`) and is applied at connect().
+// (migrations/0002_txd_events.sql) and is applied at connect().
 //
 // `MemoryEventStore` is the deterministic test seam — FakeTmux's sibling
 // (tmux.ts precedent). Append-only by construction: no mutation surface exists.
 
 import type { SQL } from 'bun';
-import { connectDb, runMigrations, MIGRATIONS_DIR, type DbEndpointT } from '@terminus-os/db';
+import { connectDb, runMigrations, type DbEndpointT } from '@tokenamby-code/stc-contract/pg';
 import {
   EventInputSchema,
   EventRecordSchema,
@@ -89,7 +89,7 @@ async function queryWithSignal<T>(query: Cancellable<T>, signal?: AbortSignal): 
   finally { signal.removeEventListener('abort', abort); }
 }
 
-// Parse-validated read boundary (the @terminus-os/db typedRows discipline):
+// Parse-validated read boundary (the STC PostgreSQL typed-row discipline):
 // seq (int8) is normalized to a number and jsonb columns are decoded before
 // the contract schema pins the record shape. Bun.SQL delivers jsonb as a
 // structured value on some protocol paths and as raw JSON text on others
@@ -119,7 +119,10 @@ export class PostgresEventStore implements EventStore {
    */
   static async connect(endpoint: DbEndpointT, now: Clock = systemClock): Promise<PostgresEventStore> {
     const sql = await connectDb(endpoint);
-    await runMigrations(sql, MIGRATIONS_DIR);
+    await runMigrations(sql, {
+      migrationsDir: new URL('../../../migrations/', import.meta.url).pathname,
+      schema: endpoint.schema,
+    });
     return new PostgresEventStore(sql, now);
   }
 

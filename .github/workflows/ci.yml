@@ -52,8 +52,8 @@ jobs:
       - name: Test
         run: bun test
 
-  # Integration lane for @terminus-os/db and the txd event store against a
-  # live PostgreSQL 18.
+  # Integration lane for the STC PostgreSQL contract and txd event store
+  # against a live PostgreSQL 18.
   # CI is the one sanctioned TCP consumer; fleet machines use peer-auth
   # unix sockets. Trust auth keeps the no-password contract intact.
   db-integration:
@@ -88,8 +88,5 @@ jobs:
       # These suites deliberately rebuild schemas and historical migration
       # fixtures. Keep them as separate processes against the disposable CI
       # authority so one reset cannot race another suite's forward-only ledger.
-      - name: Database foundation integration
-        run: bun test packages/db
-
       - name: txd PostgreSQL integration
         run: bun test packages/txd

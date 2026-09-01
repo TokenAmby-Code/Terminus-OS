@@ -6,7 +6,7 @@
 // has NO default — it must come from config or IMPERIUM_MACHINE (fail loud if
 // the box identity is unknown; a daemon that guesses its own machine is a bug).
 
-import { DbEndpoint, type DbEndpointT } from '@terminus-os/db';
+import { DbEndpoint, type DbEndpointT } from '@tokenamby-code/stc-contract/pg';
 import { isStackPage, isTxdPage, TXD_ESTATE } from './estate.ts';
 
 export type SshSeatTargetConfig = {
@@ -78,6 +78,7 @@ const HARD_DEFAULTS = {
     kind: 'socket',
     socket_dir: '/var/run/postgresql',
     database: 'terminus',
+    schema: 'public',
     application_name: 'txd',
     max: TXD_DB_POOL_MAX,
   }),

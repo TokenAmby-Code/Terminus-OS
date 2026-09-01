@@ -1,4 +1,4 @@
-import { DEFAULT_DB_CONFIG, describeEndpoint } from "@terminus-os/db";
+import { DbEndpoint, describeEndpoint } from "@tokenamby-code/stc-contract/pg";
 import { notifySystemd } from "@tokenamby-code/stc-contract/systemd-notify";
 import { PostgresObservationStore } from "@tokenamby-code/stc-contract/observation";
 import { SERVICE_VERSION } from "./identity.ts";
@@ -12,7 +12,17 @@ const bind = process.env.TELEMETRYD_BIND ?? "127.0.0.1";
 const port = Number(process.env.TELEMETRYD_PORT ?? "7784");
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("TELEMETRYD_PORT must be a valid port");
 
-const db = DEFAULT_DB_CONFIG.remote;
+// telemetryd has one serialized durable-store domain. Bun queues concurrent
+// callers behind its one genuinely in-flight query connection.
+const TELEMETRYD_DB_POOL_MAX = 1;
+const db = DbEndpoint.parse({
+  kind: "socket",
+  socket_dir: "/var/run/postgresql",
+  database: "terminus",
+  schema: "public",
+  application_name: "telemetryd",
+  max: TELEMETRYD_DB_POOL_MAX,
+});
 if (db.kind !== "socket") throw new Error("telemetryd observes its own cluster over the peer-auth unix socket only");
 const store = await PostgresTelemetryStore.connect(db);
 // The STC durable observation store: every health walk lands in the

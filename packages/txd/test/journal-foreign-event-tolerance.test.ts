@@ -10,7 +10,12 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import type { SQL } from 'bun';
-import { connectDb, DbEndpoint, MIGRATIONS_DIR, runMigrations, type DbEndpointT } from '@terminus-os/db';
+import {
+  connectDb,
+  DbEndpoint,
+  runMigrations,
+  type DbEndpointT,
+} from '@tokenamby-code/stc-contract/pg';
 import {
   JournalPoisonDispositionError,
   PostgresJournalConsumerStore,
@@ -25,6 +30,7 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       socket_dir: env.TERMINUS_DB_TEST_SOCKET_DIR,
       port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
       database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
+      schema: 'public',
       application_name: 'txd-journal-tolerance',
       max: 1,
     });
@@ -36,6 +42,8 @@ function endpointFromTestEnv(env: Record<string, string | undefined>): DbEndpoin
       port: env.TERMINUS_DB_TEST_PORT ? Number(env.TERMINUS_DB_TEST_PORT) : undefined,
       database: env.TERMINUS_DB_TEST_DATABASE ?? 'postgres',
       username: env.TERMINUS_DB_TEST_USERNAME ?? 'postgres',
+      security: { mode: 'trust' },
+      schema: 'public',
       application_name: 'txd-journal-tolerance',
       max: 1,
     });
@@ -82,7 +90,10 @@ describe.skipIf(!endpoint)('txd-events journal lane (live postgres 18)', () => {
     await raw`drop schema if exists txd cascade`;
     await raw`drop schema if exists journal cascade`;
     await raw`drop table if exists schema_migrations`;
-    await runMigrations(raw, MIGRATIONS_DIR);
+    await runMigrations(raw, {
+      migrationsDir: new URL('../../../migrations/', import.meta.url).pathname,
+      schema: endpoint!.schema,
+    });
     // The journal schema belongs to the bus estate, not these migrations —
     // recreate the exact surface the consumer reads.
     await raw`create schema journal`;

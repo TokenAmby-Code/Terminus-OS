@@ -10,8 +10,12 @@ test('adversarial: the retired production deployment workflow stays absent', () 
   expect(existsSync(join(root, '.github/workflows/deploy-production.yml'))).toBeFalse();
 });
 
+test('adversarial: the retired database workspace package stays absent', () => {
+  expect(existsSync(join(root, 'packages/db'))).toBeFalse();
+});
+
 test('adversarial: desktop telemetry has no private NOTIFY channel', async () => {
-  const migration = await Bun.file(join(root, 'packages/db/migrations/0003_desktop_telemetry.sql')).text();
+  const migration = await Bun.file(join(root, 'migrations/0003_desktop_telemetry.sql')).text();
   expect(migration).not.toContain('desktop_events_publish');
   expect(migration).not.toContain('publish_desktop_event');
   expect(migration).not.toContain("pg_notify('desktop_telemetry'");

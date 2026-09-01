@@ -78,8 +78,8 @@ describe("an installed generation", () => {
     const tree = join(generations(), digest);
     // The daemon's own source and the runtime files its closure loads.
     expect(existsSync(join(tree, "packages/telemetryd/src/daemon.ts"))).toBe(true);
-    expect(existsSync(join(tree, "packages/telemetryd/node_modules/@terminus-os/db"))).toBe(true);
-    expect(readdirSync(join(tree, "packages/db/migrations")).some((f) => f.endsWith(".sql"))).toBe(true);
+    expect(existsSync(join(tree, "packages/telemetryd/node_modules/@tokenamby-code/stc-contract/lib/pg.ts"))).toBe(true);
+    expect(readdirSync(join(tree, "migrations")).some((f) => f.endsWith(".sql"))).toBe(true);
     for (const file of ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json"]) {
       expect(existsSync(join(tree, file))).toBe(true);
     }
@@ -181,7 +181,8 @@ describe("an installed generation", () => {
 
   test("a change inside the closure moves the digest", () => {
     const changed = realizeCopy((checkout) => {
-      writeFileSync(join(checkout, "packages/db/src/generation-probe.ts"), "export const probe = true;\n");
+      const migration = join(checkout, "migrations/0003_desktop_telemetry.sql");
+      writeFileSync(migration, `${readFileSync(migration, "utf8")}\n-- generation probe\n`);
     });
     expect(changed).not.toBe(digest);
     expect(changed).toMatch(/^[0-9a-f]{64}$/);
