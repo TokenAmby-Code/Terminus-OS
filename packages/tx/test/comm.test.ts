@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test';
 import { runCli, type CliDependencies } from '../src/cli.ts';
 import { createClient } from '../src/client.ts';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const testTimezone = async () => 'America/Phoenix';
 
@@ -18,11 +21,11 @@ test('comm CLI forwards opaque payload and exposes no format or idempotency flag
     stdout: () => {}, stderr: () => {}, timezone: testTimezone,
   };
   try {
-    expect(await runCli(['comm', 'pax', '---\n{"λ":true}'], deps)).toBe(0);
+    expect(await runCli(['comm', 'pax', '--', '---\n{"λ":true}'], deps)).toBe(0);
     expect(calls[0]).toMatchObject({ path: '/agents/comm', body: { source_agent_id: 'source', target: 'pax', message: '---\n{"λ":true}', ask: false } });
-    expect(await runCli(['comm', '--json', '{}'], deps)).toBe(1);
-    expect(await runCli(['comm', '--idempotency-key', 'x'], deps)).toBe(1);
-    expect(await runCli(['comm', '--ephemeral', 'x'], deps)).toBe(1);
+    expect(await runCli(['comm', '--json', '{}'], deps)).toBe(64);
+    expect(await runCli(['comm', '--idempotency-key', 'x'], deps)).toBe(64);
+    expect(await runCli(['comm', '--ephemeral', 'x'], deps)).toBe(64);
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
   }
@@ -59,9 +62,9 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
     for (const argv of [
       ['comm', 'palace:N', 'skill=/openai-docs'],
       ['comm', 'palace:N', 'skill=$openai-docs'],
-      ['comm', 'palace:N', 'skill=openai-docs', '--engine=codex'],
-      ['comm', '--page', 'palace', 'command=compact'],
+      ['comm', 'page=palace', 'command=compact'],
     ]) expect(await runCli(argv, deps)).toBe(1);
+    expect(await runCli(['comm', 'palace:N', 'skill=openai-docs', '--engine=codex'], deps)).toBe(64);
     expect(errors.join('\n')).not.toContain('choose an engine');
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
@@ -258,5 +261,66 @@ test('behavioral pin: an unreachable txd makes comm exit non-zero', async () => 
     expect(errors).toEqual(['tx: Unable to connect']);
   } finally {
     if (old === undefined) delete process.env.AGENT_ID; else process.env.AGENT_ID = old;
+  }
+});
+
+test('comm reads a bare dash from stdin through the shared content contract', async () => {
+  let observedBody: Record<string, unknown> | undefined;
+  const machineConfigRoot = await mkdtemp(join(tmpdir(), 'tx-stdin-test-'));
+  await mkdir(join(machineConfigRoot, 'k12-common'));
+  await writeFile(
+    join(machineConfigRoot, 'k12-common', 'runtime-baseline.json'),
+    JSON.stringify({ host_baseline: { timezone: 'America/Phoenix' } }),
+  );
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const path = new URL(request.url).pathname;
+      if (path === '/agents/comm') {
+        observedBody = await request.json() as Record<string, unknown>;
+        return Response.json({ ok: true, message_id: 'stdin-message', ask_id: null });
+      }
+      return Response.json({
+        ok: true,
+        phase: 'delivery_confirmed',
+        message_id: 'stdin-message',
+        source_agent_id: 'source',
+        deliveries: [],
+      });
+    },
+  });
+  const process = Bun.spawn([
+    Bun.which('bun')!, new URL('../src/main.ts', import.meta.url).pathname,
+    'comm', 'target', '-',
+  ], {
+    env: {
+      ...Bun.env,
+      TXD_URL: server.url.href,
+      AGENT_ID: 'source',
+      TOKEN_FLEET_MACHINE_CONFIG_ROOT: machineConfigRoot,
+    },
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  try {
+    const stdout = new Response(process.stdout).text();
+    const stderr = new Response(process.stderr).text();
+    process.stdin.write('opaque stdin\nwith a trailing editor newline\n');
+    process.stdin.end();
+    const exit = await process.exited;
+    expect(await stderr).toBe('');
+    expect(exit).toBe(0);
+    expect(await stdout).toContain('stdin-message');
+    expect(observedBody).toMatchObject({
+      target: 'target',
+      message: 'opaque stdin\nwith a trailing editor newline',
+      ask: false,
+      reply: false,
+    });
+  } finally {
+    server.stop(true);
+    await rm(machineConfigRoot, { recursive: true, force: true });
   }
 });

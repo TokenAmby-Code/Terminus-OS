@@ -86,7 +86,7 @@ test('help is deterministic and lists extension points', async () => {
   const h = harness();
   expect(await runCli([], h.deps)).toBe(0);
   expect(h.stdout.join('\n')).toContain('tx health');
-  expect(h.stdout.join('\n')).toContain('command=<name>|skill=<name> [-- args]');
+  expect(h.stdout.join('\n')).toContain('content/stdin use the fleet grammar');
   expect(h.stdout.join('\n')).toContain('caller supplies no /, $, or engine flag');
   expect(h.stdout.join('\n')).toContain('tx inspect hooks');
 });
@@ -97,7 +97,7 @@ test('journal dispose sends one exact event sequence, required reason, and actor
   const h = harness({ ok: true, event_seq: 417, disposition: 'actor=custodes-worker; reason=invalid v8 backfill conflict' });
   try {
     expect(await runCli([
-      'journal', 'dispose', '417', '--reason', 'invalid v8 backfill conflict',
+      'journal', 'dispose', 'event-seq=417', 'reason=invalid v8 backfill conflict',
     ], h.deps)).toBe(0);
     expect(h.calls).toEqual([{
       method: 'POST',
@@ -120,7 +120,7 @@ test('journal dispose preserves the full PostgreSQL bigint event sequence over J
   const h = harness({ ok: false, error: 'journal_poison_absent', event_seq: '9223372036854775807' });
   try {
     expect(await runCli([
-      'journal', 'dispose', '9223372036854775807', '--reason', 'nonexistent-control',
+      'journal', 'dispose', 'event-seq=9223372036854775807', 'reason=nonexistent-control',
     ], h.deps)).toBe(0);
     expect(h.calls[0]?.body).toMatchObject({ event_seq: '9223372036854775807' });
   } finally {
@@ -130,9 +130,9 @@ test('journal dispose preserves the full PostgreSQL bigint event sequence over J
 
 test('journal dispose has no bulk shape and refuses a missing reason before transport', async () => {
   const h = harness();
-  expect(await runCli(['journal', 'dispose', '417'], h.deps)).toBe(1);
-  expect(await runCli(['journal', 'dispose', '*', '--reason', 'anything'], h.deps)).toBe(1);
-  expect(await runCli(['journal', 'dispose', '417', '418', '--reason', 'anything'], h.deps)).toBe(1);
+  expect(await runCli(['journal', 'dispose', 'event-seq=417'], h.deps)).toBe(1);
+  expect(await runCli(['journal', 'dispose', 'event-seq=*', 'reason=anything'], h.deps)).toBe(1);
+  expect(await runCli(['journal', 'dispose', '417', '418', 'reason=anything'], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
 });
 
@@ -144,7 +144,7 @@ test('inspect hooks returns bounded typed journal diagnostics', async () => {
     identifier: 'txd-tmux-hook',
     diagnostics: [{ recorded_at: '2026-08-17T17:00:00.000Z', priority: 3, message: 'Unable to connect' }],
   });
-  expect(await runCli(['inspect', 'hooks', '--limit', '7'], h.deps)).toBe(0);
+  expect(await runCli(['inspect', 'hooks', 'limit=7'], h.deps)).toBe(0);
   expect(h.calls).toEqual([{ method: 'GET', path: '/tmux/read/diagnostics/hooks?limit=7' }]);
   expect(JSON.parse(h.stdout[0]!)).toEqual({
     ok: true,
@@ -158,7 +158,7 @@ test('inspect hooks returns bounded typed journal diagnostics', async () => {
 test('inspect hooks rejects unbounded and malformed limits', async () => {
   const h = harness();
   for (const value of ['0', '1001', 'wat']) {
-    expect(await runCli(['inspect', 'hooks', '--limit', value], h.deps)).toBe(1);
+    expect(await runCli(['inspect', 'hooks', `limit=${value}`], h.deps)).toBe(1);
   }
   expect(h.calls).toEqual([]);
 });
@@ -173,7 +173,7 @@ test('raw tmux identifiers are rejected before CLI output', async () => {
 test('mode enter sends the semantic preplan transition contract', async () => {
   const h = harness({ schema_version: 13, verified: true });
   expect(await runCli([
-    'mode', 'enter', '--target', 'council:custodes', '--trigger', 'preplan',
+    'mode', 'enter', 'target=council:custodes', 'trigger=preplan',
   ], h.deps)).toBe(0);
   expect(h.calls).toEqual([{
     method: 'POST',
@@ -189,7 +189,7 @@ test('mode enter sends the semantic preplan transition contract', async () => {
 
 test('mode approve sends the plan-approval intent and defaults to an operator trigger', async () => {
   const h = harness({ schema_version: 13, verified: true });
-  expect(await runCli(['mode', 'approve', '--target', 'council:custodes'], h.deps)).toBe(0);
+  expect(await runCli(['mode', 'approve', 'target=council:custodes'], h.deps)).toBe(0);
   expect(h.calls).toEqual([{
     method: 'POST',
     path: '/agents/mode',
@@ -204,7 +204,7 @@ test('mode approve sends the plan-approval intent and defaults to an operator tr
 
 test('mode toggle defaults to an operator transition', async () => {
   const h = harness({ schema_version: 13, verified: true });
-  expect(await runCli(['mode', 'toggle', '--target', 'council:custodes'], h.deps)).toBe(0);
+  expect(await runCli(['mode', 'toggle', 'target=council:custodes'], h.deps)).toBe(0);
   expect(h.calls[0]).toEqual({
     method: 'POST',
     path: '/agents/mode',
@@ -219,16 +219,16 @@ test('mode toggle defaults to an operator transition', async () => {
 
 test('invalid mode arguments never reach txd', async () => {
   const h = harness();
-  expect(await runCli(['mode', 'enter', '--target', 'council:custodes', '--trigger', 'operator'], h.deps)).toBe(1);
+  expect(await runCli(['mode', 'enter', 'target=council:custodes', 'trigger=operator'], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
-  expect(h.stderr[0]).toContain('--trigger must be preplan or context_cycle');
+  expect(h.stderr[0]).toContain('trigger= must be preplan or context_cycle');
 });
 
-test('mode target cannot consume the next option token', async () => {
+test('mode target refuses an empty value', async () => {
   const h = harness();
-  expect(await runCli(['mode', 'enter', '--target', '--trigger', 'preplan'], h.deps)).toBe(1);
+  expect(await runCli(['mode', 'enter', 'target=', 'trigger=preplan'], h.deps)).toBe(1);
   expect(h.calls).toEqual([]);
-  expect(h.stderr[0]).toContain('--target requires a logical identity');
+  expect(h.stderr[0]).toContain('usage: tx mode');
 });
 
 // The CLI print guard used to scan EVERY string it was about to print and throw
@@ -240,7 +240,7 @@ test('mode target cannot consume the next option token', async () => {
 // answer is an identifier or a quotation — it is not positioned to know — so it
 // judges structural fields and nothing else, on the same basis as the daemon.
 test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
-  // `comm --ask` resolves the CALLER's identity before it can print anything.
+  // `comm ask=true` resolves the CALLER's identity before it can print anything.
   // A process with no agent in its ancestry cannot resolve AGENT_ID, so runCli
   // refuses at identity resolution and never reaches the print path this test
   // exists to assert. Scoped and restored, matching comm.test.ts.
@@ -280,7 +280,7 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
     timezone: testTimezone,
   };
   try {
-    expect(await runCli(['comm', '--ask', 'palace:W', 'report your seat'], deps)).toBe(0);
+    expect(await runCli(['comm', 'palace:W', 'ask=true', 'report your seat'], deps)).toBe(0);
     expect(stderr).toEqual([]);
     expect(calls.map((call) => call.path)).toEqual([
       '/agents/comm', '/agents/comm/receipt', '/agents/comm/wait',

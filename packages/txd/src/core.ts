@@ -1563,7 +1563,7 @@ export class Daemon {
       const source: CommFrameSource = { persona: sourceBinding.persona, seat_id: sourceBinding.seat_id };
       const events = await this.events();
       // The funnel mouth. A caller-supplied identity is softened to its
-      // canonical form exactly once, here; `--self` and `--reply` name an
+      // canonical form exactly once, here; self and reply routing name an
       // agent id txd itself recorded, which is canonical already.
       let targetIdentity: AcceptedCommIdentity | undefined = req.target === '--self'
         ? { kind: 'binding', identity: req.source_agent_id }
@@ -3453,8 +3453,8 @@ export class Daemon {
               agent_id: binding.agent_id,
               closed: false,
               reason: observed.liveness === 'alive'
-                ? `live_engine: an engine for this agent is running under ${binding.seat_id} (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close a hung agent`
-                : `liveness_unobservable: txd cannot observe an engine for this agent at ${binding.seat_id} and cannot prove it dead — the seat may run its engine beyond this machine, or the observation itself failed (recorded turn: ${turnOf(binding.agent_id)}); pass --force to close it anyway`,
+                ? `live_engine: an engine for this agent is running under ${binding.seat_id} (recorded turn: ${turnOf(binding.agent_id)}); pass force=true to close a hung agent`
+                : `liveness_unobservable: txd cannot observe an engine for this agent at ${binding.seat_id} and cannot prove it dead — the seat may run its engine beyond this machine, or the observation itself failed (recorded turn: ${turnOf(binding.agent_id)}); pass force=true to close it anyway`,
             });
             continue;
           }

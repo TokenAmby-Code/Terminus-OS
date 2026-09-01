@@ -1,4 +1,4 @@
-import { COMMANDS, type Command } from './commands.ts';
+import { CliGrammarError, COMMANDS, parseInvocation, type Command } from './commands.ts';
 import { createClient, type TxdRequest } from './client.ts';
 import { createLocalClipboard, type LocalClipboard } from './clipboard.ts';
 import { findTmuxIdInIdentifiers } from '@terminus-os/contracts';
@@ -57,12 +57,17 @@ export async function runCli(
     deps.stdout(usage(commands));
     return 0;
   }
-  if (argv.length === 1 && (argv[0] === 'health' || argv[0] === 'inspect' || argv[0] === 'version')) {
+  const command = [...commands]
+    .sort((a, b) => b.path.length - a.path.length)
+    .find((candidate) => candidate.path.every((part, index) => argv[index] === part));
+  if (!command && (argv[0] === 'health' || argv[0] === 'inspect' || argv[0] === 'version')) {
     const observation = deps.observation ?? createTxdObservationClient({
       baseUrl: process.env.TXD_URL ?? 'http://127.0.0.1:7781',
     });
     let timezone: string | undefined;
     try {
+      const parsed = parseInvocation(argv.slice(1), []);
+      if (parsed.args.length || parsed.content !== undefined) throw new Error(`usage: tx ${argv[0]}`);
       const loadedTimezone = await deps.timezone();
       timezone = loadedTimezone;
       let value: unknown;
@@ -78,13 +83,15 @@ export async function runCli(
       return argv[0] === 'health' && !(value as { ok?: boolean }).ok ? 1 : 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      deps.stderr(`tx: ${timezone ? renderHumanText(message, timezone) : message}`);
+      const rendered = timezone ? renderHumanText(message, timezone) : message;
+      if (error instanceof CliGrammarError) {
+        deps.stderr(`tx: ${error.code}: ${rendered}`);
+        return 64;
+      }
+      deps.stderr(`tx: ${rendered}`);
       return 1;
     }
   }
-  const command = [...commands]
-    .sort((a, b) => b.path.length - a.path.length)
-    .find((candidate) => candidate.path.every((part, index) => argv[index] === part));
   if (!command) {
     deps.stderr(`tx: unknown command: ${argv.join(' ')}`);
     deps.stderr(usage(commands));
@@ -102,7 +109,12 @@ export async function runCli(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    deps.stderr(`tx: ${timezone ? renderHumanText(message, timezone) : message}`);
+    const rendered = timezone ? renderHumanText(message, timezone) : message;
+    if (error instanceof CliGrammarError) {
+      deps.stderr(`tx: ${error.code}: ${rendered}`);
+      return 64;
+    }
+    deps.stderr(`tx: ${rendered}`);
     return 1;
   }
 }

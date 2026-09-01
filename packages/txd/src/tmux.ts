@@ -1248,8 +1248,8 @@ export class RealTmux implements TmuxControlPlane {
     // fires invisibly to the diagnostic, so the tail is identical to the one
     // tx.conf's kill hooks carry.
     return {
-      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died --page #{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
-      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited --page #{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
+      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died page=#{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
+      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited page=#{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
     } as const;
   }
 
@@ -1261,7 +1261,7 @@ export class RealTmux implements TmuxControlPlane {
       // that makes this the daemon's witness rather than an arbitrary hook.
       return result.code === 0
         && result.stdout.includes(`${hook}[`)
-        && result.stdout.includes(`tx estate event ${hook} --page #{q:window_name}`);
+        && result.stdout.includes(`tx estate event ${hook} page=#{q:window_name}`);
     }));
     const [pane_died = false, pane_exited = false] = observed;
     return {

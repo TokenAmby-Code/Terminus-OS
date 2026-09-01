@@ -47,7 +47,7 @@ describe('tmux/tx.conf', () => {
     expect(binding).toContain('#{pane_current_command},claude');
     expect(binding).toContain('#{pane_current_command},codex');
     expect(binding).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx mode toggle');
-    expect(binding).toContain('--target "#{@canonical_id}"');
+    expect(binding).toContain('target="#{@canonical_id}"');
     expect(binding).toContain('{ send-keys BTab }');
     expect(binding).not.toMatch(/pane_id|tmuxctld|capture-pane|grep/);
   });

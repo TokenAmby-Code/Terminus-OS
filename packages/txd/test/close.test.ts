@@ -249,7 +249,7 @@ test('a remote seat is never reported dead merely because its child is a tunnel'
   expect(filtered.closed_count).toBe(0);
   expect(buildProjections(await store.readAll()).currentBindings.map((b) => b.agent_id)).toContain('remote-1');
 
-  // --force remains the deliberate override for a genuinely hung remote agent.
+  // force=true remains the deliberate override for a genuinely hung remote agent.
   const forced = await d.close(req({ targets: ['remote-1'], force: true }));
   expect(forced.ok).toBe(true);
 });
@@ -355,7 +355,7 @@ test('duplicate targets resolving to one binding close once — one retire chain
   expect(retired).toHaveLength(1);
 });
 
-test('--page filter closes every closable agent on the page and nothing else', async () => {
+test('page= filter closes every closable agent on the page and nothing else', async () => {
   const { store, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'palace:W', 'w-idle');
@@ -375,7 +375,7 @@ test('--page filter closes every closable agent on the page and nothing else', a
   expect(bound).toContain('ov-1');
 });
 
-test('--all-idle sweeps estate-wide but never selects an overseer or an unregistered binding', async () => {
+test('all-idle=true sweeps estate-wide but never selects an overseer or an unregistered binding', async () => {
   const { store, d } = setup();
   await overseer(d, store);
   await bind(d, store, 'palace:W', 'w-1');
