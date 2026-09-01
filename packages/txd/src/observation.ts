@@ -145,7 +145,7 @@ export function createTxdObservationSource(options: {
     },
     async lifecycleHooks(signal) {
       const hooks = await abortable(options.tmux.lifecycleHookReadiness(), signal);
-      const evidence = { state: hooks.state, pane_died: hooks.pane_died, pane_exited: hooks.pane_exited };
+      const evidence = { ...hooks };
       return hooks.state === 'ready'
         ? { state: 'ready', evidence }
         : { state: 'failed', detail: 'tmux lifecycle hooks are incomplete', evidence };

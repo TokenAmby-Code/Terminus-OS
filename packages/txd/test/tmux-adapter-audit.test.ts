@@ -56,14 +56,20 @@ test('lifecycle hook commands shell-quote the tmux-supplied page name', async ()
   });
 
   await tmux.ensureLifecycleHooks();
-  expect(installed).toHaveLength(2);
-  for (const command of installed) {
-    expect(command).toContain('#{q:window_name}');
-    expect(command).not.toContain('\\"#{window_name}\\"');
+  expect(installed).toHaveLength(4);
+  for (const [hook, command] of installedByHook) {
     // `tx inspect hooks` reads the txd-tmux-hook journal identifier, so every
-    // installed hook captures through systemd-cat exactly as tx.conf's kill
-    // hooks do — otherwise a firing is invisible to the diagnostic.
-    expect(command).toContain('2>&1 | systemd-cat --identifier=txd-tmux-hook || true');
+    // installed witness captures through systemd-cat's exec form — the journal
+    // keeps the diagnostics AND a failed death ingress keeps its non-zero
+    // exit. The Bash tx launcher is executed directly, never handed to bun,
+    // and no `|| true` may convert a failed ingress into success.
+    expect(command).toContain('systemd-cat --identifier=txd-tmux-hook $HOME/.local/bin/tx estate event');
+    expect(command).not.toContain('bun');
+    expect(command).not.toContain('|| true');
+    if (hook === 'pane-died' || hook === 'pane-exited') {
+      expect(command).toContain('#{q:window_name}');
+      expect(command).not.toContain('\\"#{window_name}\\"');
+    }
   }
 });
 
@@ -85,9 +91,12 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
   });
   expect(await tmux.resetSeat('palace:N')).toBe(true);
   expect(operations).toEqual([
-    'list-panes', 'show-options', 'clear-history', 'set-environment', 'respawn-pane', 'display-message',
+    'list-panes', 'show-options', 'clear-history', 'set-environment', 'respawn-pane', 'set-option', 'display-message',
     'list-panes', 'set-option', 'set-option', 'list-panes', 'show-options', 'show-options',
   ]);
+  // The replacement process is a new pane lifecycle: the reset mints a fresh
+  // @txd_generation so nothing fenced to the corpse generation can land on it.
+  expect(calls.find((args) => args[0] === 'set-option' && args.includes('@txd_generation'))).toBeDefined();
   expect(calls.find((args) => args[0] === 'set-environment')).toEqual([
     'set-environment', '-u', '-t', '%17', 'AGENT_ID',
   ]);

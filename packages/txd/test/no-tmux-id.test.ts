@@ -44,10 +44,10 @@ test('mutation ingress refuses a raw tmux id IN AN IDENTIFIER FIELD, before tmux
   // The membrane is the schema: every field declaring itself an identifier
   // refuses a raw tmux id on its own path. Nothing scans request content.
   const attacks: Array<{ path: string; body: Record<string, unknown>; error: string }> = [
-    { path: '/agents/launch', error: 'invalid_launch_request', body: { seat_id: '%91', schema_version: 13, identity: 'i1', persona: 'p', tint: '#1' } },
-    { path: '/agents/launch', error: 'invalid_launch_request', body: { seat_id: 'palace:W', schema_version: 13, identity: '@22', persona: 'p', tint: '#1' } },
-    { path: '/agents/close', error: 'invalid_close_request', body: { source_agent_id: 'ov-1', targets: ['$7'], schema_version: 13 } },
-    { path: '/agents/close', error: 'invalid_close_request', body: { source_agent_id: '%3', targets: ['palace:W'], schema_version: 13 } },
+    { path: '/agents/launch', error: 'invalid_launch_request', body: { seat_id: '%91', schema_version: 14, identity: 'i1', persona: 'p', tint: '#1' } },
+    { path: '/agents/launch', error: 'invalid_launch_request', body: { seat_id: 'palace:W', schema_version: 14, identity: '@22', persona: 'p', tint: '#1' } },
+    { path: '/agents/close', error: 'invalid_close_request', body: { source_agent_id: 'ov-1', targets: ['$7'], schema_version: 14 } },
+    { path: '/agents/close', error: 'invalid_close_request', body: { source_agent_id: '%3', targets: ['palace:W'], schema_version: 14 } },
   ];
   const store = new MemoryEventStore();
   let tmuxCalls = 0;
@@ -88,7 +88,7 @@ test('request CONTENT carrying tmux sigils is never refused', async () => {
     for (const message of ['pin zod@4.4', 'the positional $1', 'it cost $20', 'attesting from pane %28']) {
       const res = await fetch(`http://127.0.0.1:${srv.port}/agents/comm`, {
         method: 'POST',
-        body: JSON.stringify({ schema_version: 13, source_agent_id: 'ov-1', target: 'palace:W', message }),
+        body: JSON.stringify({ schema_version: 14, source_agent_id: 'ov-1', target: 'palace:W', message }),
       });
       // Whatever the daemon decides about routing, it must never be a 422
       // blaming the message body for containing an identifier-shaped token.
@@ -116,7 +116,7 @@ test('handler errors are sanitized before structured logging', async () => {
     // Force a below-membrane adapter error containing a raw id without putting
     // that id in the request (request ingress must remain independently clean).
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/launch`, {
-      method: 'POST', body: JSON.stringify({ seat_id: 'palace:W', schema_version: 13, identity: 'i1', persona: 'p', tint: '#1' }),
+      method: 'POST', body: JSON.stringify({ seat_id: 'palace:W', schema_version: 14, identity: 'i1', persona: 'p', tint: '#1' }),
     });
     expect(res.status).toBe(500);
     expect(lines).toHaveLength(1);
@@ -133,8 +133,8 @@ test('no tmux id appears in any /agents/*, /tmux/read, or /ctl response', async 
   try {
     const post = (p: string, body: unknown) => fetch(`http://127.0.0.1:${srv.port}${p}`, { method: 'POST', body: JSON.stringify(body) });
     const bodies: unknown[] = [];
-    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 13, identity: 'i1', persona: 'p', tint: '#1' })).json());
-    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 13 })).json());
+    bodies.push(await (await post('/agents/launch', { seat_id: 'somnium:NE', schema_version: 14, identity: 'i1', persona: 'p', tint: '#1' })).json());
+    bodies.push(await (await post('/agents/send', { target: 'somnium:NE', text: 'hello', schema_version: 14 })).json());
     bodies.push(await (await fetch(`http://127.0.0.1:${srv.port}/tmux/read/estate`)).json());
     bodies.push(await (await post('/ctl/reconcile', {})).json());
     for (const b of bodies) expect(findTmuxIdDeep(b)).toBeNull();
@@ -170,7 +170,7 @@ test('a comm-wait response carrying an agent reply that quotes a tmux id breache
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/comm/wait`, {
       method: 'POST',
-      body: JSON.stringify({ schema_version: 13, ask_id: 'ask-1', subscriber_agent_id: 'ov-1' }),
+      body: JSON.stringify({ schema_version: 14, ask_id: 'ask-1', subscriber_agent_id: 'ov-1' }),
     });
     // TODAY: the response membrane scans the agent's prose and throws, so the
     // caller gets a handler failure instead of its answer.

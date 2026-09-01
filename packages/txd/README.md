@@ -88,6 +88,23 @@ each route is the ruled daemon behavior, unchanged.
 
 - `/agents/*` is the **deliberate-action plane**: every route directly under it
   is a deliberate action, one-for-one.
+- txd exclusively owns the four tmux lifecycle witnesses — `pane-died`,
+  `pane-exited`, `after-kill-pane`, and `window-unlinked` — installing and
+  physically attesting them at boot; `tx.conf` carries none of them, so a
+  config reload can never replace an attested witness. Each witness forwards
+  as `run-shell -b "systemd-cat --identifier=txd-tmux-hook $HOME/.local/bin/tx
+  estate event …"`: the stamped Bash launcher is executed directly — never
+  handed to bun as source — and systemd-cat's exec form keeps the journald
+  capture while propagating the forward's real exit code; no `|| true` may
+  convert a failed death ingress into success. Attestation reads back every
+  semantic part and degrades on either dead spelling.
+- A death-driven pane reset mints a fresh replacement pane generation, and
+  after the seat's death transaction is durable txd runs one shell `clear` in
+  the replacement idle pane to remove the dead TUI's residue. The clear is
+  fenced to that exact generation and an idle default shell (it can never
+  erase a live successor's UI), and its outcome is published as
+  `estate.idle_screen_cleared` or a named `estate.idle_screen_clear_failed`
+  without ever mutating the recovery verdict it follows.
 - `tx estate abandon <seat>...` is the repair leg for a reconcile-proven
   phantom. The batch is atomic and overseer-gated; every target must be
   noncanonical, projected unbound, absent from tmux, and carry an open

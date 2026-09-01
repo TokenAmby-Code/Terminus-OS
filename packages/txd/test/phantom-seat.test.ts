@@ -43,7 +43,7 @@ function setup() {
 test('a cleared seat whose pane is gone is flagged as a phantom', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 13, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 14, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -95,7 +95,7 @@ test('a seat dropped from the declaration without a abandon is flagged', async (
 test('a phantom is exactly a row with no tint-readiness counterpart', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 13, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 14, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -132,7 +132,7 @@ test('a fully-attested estate flags no phantom', async () => {
 test('an observable dead pane is not reported as absent', async () => {
   const { tmux, d } = setup();
   await d.launch({
-    seat_id: 'palace:W', schema_version: 13, identity: 'i-1', persona: 'salamander', tint: '#302800',
+    seat_id: 'palace:W', schema_version: 14, identity: 'i-1', persona: 'salamander', tint: '#302800',
   });
   tmux.killOutOfBand('palace:W');
 
@@ -147,7 +147,7 @@ test('an observable dead pane is not reported as absent', async () => {
 test('a phantom is not double-flagged across reconcile passes', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 13, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 14, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -164,7 +164,7 @@ test('a phantom is not double-flagged across reconcile passes', async () => {
 test('an overseer can attest exact flagged phantoms abandoned and restore honest health', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:bus', schema_version: 13, identity: 'i-1', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:bus', schema_version: 14, identity: 'i-1', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:bus']));
@@ -172,7 +172,7 @@ test('an overseer can attest exact flagged phantoms abandoned and restore honest
   expect((await d.reconcile()).p0).toBe(true);
 
   const result = await d.abandonSeats({
-    schema_version: 13,
+    schema_version: 14,
     source_agent_id: OVERSEER_SOURCE,
     seats: ['proof:bus'],
   });
@@ -187,10 +187,10 @@ test('an overseer can attest exact flagged phantoms abandoned and restore honest
 test('phantom abandonment is atomic and refuses a seat without exact absence evidence', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:gone', schema_version: 13, identity: 'gone', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:gone', schema_version: 14, identity: 'gone', persona: 'astartes', tint: '#101010',
   });
   await d.launch({
-    seat_id: 'proof:present', schema_version: 13, identity: 'present', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:present', schema_version: 14, identity: 'present', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:gone', 'proof:present']));
@@ -198,7 +198,7 @@ test('phantom abandonment is atomic and refuses a seat without exact absence evi
   await d.reconcile();
 
   const result = await d.abandonSeats({
-    schema_version: 13,
+    schema_version: 14,
     source_agent_id: OVERSEER_SOURCE,
     seats: ['proof:gone', 'proof:present'],
   });
@@ -211,14 +211,14 @@ test('phantom abandonment is atomic and refuses a seat without exact absence evi
 test('phantom abandonment refuses a registered non-overseer without changing the seat', async () => {
   const { tmux, store, d } = setup();
   await d.launch({
-    seat_id: 'proof:gone', schema_version: 13, identity: 'gone', persona: 'astartes', tint: '#101010',
+    seat_id: 'proof:gone', schema_version: 14, identity: 'gone', persona: 'astartes', tint: '#101010',
   });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['proof:gone']));
   tmux.deleteOutOfBand('proof:gone');
   await d.reconcile();
   await d.launch({
-    seat_id: 'palace:W', schema_version: 13, identity: 'worker-source', persona: 'astartes', rank: 'astartes', tint: '#202020',
+    seat_id: 'palace:W', schema_version: 14, identity: 'worker-source', persona: 'astartes', rank: 'astartes', tint: '#202020',
   });
   await store.append({
     entity_type: 'agent', entity_id: 'worker-source', event_type: 'reg.agent_registered',
@@ -228,7 +228,7 @@ test('phantom abandonment refuses a registered non-overseer without changing the
   });
 
   const result = await d.abandonSeats({
-    schema_version: 13,
+    schema_version: 14,
     source_agent_id: 'worker-source',
     seats: ['proof:gone'],
   });

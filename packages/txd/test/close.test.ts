@@ -154,6 +154,8 @@ test('behavioral pin: a running-daemon retirement sweep re-attests lifecycle hoo
     state: 'ready',
     pane_died: true,
     pane_exited: true,
+    after_kill_pane: true,
+    window_unlinked: true,
   });
 });
 

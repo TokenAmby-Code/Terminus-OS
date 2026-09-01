@@ -4396,6 +4396,11 @@ export class Daemon {
           if (reset.accepted) reconstructed = true;
           if (reset.ok) {
             reset_seats.push(seat);
+            // Cosmetic aftermath, sequenced strictly AFTER the death
+            // transaction above became durable. A page rebuild spawns fresh
+            // terminals with nothing to wipe, so only this respawned-corpse
+            // path carries residue of the dead TUI.
+            await this.clearRecoveredIdleScreenUnlocked(seat, reset.rotation_id, transportReceipt);
           } else {
             // The durable request stays open; reconstruction recovery resumes
             // it. One seat's physical failure never blocks a sibling's repair.
@@ -4411,6 +4416,40 @@ export class Daemon {
         };
       }
       return { ok, reconstructed, reset_seats, rotation_ids, reason };
+  }
+
+  /**
+   * One shell `clear` in a recovered seat's replacement idle pane, removing
+   * the dead TUI's residue. It runs only after the seat's death transaction
+   * is durable, is fenced by the tmux adapter to the exact replacement pane
+   * generation and an idle default shell (it can never erase a live
+   * successor's UI), and its outcome is published either way. A refusal or
+   * failure is named, loud, and never mutates the recovery verdict it
+   * follows — a clean screen is not recovery evidence.
+   */
+  private async clearRecoveredIdleScreenUnlocked(
+    seatId: string,
+    rotationId: string | null,
+    transportReceipt: string | null,
+  ): Promise<void> {
+    const generation = await this.tmux.seatGeneration(seatId);
+    const outcome = generation === undefined
+      ? { ok: false as const, reason: 'generation_unobserved' }
+      : await this.tmux.clearIdleSeatScreen(seatId, generation);
+    if (outcome.ok) {
+      await this.store.append({
+        entity_type: 'seat', entity_id: seatId, event_type: 'estate.idle_screen_cleared',
+        payload: { rotation_id: rotationId, pane_generation: generation },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+      });
+      return;
+    }
+    await this.store.append({
+      entity_type: 'seat', entity_id: seatId, event_type: 'estate.idle_screen_clear_failed',
+      payload: { rotation_id: rotationId, pane_generation: generation ?? null, reason: outcome.reason },
+      provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+    });
+    console.error(JSON.stringify({ level: 'error', event: 'idle_screen_clear_failed', seat: seatId, reason: outcome.reason }));
   }
 
   /**

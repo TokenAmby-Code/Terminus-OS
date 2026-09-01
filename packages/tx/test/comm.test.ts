@@ -50,11 +50,11 @@ test('behavioral pin: command and skill intents never expose engine syntax or a 
     expect(await runCli(['comm', 'palace:N', 'skill=openai-docs', '--', 'models'], deps)).toBe(0);
     expect(calls.filter((call) => (call as { path: string }).path === '/agents/comm')).toEqual([
       { method: 'POST', path: '/agents/comm', body: {
-        schema_version: 13, source_agent_id: 'source', target: 'council:custodes',
+        schema_version: 14, source_agent_id: 'source', target: 'council:custodes',
         intent: { kind: 'command', name: 'compact', args: ['hard'] }, ask: false, reply: false,
       } },
       { method: 'POST', path: '/agents/comm', body: {
-        schema_version: 13, source_agent_id: 'source', target: 'palace:N',
+        schema_version: 14, source_agent_id: 'source', target: 'palace:N',
         intent: { kind: 'skill', name: 'openai-docs', args: ['models'] }, ask: false, reply: false,
       } },
     ]);
@@ -95,7 +95,7 @@ test('tier 1: an on-time delivery attestation follows the durable admission id',
   try {
     expect(await runCli(['comm', 'target', 'hello'], deps)).toBe(0);
     expect(calls.map((call) => call.path)).toEqual(['/agents/comm', '/agents/comm/receipt']);
-    expect(calls[1]?.body).toEqual({ schema_version: 13, message_id: 'message-1', source_agent_id: 'source' });
+    expect(calls[1]?.body).toEqual({ schema_version: 14, message_id: 'message-1', source_agent_id: 'source' });
     expect(stdout).toHaveLength(2);
     expect(JSON.parse(stdout[0]!)).toMatchObject({ message_id: 'message-1' });
     expect(JSON.parse(stdout[1]!).phase).toBe('delivery_confirmed');

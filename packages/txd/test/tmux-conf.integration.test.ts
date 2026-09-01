@@ -104,13 +104,12 @@ test.skipIf(!estateCapable)('the k12 estate branch loads through source-file wit
     const sourced = estateTmux('source-file', conf);
     expect(new TextDecoder().decode(sourced.stderr)).toBe('');
     expect(sourced.exitCode).toBe(0);
+    // txd exclusively owns and attests the four lifecycle witnesses; sourcing
+    // the config must install none of them, so a reload can never replace an
+    // attested witness with a stale spelling.
     const hooks = new TextDecoder().decode(estateTmux('show-hooks', '-g').stdout);
-    expect(hooks).toMatch(/after-kill-pane\[\d+\][^\n]*pane-killed/);
-    expect(hooks).toMatch(/window-unlinked\[\d+\][^\n]*pane-killed/);
-    // Command hooks are globally inspectable here; pane-died/pane-exited are
-    // separately pinned from the sourced file because tmux omits them from
-    // this show-hooks projection on supported 3.6 builds.
-    expect(hooks.match(/systemd-cat --identifier=txd-tmux-hook/g)).toHaveLength(2);
+    expect(hooks).not.toContain('tx estate event');
+    expect(hooks).not.toContain('systemd-cat');
   } finally {
     estateTmux('kill-server');
   }
@@ -125,14 +124,21 @@ test.skipIf(!estateCapable)('txd boot reinstalls lifecycle hooks on a persistent
   if (started.exitCode !== 0) throw new Error(new TextDecoder().decode(started.stderr));
   try {
     await new RealTmux(staleSocket).ensureLifecycleHooks();
-    const paneDied = new TextDecoder().decode(staleTmux('show-hooks', '-g', 'pane-died').stdout);
-    const paneExited = new TextDecoder().decode(staleTmux('show-hooks', '-g', 'pane-exited').stdout);
-    expect(paneDied).toMatch(/pane-died\[\d+\][^\n]*tx estate event pane-died/);
-    expect(paneExited).toMatch(/pane-exited\[\d+\][^\n]*tx estate event pane-exited/);
-    // `tx inspect hooks` reads the txd-tmux-hook journal identifier, so a hook
-    // that does not pipe through systemd-cat fires invisibly to the diagnostic.
-    expect(paneDied).toContain('2>&1 | systemd-cat --identifier=txd-tmux-hook || true');
-    expect(paneExited).toContain('2>&1 | systemd-cat --identifier=txd-tmux-hook || true');
+    const observe = (hook: string) => new TextDecoder().decode(staleTmux('show-hooks', '-g', hook).stdout);
+    for (const [hook, event] of [
+      ['pane-died', 'pane-died'], ['pane-exited', 'pane-exited'],
+      ['after-kill-pane', 'pane-killed'], ['window-unlinked', 'pane-killed'],
+    ] as const) {
+      const installed = observe(hook);
+      expect(installed).toMatch(new RegExp(`${hook}\\[\\d+\\][^\\n]*tx estate event ${event}`));
+      // `tx inspect hooks` reads the txd-tmux-hook journal identifier;
+      // systemd-cat's exec form keeps that capture AND the forward's real
+      // exit code. The Bash tx launcher is executed directly, never handed
+      // to bun as source, and no `|| true` masks a failed death ingress.
+      expect(installed).toContain('systemd-cat --identifier=txd-tmux-hook');
+      expect(installed).not.toContain('bun');
+      expect(installed).not.toContain('|| true');
+    }
   } finally {
     staleTmux('kill-server');
   }

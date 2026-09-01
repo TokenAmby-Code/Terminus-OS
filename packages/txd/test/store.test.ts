@@ -257,7 +257,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     const attestation = 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739';
 
     const result = await store.compact({
-      schema_version: 13,
+      schema_version: 14,
       source_agent_id: 'operator-agent',
       reset_journal_head: 8722,
       archive_attestation: attestation,

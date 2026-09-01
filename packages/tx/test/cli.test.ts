@@ -103,7 +103,7 @@ test('journal dispose sends one exact event sequence, required reason, and actor
       method: 'POST',
       path: '/ctl/journal/poison/dispose',
       body: {
-        schema_version: 13,
+        schema_version: 14,
         source_agent_id: 'custodes-worker',
         event_seq: '417',
         reason: 'invalid v8 backfill conflict',
@@ -171,7 +171,7 @@ test('raw tmux identifiers are rejected before CLI output', async () => {
 });
 
 test('mode enter sends the semantic preplan transition contract', async () => {
-  const h = harness({ schema_version: 13, verified: true });
+  const h = harness({ schema_version: 14, verified: true });
   expect(await runCli([
     'mode', 'enter', 'target=council:custodes', 'trigger=preplan',
   ], h.deps)).toBe(0);
@@ -179,7 +179,7 @@ test('mode enter sends the semantic preplan transition contract', async () => {
     method: 'POST',
     path: '/agents/mode',
     body: {
-      schema_version: 13,
+      schema_version: 14,
       target: 'council:custodes',
       intent: 'enter_plan',
       trigger: 'preplan',
@@ -188,13 +188,13 @@ test('mode enter sends the semantic preplan transition contract', async () => {
 });
 
 test('mode approve sends the plan-approval intent and defaults to an operator trigger', async () => {
-  const h = harness({ schema_version: 13, verified: true });
+  const h = harness({ schema_version: 14, verified: true });
   expect(await runCli(['mode', 'approve', 'target=council:custodes'], h.deps)).toBe(0);
   expect(h.calls).toEqual([{
     method: 'POST',
     path: '/agents/mode',
     body: {
-      schema_version: 13,
+      schema_version: 14,
       target: 'council:custodes',
       intent: 'approve_plan',
       trigger: 'operator',
@@ -203,13 +203,13 @@ test('mode approve sends the plan-approval intent and defaults to an operator tr
 });
 
 test('mode toggle defaults to an operator transition', async () => {
-  const h = harness({ schema_version: 13, verified: true });
+  const h = harness({ schema_version: 14, verified: true });
   expect(await runCli(['mode', 'toggle', 'target=council:custodes'], h.deps)).toBe(0);
   expect(h.calls[0]).toEqual({
     method: 'POST',
     path: '/agents/mode',
     body: {
-      schema_version: 13,
+      schema_version: 14,
       target: 'council:custodes',
       intent: 'toggle_plan',
       trigger: 'operator',
@@ -248,7 +248,7 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
   process.env.AGENT_ID = 'source';
   const receipt = {
     ok: true,
-    schema_version: 13,
+    schema_version: 14,
     phase: 'delivery_confirmed',
     message_id: 'message-1',
     source_agent_id: 'source',
