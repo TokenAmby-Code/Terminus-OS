@@ -257,7 +257,7 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     const attestation = 'snapshot=~/backups/reset-point-2026-08-23;restore-proof=journal.head=8739';
 
     const result = await store.compact({
-      schema_version: 13,
+      schema_version: 14,
       source_agent_id: 'operator-agent',
       reset_journal_head: 8722,
       archive_attestation: attestation,
@@ -310,11 +310,24 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
     await expect(driven(raw`update txd.events set entity_id = 'x' where entity_id = 'legacy:double-encoded'`)).rejects.toThrow(/append-only/);
   });
   test('migration 0022 purges rows outside the admitted event-type union and spares every admitted type', async () => {
-    // Plant one raw row per admitted type plus one row whose type the contract
+    // The purge is a frozen one-time repair: its admitted list is the
+    // vocabulary AS OF the migration, read from the migration file itself so
+    // this pin cannot drift from what actually ran. Types added later are
+    // appended only after migrations, so they never meet this purge — but
+    // every type the purge spared must still exist in the contract union
+    // (vocabulary only grows; a removal would refuse the surviving rows at
+    // boot replay).
+    const migrationSql = await Bun.file(
+      new URL("../../../migrations/0022_txd_admitted_event_type_purge.sql", import.meta.url),
+    ).text();
+    const frozenAdmitted = [...migrationSql.matchAll(/'((?:reg|act|estate)\.[a-z_]+)'/g)].map((m) => m[1]!);
+    expect(frozenAdmitted.length).toBeGreaterThan(0);
+    for (const eventType of frozenAdmitted) expect(EVENT_TYPES as readonly string[]).toContain(eventType);
+    // Plant one raw row per frozen admitted type plus one row whose type the
     // union does not admit — append is allowed; only UPDATE/DELETE/TRUNCATE
     // are fenced. Boot replay validates every stored row against the union, so
     // an unadmitted row refuses the whole stream until the purge removes it.
-    for (const eventType of EVENT_TYPES) {
+    for (const eventType of frozenAdmitted) {
       await raw`
         INSERT INTO txd.events (entity_type, entity_id, event_type, payload, provenance, occurred_at, recorded_at)
         VALUES ('seat', 'purge:admitted', ${eventType},
@@ -327,15 +340,12 @@ describe.skipIf(!endpoint)('PostgresEventStore (live postgres 18)', () => {
               '{}'::jsonb, '{"source":"wrapper"}'::jsonb,
               '2026-07-12T00:00:00.000Z', '2026-07-12T00:00:00.000Z')`;
     // Exercise the migration SQL directly, as the 0005 test does above.
-    const migration = await Bun.file(
-      new URL("../../../migrations/0022_txd_admitted_event_type_purge.sql", import.meta.url),
-    ).text();
-    await raw.unsafe(migration);
+    await raw.unsafe(migrationSql);
     const counts = (await raw`
       SELECT entity_id, count(*)::int AS n FROM txd.events
       WHERE entity_id IN ('purge:unadmitted', 'purge:admitted')
       GROUP BY entity_id ORDER BY entity_id`) as { entity_id: string; n: number }[];
-    expect(counts).toEqual([{ entity_id: 'purge:admitted', n: EVENT_TYPES.length }]);
+    expect(counts).toEqual([{ entity_id: 'purge:admitted', n: frozenAdmitted.length }]);
     // The append-only fence is back up after the migration's scoped trigger disable.
     const driven = async (q: PromiseLike<unknown>) => { await q; };
     await expect(driven(raw`delete from txd.events where entity_id = 'purge:admitted'`)).rejects.toThrow(/append-only/);

@@ -11,14 +11,14 @@ function setup() {
   return { store, tmux, d: new Daemon(store, tmux) };
 }
 
-const FULL = { schema_version: 13, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
+const FULL = { schema_version: 14, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;
 
 // Rung 3: stop facts projected from lifecycled's journal publication. Three honest outcomes, no blind swallow.
 
 test('fresh stop for a bound live agent is recorded → activity stopped', async () => {
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  const res = await d.stop({ agent_id: 'i1', schema_version: 13 });
+  const res = await d.stop({ agent_id: 'i1', schema_version: 14 });
   expect(res).toEqual({ ok: true, agent_id: 'i1', recorded: true, deduped: false, turn: 'awaiting_input' });
   expect((await store.readAll()).filter((e) => e.event_type === 'act.stop_reported')).toHaveLength(1);
   expect(buildProjections(await store.readAll()).seatBoard.find((r) => r.seat_id === 'palace:W')!.turn).toBe('awaiting_input');
@@ -27,8 +27,8 @@ test('fresh stop for a bound live agent is recorded → activity stopped', async
 test('duplicate stop is deduped (receipt_deduped), not a second stop_reported — no blind swallow', async () => {
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  await d.stop({ agent_id: 'i1', schema_version: 13 });
-  const res = await d.stop({ agent_id: 'i1', schema_version: 13 });
+  await d.stop({ agent_id: 'i1', schema_version: 14 });
+  const res = await d.stop({ agent_id: 'i1', schema_version: 14 });
   expect(res).toMatchObject({ ok: true, recorded: false, deduped: true });
   expect((await store.readAll()).filter((e) => e.event_type === 'act.stop_reported')).toHaveLength(1);
   expect((await store.readAll()).filter((e) => e.event_type === 'act.receipt_deduped')).toHaveLength(1);
@@ -36,7 +36,7 @@ test('duplicate stop is deduped (receipt_deduped), not a second stop_reported �
 
 test('GHOST stop — agent never bound — is refused loud; nothing recorded', async () => {
   const { store, d } = setup();
-  const res = await d.stop({ agent_id: '77f7cfb4-orphan', schema_version: 13 });
+  const res = await d.stop({ agent_id: '77f7cfb4-orphan', schema_version: 14 });
   expect(res).toEqual({ ok: false, refused: true, reason: 'no_such_agent', agent_id: '77f7cfb4-orphan' });
   // The whole point: no phantom row, no stop_reported, no dedupe — zero footprint.
   expect(await store.count()).toBe(0);
@@ -45,10 +45,10 @@ test('GHOST stop — agent never bound — is refused loud; nothing recorded', a
 test('a stop AFTER close (bound-then-cleared) is deduped, NOT treated as a ghost', async () => {
   const { store, d } = setup();
   await d.launch({ seat_id: 'palace:W', ...FULL });
-  await d.stop({ agent_id: 'i1', schema_version: 13 });
+  await d.stop({ agent_id: 'i1', schema_version: 14 });
   await bindOverseerSource(d, store);
   await d.close(closeRequest(['i1']));
-  const res = await d.stop({ agent_id: 'i1', schema_version: 13 }); // late stop, seat already freed
+  const res = await d.stop({ agent_id: 'i1', schema_version: 14 }); // late stop, seat already freed
   expect(res).toMatchObject({ ok: true, recorded: false, deduped: true });
   // everBound distinguishes this from a ghost: it is NOT refused.
   expect('refused' in res).toBe(false);

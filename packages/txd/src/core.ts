@@ -4238,9 +4238,12 @@ export class Daemon {
           // old binding truth against replacement pane generations.
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
         }
-      } else {
+      }
+      let replacementGeneration: string | null = null;
+      if (scope !== 'page') {
         const seat = seats[0]!;
-        if (!(await this.tmux.resetSeat(seat))) {
+        replacementGeneration = await this.tmux.resetSeat(seat);
+        if (!replacementGeneration) {
           // Keep the request pending for reconstruction recovery; the physical
           // adapter may already have replaced the process before verification.
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
@@ -4265,6 +4268,14 @@ export class Daemon {
       await this.store.appendAll(inputs);
       this.wakeCommDeliveryFailures(inputs);
       await this.publishRetirements(bindings, 'estate_reset', completedAt);
+      if (scope !== 'page' && trigger !== 'operator' && replacementGeneration) {
+        // Cosmetic aftermath, sequenced strictly AFTER the death transaction
+        // above became durable, fenced to the exact generation THIS reset
+        // minted — never a re-read that could authorize whatever replaced the
+        // pane meanwhile. A page rebuild spawns fresh terminals with nothing
+        // to wipe, and an operator reset is not a death recovery.
+        await this.clearRecoveredIdleScreenUnlocked(seats[0]!, rotation_id, replacementGeneration, transportReceipt);
+      }
     return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
   }
 
@@ -4411,6 +4422,38 @@ export class Daemon {
         };
       }
       return { ok, reconstructed, reset_seats, rotation_ids, reason };
+  }
+
+  /**
+   * One shell `clear` in a recovered seat's replacement idle pane, removing
+   * the dead TUI's residue. It runs only after the seat's death transaction
+   * is durable, is fenced by the tmux adapter to the exact replacement pane
+   * generation and an idle default shell (it can never erase a live
+   * successor's UI), and its outcome is published either way. A refusal or
+   * failure is named, loud, and never mutates the recovery verdict it
+   * follows — a clean screen is not recovery evidence.
+   */
+  private async clearRecoveredIdleScreenUnlocked(
+    seatId: string,
+    rotationId: string | null,
+    replacementGeneration: string,
+    transportReceipt: string | null,
+  ): Promise<void> {
+    const outcome = await this.tmux.clearIdleSeatScreen(seatId, replacementGeneration);
+    if (outcome.ok) {
+      await this.store.append({
+        entity_type: 'seat', entity_id: seatId, event_type: 'estate.idle_screen_cleared',
+        payload: { rotation_id: rotationId, pane_generation: replacementGeneration },
+        provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+      });
+      return;
+    }
+    await this.store.append({
+      entity_type: 'seat', entity_id: seatId, event_type: 'estate.idle_screen_clear_failed',
+      payload: { rotation_id: rotationId, pane_generation: replacementGeneration, reason: outcome.reason },
+      provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
+    });
+    console.error(JSON.stringify({ level: 'error', event: 'idle_screen_clear_failed', seat: seatId, reason: outcome.reason }));
   }
 
   /**

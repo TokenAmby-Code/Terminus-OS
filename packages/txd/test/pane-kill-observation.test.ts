@@ -94,7 +94,7 @@ test('the fake control plane repairs a deleted seat in place while the window su
   const daemon = new Daemon(new MemoryEventStore(), tmux);
   await daemon.constructEstate();
   tmux.deleteOutOfBand('somnium:SE');
-  expect(await tmux.resetSeat('somnium:SE')).toBe(true);
+  expect(await tmux.resetSeat('somnium:SE')).toBeTruthy();
   expect(tmux.estateShape().windows.somnium).toEqual([...TXD_WINDOWS.somnium]);
   expect((await tmux.listSeats()).find((seat) => seat.seat_id === 'somnium:SE')).toMatchObject({ pane: 'live' });
 });
@@ -104,5 +104,5 @@ test('the fake control plane refuses to repair a seat whose window is gone', asy
   const daemon = new Daemon(new MemoryEventStore(), tmux);
   await daemon.constructEstate();
   for (const seat of TXD_WINDOWS.palace) tmux.deleteOutOfBand(seat);
-  expect(await tmux.resetSeat('palace:E')).toBe(false);
+  expect(await tmux.resetSeat('palace:E')).toBeNull();
 });

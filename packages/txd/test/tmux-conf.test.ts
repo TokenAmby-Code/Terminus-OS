@@ -46,7 +46,10 @@ describe('tmux/tx.conf', () => {
     const binding = conf.split('\n').find((line) => line.startsWith('bind -n BTab '));
     expect(binding).toContain('#{pane_current_command},claude');
     expect(binding).toContain('#{pane_current_command},codex');
-    expect(binding).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx mode toggle');
+    // The stamped tx launcher is a Bash wrapper: it is executed directly,
+    // never handed to bun as source (wrapper-as-Bun scar, 2026-08-31).
+    expect(binding).toContain("run-shell -b '$HOME/.local/bin/tx mode toggle");
+    expect(binding).not.toContain('bun');
     expect(binding).toContain('target="#{@canonical_id}"');
     expect(binding).toContain('{ send-keys BTab }');
     expect(binding).not.toMatch(/pane_id|tmuxctld|capture-pane|grep/);
@@ -128,15 +131,9 @@ describe('tmux/tx.conf', () => {
   test('keeps panes observable through exit without owning daemon lifecycle hooks', () => {
     expect(conf).toContain('%if "#{==:#{TXD_TMUX_SOCKET},k12}"');
     expect(conf).toContain('set -g remain-on-exit on');
-    const lifecycleHooks = conf.split('\n').filter((line) =>
-      line.startsWith('set-hook -g ') && line.includes('tx estate event'),
-    );
-    expect(lifecycleHooks).toHaveLength(2);
-    for (const hook of lifecycleHooks) {
-      expect(hook).toContain('systemd-cat --identifier=txd-tmux-hook');
-      expect(hook).toContain('2>&1');
-      expect(hook).toMatch(/\| systemd-cat .* \|\| true"'$/);
-    }
+    // txd exclusively owns all four lifecycle witnesses; the config forwards
+    // no lifecycle event, so a reload can never replace an attested witness.
+    expect(conf).not.toContain('tx estate event');
   });
 
   test('reflows Council after the window changes without owning operator zoom', () => {
@@ -150,25 +147,9 @@ describe('tmux/tx.conf', () => {
 
   test('leaves daemon-owned lifecycle hooks untouched on config reload', () => {
     const daemonOwnedHooks = conf.split('\n').filter((line) =>
-      /^set-hook -g pane-(?:died|exited)\b/.test(line),
+      /^set-hook -g (?:pane-died|pane-exited|after-kill-pane|window-unlinked)\b/.test(line),
     );
 
     expect(daemonOwnedHooks).toEqual([]);
-  });
-
-  test('observes kill commands the pane hooks never see and forwards them page-less', () => {
-    // `kill-pane` fires neither pane-died nor pane-exited, a killed window
-    // fires only window-unlinked (tmux 3.6 has no after-kill-window hook),
-    // and both hooks run with the ACTIVE window as context — a page claim
-    // from the kill site would lie. The forward is therefore page-less.
-    expect(conf).toContain('set-hook -g after-kill-pane');
-    expect(conf).toContain('set-hook -g window-unlinked');
-    expect(conf).not.toContain('after-kill-window');
-    const killForwards = conf.split('\n').filter((line) => line.includes('tx estate event pane-killed'));
-    expect(killForwards).toHaveLength(2);
-    for (const line of killForwards) {
-      expect(line).toContain('$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-killed');
-      expect(line).not.toContain('--page');
-    }
   });
 });

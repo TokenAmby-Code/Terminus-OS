@@ -67,7 +67,16 @@ export type LifecycleHookReadiness = {
   state: 'ready' | 'degraded';
   pane_died: boolean;
   pane_exited: boolean;
+  after_kill_pane: boolean;
+  window_unlinked: boolean;
 };
+// Post-recovery cosmetic clear of a replacement idle pane. Every refusal is
+// typed and zero-effect: the clear is fenced to the exact replacement pane
+// generation and an idle default shell, so it can never type into a live
+// successor's UI.
+export type IdleScreenClearOutcome =
+  | { ok: true }
+  | { ok: false; reason: 'seat_unresolved' | 'generation_moved' | 'pane_not_idle' | 'clear_failed' };
 export type SeatEngineLaunch = {
   seatId: string;
   engine: 'claude' | 'codex';
@@ -215,8 +224,15 @@ export interface TmuxControlPlane {
    * pane-local style pair observed before clearing when the caller omits it.
    */
   reapSeat(seatId: string, previousTint?: string | null): Promise<boolean>;
-  /** Clear pane history, replace its process, and re-verify its canonical tag. */
-  resetSeat(seatId: string): Promise<boolean>;
+  /**
+   * Clear pane history, replace its process under a freshly minted pane
+   * generation, and re-verify its canonical tag. Resolves to the exact
+   * replacement generation it minted (the fence a post-recovery clear must
+   * carry), or null when the reset failed.
+   */
+  resetSeat(seatId: string): Promise<string | null>;
+  /** Run one shell `clear` in a recovered idle pane, fenced to the exact replacement generation. */
+  clearIdleSeatScreen(seatId: string, expectedGeneration: string): Promise<IdleScreenClearOutcome>;
   /** Reconstruct every terminal process and the declared geometry inside one page border. */
   rebuildPage(page: string): Promise<boolean>;
   /** Replace a seat's process with the sanctioned wrapper running the named engine. */
@@ -1243,31 +1259,63 @@ export class RealTmux implements TmuxControlPlane {
   }
 
   private lifecycleHookCommands() {
-    // Every hook capture goes to the txd-tmux-hook journal identifier, which is
-    // the sole surface `tx inspect hooks` reads. A hook that skips systemd-cat
-    // fires invisibly to the diagnostic, so the tail is identical to the one
-    // tx.conf's kill hooks carry.
+    // txd exclusively owns and attests all four lifecycle witnesses; tx.conf
+    // installs none of them, so a config reload can never replace an attested
+    // witness with a stale spelling.
+    //
+    // The stamped `tx` launcher is a Bash wrapper — the shebang and stamped
+    // environment ARE its contract — so it is executed directly, never handed
+    // to bun as source (live scar 2026-08-31: `bun <launcher>` failed parsing
+    // `set -euo pipefail` on every death ingress while `|| true` reported
+    // success). systemd-cat's exec form keeps the capture on the txd-tmux-hook
+    // journal identifier — the sole surface `tx inspect hooks` reads — AND
+    // propagates the forward's real exit code, so a failed death ingress stays
+    // loud in tmux instead of dissolving into a green pipeline.
+    const forward = (args: string) =>
+      `run-shell -b "systemd-cat --identifier=txd-tmux-hook $HOME/.local/bin/tx estate event ${args}"`;
+    // A kill command fires neither pane hook: `kill-pane` destroys the pane
+    // before any process-death hook can see it, so only after-kill-pane
+    // observes it, and a killed window announces itself only as
+    // window-unlinked. Both fire with the ACTIVE window as context, never the
+    // window that lost the pane, so the forward is page-less and txd sweeps
+    // the estate; a sweep over a canonical estate is a no-op.
     return {
-      'pane-died': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-died page=#{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
-      'pane-exited': 'run-shell -b "$HOME/.bun/bin/bun $HOME/.local/bin/tx estate event pane-exited page=#{q:window_name} 2>&1 | systemd-cat --identifier=txd-tmux-hook || true"',
+      'pane-died': forward('pane-died page=#{q:window_name}'),
+      'pane-exited': forward('pane-exited page=#{q:window_name}'),
+      'after-kill-pane': `if-shell -F "#{||:#{==:#{hook_window_name},mechanicus},#{||:#{==:#{hook_window_name},palace_fleet},#{==:#{hook_window_name},somnium_fleet}}}" "select-layout -t ${TXD_SESSION}:=#{hook_window_name} tiled" ; ${forward('pane-killed')}`,
+      'window-unlinked': forward('pane-killed'),
     } as const;
   }
 
   async lifecycleHookReadiness(): Promise<LifecycleHookReadiness> {
+    const expectedForward: Record<string, string> = {
+      'pane-died': 'tx estate event pane-died page=#{q:window_name}',
+      'pane-exited': 'tx estate event pane-exited page=#{q:window_name}',
+      'after-kill-pane': 'tx estate event pane-killed',
+      'window-unlinked': 'tx estate event pane-killed',
+    };
     const observed = await Promise.all(Object.keys(this.lifecycleHookCommands()).map(async (hook) => {
       const result = await this.command('observe_lifecycle_hook', hook, ['show-hooks', '-g', hook]);
       // tmux expands $HOME while storing the hook, so read-back cannot be a
       // byte comparison with the submitted command. Pin every semantic part
-      // that makes this the daemon's witness rather than an arbitrary hook.
+      // that makes this the daemon's witness rather than an arbitrary hook:
+      // the journald capture, the forward's exact argument spelling, and the
+      // absence of the two spellings that killed the ingress silently — a
+      // bun-parsed Bash launcher and a `|| true` success mask.
       return result.code === 0
         && result.stdout.includes(`${hook}[`)
-        && result.stdout.includes(`tx estate event ${hook} page=#{q:window_name}`);
+        && result.stdout.includes('systemd-cat --identifier=txd-tmux-hook')
+        && result.stdout.includes(expectedForward[hook]!)
+        && !result.stdout.includes('bun')
+        && !result.stdout.includes('|| true');
     }));
-    const [pane_died = false, pane_exited = false] = observed;
+    const [pane_died = false, pane_exited = false, after_kill_pane = false, window_unlinked = false] = observed;
     return {
-      state: pane_died && pane_exited ? 'ready' : 'degraded',
+      state: pane_died && pane_exited && after_kill_pane && window_unlinked ? 'ready' : 'degraded',
       pane_died,
       pane_exited,
+      after_kill_pane,
+      window_unlinked,
     };
   }
 
@@ -1281,9 +1329,11 @@ export class RealTmux implements TmuxControlPlane {
     }
   }
 
-  private async tag(paneId: string, seatId: string): Promise<void> {
+  private async tag(paneId: string, seatId: string): Promise<string> {
+    const generation = crypto.randomUUID();
     await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`, seatId);
-    await this.checked(['set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID()], `tag ${seatId} generation`, seatId);
+    await this.checked(['set-option', '-p', '-t', paneId, GENERATION_OPT, generation], `tag ${seatId} generation`, seatId);
+    return generation;
   }
 
   private async ensureSeatGeneration(seatId: string): Promise<void> {
@@ -1764,19 +1814,50 @@ export class RealTmux implements TmuxControlPlane {
     return false;
   }
 
-  async resetSeat(seatId: string): Promise<boolean> {
+  async resetSeat(seatId: string): Promise<string | null> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return this.repairSeat(seatId);
     const shell = await this.defaultShell(seatId);
-    if (!shell) return false;
-    if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return false;
-    if (!(await this.clearDefaultAgentEnvironment(paneId))) return false;
+    if (!shell) return null;
+    if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return null;
+    if (!(await this.clearDefaultAgentEnvironment(paneId))) return null;
     if ((await this.command('reset_seat_process', seatId, [
       'respawn-pane', '-k', ...this.paneEnvironment(seatId), '-t', paneId,
       '/usr/bin/env', '-u', AGENT_ID_ENV, `${PANE_ID_ENV}=${seatId}`, shell,
-    ])).code !== 0) return false;
+    ])).code !== 0) return null;
+    // The replacement process is a new pane lifecycle: mint a fresh generation
+    // so nothing fenced to the corpse's generation — transport claims, launch
+    // compositions, the post-recovery idle clear — can land on the successor.
+    // The caller receives THIS exact value as its fence; re-reading the pane
+    // later would authorize whatever generation had replaced it meanwhile.
+    const replacementGeneration = crypto.randomUUID();
+    if ((await this.command('rotate_seat_generation', seatId, [
+      'set-option', '-p', '-t', paneId, GENERATION_OPT, replacementGeneration,
+    ])).code !== 0) return null;
     const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
-    return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
+    if (verified.code !== 0 || verified.stdout.trim() !== seatId || !(await this.setSeatTint(seatId, null))) return null;
+    return replacementGeneration;
+  }
+
+  async clearIdleSeatScreen(seatId: string, expectedGeneration: string): Promise<IdleScreenClearOutcome> {
+    const paneId = await this.resolvePane(seatId);
+    if (!paneId) return { ok: false, reason: 'seat_unresolved' };
+    const shell = await this.defaultShell(seatId);
+    if (!shell) return { ok: false, reason: 'pane_not_idle' };
+    const observed = await this.command('observe_idle_pane', seatId, [
+      'display-message', '-p', '-t', paneId, `#{pane_dead}\t#{pane_current_command}\t#{${GENERATION_OPT}}`,
+    ]);
+    if (observed.code !== 0) return { ok: false, reason: 'seat_unresolved' };
+    const [dead, currentCommand, generation] = observed.stdout.trim().split('\t');
+    if (generation !== expectedGeneration) return { ok: false, reason: 'generation_moved' };
+    if (dead !== '0' || currentCommand !== shell.split('/').at(-1)) return { ok: false, reason: 'pane_not_idle' };
+    if ((await this.command('clear_idle_screen', seatId, ['send-keys', '-t', paneId, '-l', 'clear'])).code !== 0) {
+      return { ok: false, reason: 'clear_failed' };
+    }
+    if ((await this.command('clear_idle_screen_submit', seatId, ['send-keys', '-t', paneId, 'Enter'])).code !== 0) {
+      return { ok: false, reason: 'clear_failed' };
+    }
+    return { ok: true };
   }
 
   /**
@@ -1786,26 +1867,27 @@ export class RealTmux implements TmuxControlPlane {
    * construction graph constructPage stands, so a repaired seat lands in its
    * declared position; when the declared source is itself gone, any surviving
    * tagged pane anchors the split and boot-time convergence owns exactness.
-   * Returns false only when the window has no tagged pane left to anchor a
-   * repair — that page is structure damage, not a pane fault.
+   * Resolves to the minted replacement generation; null only when the window
+   * has no tagged pane left to anchor a repair — that page is structure
+   * damage, not a pane fault.
    */
-  private async repairSeat(seatId: string): Promise<boolean> {
+  private async repairSeat(seatId: string): Promise<string | null> {
     const [page] = seatId.split(':', 1);
-    if (!page || !Object.hasOwn(TXD_WINDOWS, page)) return false;
+    if (!page || !Object.hasOwn(TXD_WINDOWS, page)) return null;
     const seats = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[];
-    if (!seats.includes(seatId)) return false;
+    if (!seats.includes(seatId)) return null;
     const target = `${TXD_SESSION}:=${page}`;
     const listed = await this.command('observe_page_panes', page, [
       'list-panes', '-t', target, '-F', `#{pane_id}\t#{${CANON_OPT}}\t#{pane_dead}`,
     ]);
-    if (listed.code !== 0) return false;
+    if (listed.code !== 0) return null;
     const anchors = new Map<string, string>();
     for (const line of listed.stdout.split('\n')) {
       const [pane, canon, dead] = line.split('\t');
       if (pane && canon && dead === '0' && !anchors.has(canon)) anchors.set(canon, pane);
     }
-    if (anchors.size === 0) return false;
-    if (!(await this.clearPageZoom(page, target))) return false;
+    if (anchors.size === 0) return null;
+    if (!(await this.clearPageZoom(page, target))) return null;
     const spec = REPAIR_SPLITS[seatId];
     const sourcePane = (spec && anchors.get(spec.source)) ?? [...anchors.values()][0]!;
     const repairedCouncilRows = page === 'council' && spec && anchors.has(spec.source)
@@ -1823,13 +1905,14 @@ export class RealTmux implements TmuxControlPlane {
         `repair ${seatId}`,
         seatId,
       );
-      await this.tag(created, seatId);
+      const replacementGeneration = await this.tag(created, seatId);
       if (page === 'council') await this.applyCouncilGeometry(target);
       const verified = await this.command('verify_repair_seat_tag', seatId, ['display-message', '-p', '-t', created, `#{${CANON_OPT}}`]);
-      return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
+      if (verified.code !== 0 || verified.stdout.trim() !== seatId || !(await this.setSeatTint(seatId, null))) return null;
+      return replacementGeneration;
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'seat_repair_failed', seat: seatId, error: String(error) }));
-      return false;
+      return null;
     }
   }
 
@@ -2503,20 +2586,29 @@ export class FakeTmux implements TmuxControlPlane {
   private attachedClients = new Set<string>();
   private deliveredSelections: string[] = [];
   private wrapperPlacements = new Map<number, string>();
-  private lifecycleHooks = { pane_died: false, pane_exited: false };
+  private lifecycleHooks = { pane_died: false, pane_exited: false, after_kill_pane: false, window_unlinked: false };
+  private idleClears: Array<{ seat_id: string; pane_generation: string }> = [];
+  private postResetOccupations = new Map<string, string>();
+  private idleClearFailures = new Set<string>();
 
   async reachable(): Promise<boolean> {
     return this.reachableFlag;
   }
   async ensureLifecycleHooks(): Promise<void> {
-    this.lifecycleHooks = { pane_died: true, pane_exited: true };
+    this.lifecycleHooks = { pane_died: true, pane_exited: true, after_kill_pane: true, window_unlinked: true };
   }
   async lifecycleHookReadiness(): Promise<LifecycleHookReadiness> {
-    const { pane_died, pane_exited } = this.lifecycleHooks;
-    return { state: pane_died && pane_exited ? 'ready' : 'degraded', pane_died, pane_exited };
+    const { pane_died, pane_exited, after_kill_pane, window_unlinked } = this.lifecycleHooks;
+    return {
+      state: pane_died && pane_exited && after_kill_pane && window_unlinked ? 'ready' : 'degraded',
+      pane_died,
+      pane_exited,
+      after_kill_pane,
+      window_unlinked,
+    };
   }
   stripLifecycleHooks(): void {
-    this.lifecycleHooks = { pane_died: false, pane_exited: false };
+    this.lifecycleHooks = { pane_died: false, pane_exited: false, after_kill_pane: false, window_unlinked: false };
   }
   async version(): Promise<string | null> {
     return 'tmux 3.5a (fake)';
@@ -2735,7 +2827,7 @@ export class FakeTmux implements TmuxControlPlane {
     s.pane = 'live';
     return true;
   }
-  async resetSeat(seatId: string): Promise<boolean> {
+  async resetSeat(seatId: string): Promise<string | null> {
     // `respawn-pane -k` replaces the pane's process in place: a live process
     // is killed, a remain-on-exit corpse is revived. A missing pane is
     // repaired by splitting a surviving sibling, so it fails only when the
@@ -2744,26 +2836,57 @@ export class FakeTmux implements TmuxControlPlane {
     if (!s) {
       const [page] = seatId.split(':', 1);
       const declared = page ? (TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined) : undefined;
-      if (!declared?.includes(seatId)) return false;
+      if (!declared?.includes(seatId)) return null;
       const anchors = declared.filter((seat) => this.seats.get(seat)?.pane === 'live');
-      if (anchors.length === 0) return false;
-      this.seats.set(seatId, { pane: 'live', generation: crypto.randomUUID() });
+      if (anchors.length === 0) return null;
+      const generation = crypto.randomUUID();
+      this.seats.set(seatId, { pane: 'live', generation });
       const window = this.shape.windows[page!];
       if (window && !window.includes(seatId)) {
         this.shape.windows[page!] = declared.filter((seat) => window.includes(seat) || seat === seatId);
       }
       this.commands.delete(seatId);
+      this.seatEngines.delete(seatId);
       this.tints.delete(seatId);
       this.resets.push(seatId);
-      return true;
+      this.applyPostResetOccupation(seatId);
+      return generation;
     }
     s.pane = 'live';
+    // The replacement process is a new pane lifecycle — same rotation the
+    // real adapter performs, and the same returned fence.
+    s.generation = crypto.randomUUID();
     this.commands.delete(seatId);
+    this.seatEngines.delete(seatId);
     this.tints.delete(seatId);
     this.resets.push(seatId);
-    return true;
+    this.applyPostResetOccupation(seatId);
+    return s.generation;
   }
   resetSeats(): string[] { return [...this.resets]; }
+  /** Test control: a successor claims the pane the moment a reset completes. */
+  occupyAfterReset(seatId: string, command: string): void {
+    this.postResetOccupations.set(seatId, command);
+  }
+  private applyPostResetOccupation(seatId: string): void {
+    const command = this.postResetOccupations.get(seatId);
+    if (command !== undefined) this.commands.set(seatId, command);
+  }
+  /** Test control: force clearIdleSeatScreen(seatId) to fail at the send. */
+  failIdleScreenClear(seatId: string): void { this.idleClearFailures.add(seatId); }
+  idleScreenClears(): Array<{ seat_id: string; pane_generation: string }> { return [...this.idleClears]; }
+  async clearIdleSeatScreen(seatId: string, expectedGeneration: string): Promise<IdleScreenClearOutcome> {
+    const seat = this.seats.get(seatId);
+    if (!seat) return { ok: false, reason: 'seat_unresolved' };
+    if (seat.generation !== expectedGeneration) return { ok: false, reason: 'generation_moved' };
+    const command = this.commands.get(seatId);
+    if (seat.pane === 'dead' || (command !== undefined && !['bash', 'zsh', 'fish', 'sh', 'dash'].includes(command))) {
+      return { ok: false, reason: 'pane_not_idle' };
+    }
+    if (this.idleClearFailures.has(seatId)) return { ok: false, reason: 'clear_failed' };
+    this.idleClears.push({ seat_id: seatId, pane_generation: seat.generation });
+    return { ok: true };
+  }
   async rebuildPage(page: string): Promise<boolean> {
     if (!Object.hasOwn(TXD_WINDOWS, page)) return false;
     if (isStackPage(page)) {

@@ -23,5 +23,7 @@ test('boot re-attests lifecycle hooks after estate convergence changes them', as
     state: 'ready',
     pane_died: true,
     pane_exited: true,
+    after_kill_pane: true,
+    window_unlinked: true,
   });
 });

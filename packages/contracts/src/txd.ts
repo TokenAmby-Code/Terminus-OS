@@ -32,7 +32,9 @@ import { z } from 'zod';
 //      its mechanical intent (approve_plan, dialog_accept).
 // v12: breaking — absent dynamic seats use the estate's abandon vocabulary.
 // v13: additive — lifecycle-owned effects gain one generation-fenced comm actuator.
-export const SCHEMA_VERSION = 13;
+// v14: additive — pane-death recovery publishes its post-transaction
+//      idle-screen clear outcome (cleared, or a named refusal/failure).
+export const SCHEMA_VERSION = 14;
 
 // A caller-supplied identifier: a canonical seat name (`somnium:NE`), an agent
 // id, or a page. Raw tmux ids — pane `%N`, window `@N`, session `$N` — live
@@ -265,6 +267,12 @@ export const ESTATE_EVENT_NAMES = [
   'scoped_reset_failed',
   'page_canonical_observed',
   'compaction_checkpoint',
+  // Post-transaction cosmetic aftermath of a pane-death recovery: one shell
+  // `clear` in the replacement idle pane, generation-fenced so it can never
+  // erase a live successor's UI. The outcome is durable either way; a failure
+  // is named and never mutates the recovery verdict it follows.
+  'idle_screen_cleared',
+  'idle_screen_clear_failed',
 ] as const;
 
 // The qualified event_type union (`<domain>.<name>`), enumerated literally so
@@ -317,6 +325,8 @@ export const EVENT_TYPES = [
   'estate.scoped_reset_failed',
   'estate.page_canonical_observed',
   'estate.compaction_checkpoint',
+  'estate.idle_screen_cleared',
+  'estate.idle_screen_clear_failed',
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 export const EventTypeSchema = z.enum(EVENT_TYPES);

@@ -217,8 +217,8 @@ test('two dead panes earn two loud pane-scoped resets, never a page rebuild', as
 
 test('one seat\'s physical reset failure stays open and loud without blocking the sibling corpse\'s repair', async () => {
   class OneSeatDownTmux extends FakeTmux {
-    override async resetSeat(seatId: string): Promise<boolean> {
-      if (seatId === 'palace:S') return false;
+    override async resetSeat(seatId: string): Promise<string | null> {
+      if (seatId === 'palace:S') return null;
       return super.resetSeat(seatId);
     }
   }
@@ -296,8 +296,8 @@ test('boot resumes a pending pane reconstruction and retires its exact binding',
 test('reconcile resumes an admitted scoped reset after a transient physical failure', async () => {
   class FlakyResetTmux extends FakeTmux {
     private failures = 1;
-    override async resetSeat(seatId: string): Promise<boolean> {
-      if (this.failures-- > 0) return false;
+    override async resetSeat(seatId: string): Promise<string | null> {
+      if (this.failures-- > 0) return null;
       return super.resetSeat(seatId);
     }
   }
