@@ -49,6 +49,18 @@ for dropin in "$unit_dir"/*.service.d/generation.conf; do
   echo "retire-orphan-packages($machine): retired $package"
 done
 
+# Workspace libraries have no unit drop-in to lead the service loop above.
+# A package directory with no manifest is residue from a package deleted at
+# the synchronized candidate, so remove that exact immediate child too.
+for package_dir in "$terminus"/packages/*; do
+  [[ -d "$package_dir" && ! -f "$package_dir/package.json" ]] || continue
+  package="$(basename "$package_dir")"
+  [[ "$package" != */* && -n "$package" ]] || continue
+  rm -rf "$package_dir"
+  retired=$((retired + 1))
+  echo "retire-orphan-packages($machine): retired $package"
+done
+
 if ((retired)); then
   "$systemctl" --user daemon-reload
 else
