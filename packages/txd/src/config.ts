@@ -61,8 +61,12 @@ export type DaemonConfig = {
 // `exactOptionalPropertyTypes`, and these maps deliberately carry `undefined`
 // for "not provided at this layer" (resolved by the ?? chains below).
 type PartialConfig = {
-  [K in Exclude<keyof DaemonConfig, 'sshSeatTargets'>]?: DaemonConfig[K] | undefined
-} & { sshSeatTargets?: SshSeatTargetConfig | SshSeatTargets | undefined };
+  [K in Exclude<keyof DaemonConfig, 'db' | 'sshSeatTargets'>]?: DaemonConfig[K] | undefined
+} & {
+  db?: DbEndpointT | (Omit<Extract<DbEndpointT, { kind: 'socket' }>, 'port' | 'schema'> & { port?: number })
+    | (Omit<Extract<DbEndpointT, { kind: 'tcp' }>, 'port' | 'schema'> & { port?: number }) | undefined;
+  sshSeatTargets?: SshSeatTargetConfig | SshSeatTargets | undefined;
+};
 
 // txd has one serialized event/state store domain. Bun queues concurrent
 // callers behind its one genuinely in-flight query connection.
@@ -222,7 +226,9 @@ export function assertConfig(raw: PartialConfig): DaemonConfig {
   if (!cfg.machine)
     throw new Error('txd config error: machine is required (set IMPERIUM_MACHINE or config.machine — the daemon must never guess its box identity)');
   // Strict endpoint validation: unknown fields inside `db` are rejected loud.
-  const db = DbEndpoint.safeParse(cfg.db);
+  // The service owns its schema; machine connection config remains the ruled
+  // socket/TCP shape and cannot redirect txd's search path.
+  const db = DbEndpoint.safeParse({ ...cfg.db, schema: 'public' });
   if (!db.success)
     throw new Error(`txd config error: invalid db endpoint — ${db.error.message}`);
   cfg.db = db.data;

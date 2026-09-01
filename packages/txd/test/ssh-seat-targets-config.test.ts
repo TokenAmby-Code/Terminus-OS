@@ -17,6 +17,20 @@ test('default configuration preserves the current k12-work placement generation'
   expect(config.sshSeatTargets.targetFor('palace:S')).toBeUndefined();
 });
 
+test('the adopter supplies its public schema without changing the machine endpoint shape', () => {
+  const config = assertConfig({
+    ...base,
+    db: {
+      kind: 'socket',
+      socket_dir: '/var/run/postgresql',
+      database: 'terminus',
+      application_name: 'txd',
+      max: 1,
+    },
+  });
+  expect(config.db.schema).toBe('public');
+});
+
 test('config selects remote targets by page and by exact attended seat', () => {
   const config = assertConfig({
     ...base,
