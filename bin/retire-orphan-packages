@@ -10,13 +10,26 @@ if [[ "$machine" != "k12-personal" ]]; then
   exit 0
 fi
 
-terminus="${TERMINUS_CHECKOUT:-$HOME/runtimes/Terminus-OS/live}"
-unit_dir="${TERMINUS_UNIT_DIR:-$HOME/.config/systemd/user}"
-config_dir="${TERMINUS_CONFIG_DIR:-$HOME/.config/token-fleet}"
-state_dir="${TERMINUS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet}"
-install_root="${TERMINUS_INSTALL_ROOT:-$HOME/.local/lib/terminus-os}"
-systemctl="${SYSTEMCTL:-systemctl}"
+service_user=tokenamby
+service_uid=1000
+service_home=/home/tokenamby
+terminus="${TERMINUS_CHECKOUT:-$service_home/runtimes/Terminus-OS/live}"
+unit_dir="${TERMINUS_UNIT_DIR:-$service_home/.config/systemd/user}"
+config_dir="${TERMINUS_CONFIG_DIR:-$service_home/.config/token-fleet}"
+state_dir="${TERMINUS_STATE_DIR:-$service_home/.local/state/token-fleet}"
+install_root="${TERMINUS_INSTALL_ROOT:-$service_home/.local/lib/terminus-os}"
+runuser="${RUNUSER:-/usr/sbin/runuser}"
+systemctl="${SYSTEMCTL:-/usr/bin/systemctl}"
 retired=0
+
+user_systemctl() {
+  "$runuser" --user "$service_user" -- /usr/bin/env \
+    "HOME=$service_home" \
+    "USER=$service_user" \
+    "LOGNAME=$service_user" \
+    "XDG_RUNTIME_DIR=/run/user/$service_uid" \
+    "$systemctl" --user "$@"
+}
 
 shopt -s nullglob
 for dropin in "$unit_dir"/*.service.d/generation.conf; do
@@ -40,7 +53,7 @@ for dropin in "$unit_dir"/*.service.d/generation.conf; do
     unit_names+=("$(basename "$unit")")
   done
   if ((${#unit_names[@]})); then
-    "$systemctl" --user disable --now "${unit_names[@]}"
+    user_systemctl disable --now "${unit_names[@]}"
   fi
   rm -f "${related[@]}" "$config_dir/$package.json" "$state_dir/$package.applied.sha256"
   rm -rf "$service_dir" "$install_root/$package" "$install_root/generations/$package"
@@ -62,7 +75,7 @@ for package_dir in "$terminus"/packages/*; do
 done
 
 if ((retired)); then
-  "$systemctl" --user daemon-reload
+  user_systemctl daemon-reload
 else
   echo "retire-orphan-packages($machine): no orphan packages"
 fi
