@@ -224,8 +224,13 @@ export interface TmuxControlPlane {
    * pane-local style pair observed before clearing when the caller omits it.
    */
   reapSeat(seatId: string, previousTint?: string | null): Promise<boolean>;
-  /** Clear pane history, replace its process under a freshly minted pane generation, and re-verify its canonical tag. */
-  resetSeat(seatId: string): Promise<boolean>;
+  /**
+   * Clear pane history, replace its process under a freshly minted pane
+   * generation, and re-verify its canonical tag. Resolves to the exact
+   * replacement generation it minted (the fence a post-recovery clear must
+   * carry), or null when the reset failed.
+   */
+  resetSeat(seatId: string): Promise<string | null>;
   /** Run one shell `clear` in a recovered idle pane, fenced to the exact replacement generation. */
   clearIdleSeatScreen(seatId: string, expectedGeneration: string): Promise<IdleScreenClearOutcome>;
   /** Reconstruct every terminal process and the declared geometry inside one page border. */
@@ -1324,9 +1329,11 @@ export class RealTmux implements TmuxControlPlane {
     }
   }
 
-  private async tag(paneId: string, seatId: string): Promise<void> {
+  private async tag(paneId: string, seatId: string): Promise<string> {
+    const generation = crypto.randomUUID();
     await this.checked(['set-option', '-p', '-t', paneId, CANON_OPT, seatId], `tag ${seatId}`, seatId);
-    await this.checked(['set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID()], `tag ${seatId} generation`, seatId);
+    await this.checked(['set-option', '-p', '-t', paneId, GENERATION_OPT, generation], `tag ${seatId} generation`, seatId);
+    return generation;
   }
 
   private async ensureSeatGeneration(seatId: string): Promise<void> {
@@ -1807,25 +1814,29 @@ export class RealTmux implements TmuxControlPlane {
     return false;
   }
 
-  async resetSeat(seatId: string): Promise<boolean> {
+  async resetSeat(seatId: string): Promise<string | null> {
     const paneId = await this.resolvePane(seatId);
     if (!paneId) return this.repairSeat(seatId);
     const shell = await this.defaultShell(seatId);
-    if (!shell) return false;
-    if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return false;
-    if (!(await this.clearDefaultAgentEnvironment(paneId))) return false;
+    if (!shell) return null;
+    if ((await this.command('clear_seat_history', seatId, ['clear-history', '-t', paneId])).code !== 0) return null;
+    if (!(await this.clearDefaultAgentEnvironment(paneId))) return null;
     if ((await this.command('reset_seat_process', seatId, [
       'respawn-pane', '-k', ...this.paneEnvironment(seatId), '-t', paneId,
       '/usr/bin/env', '-u', AGENT_ID_ENV, `${PANE_ID_ENV}=${seatId}`, shell,
-    ])).code !== 0) return false;
+    ])).code !== 0) return null;
     // The replacement process is a new pane lifecycle: mint a fresh generation
     // so nothing fenced to the corpse's generation — transport claims, launch
     // compositions, the post-recovery idle clear — can land on the successor.
+    // The caller receives THIS exact value as its fence; re-reading the pane
+    // later would authorize whatever generation had replaced it meanwhile.
+    const replacementGeneration = crypto.randomUUID();
     if ((await this.command('rotate_seat_generation', seatId, [
-      'set-option', '-p', '-t', paneId, GENERATION_OPT, crypto.randomUUID(),
-    ])).code !== 0) return false;
+      'set-option', '-p', '-t', paneId, GENERATION_OPT, replacementGeneration,
+    ])).code !== 0) return null;
     const verified = await this.command('verify_reset_seat_tag', seatId, ['display-message', '-p', '-t', paneId, `#{${CANON_OPT}}`]);
-    return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
+    if (verified.code !== 0 || verified.stdout.trim() !== seatId || !(await this.setSeatTint(seatId, null))) return null;
+    return replacementGeneration;
   }
 
   async clearIdleSeatScreen(seatId: string, expectedGeneration: string): Promise<IdleScreenClearOutcome> {
@@ -1856,26 +1867,27 @@ export class RealTmux implements TmuxControlPlane {
    * construction graph constructPage stands, so a repaired seat lands in its
    * declared position; when the declared source is itself gone, any surviving
    * tagged pane anchors the split and boot-time convergence owns exactness.
-   * Returns false only when the window has no tagged pane left to anchor a
-   * repair — that page is structure damage, not a pane fault.
+   * Resolves to the minted replacement generation; null only when the window
+   * has no tagged pane left to anchor a repair — that page is structure
+   * damage, not a pane fault.
    */
-  private async repairSeat(seatId: string): Promise<boolean> {
+  private async repairSeat(seatId: string): Promise<string | null> {
     const [page] = seatId.split(':', 1);
-    if (!page || !Object.hasOwn(TXD_WINDOWS, page)) return false;
+    if (!page || !Object.hasOwn(TXD_WINDOWS, page)) return null;
     const seats = TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[];
-    if (!seats.includes(seatId)) return false;
+    if (!seats.includes(seatId)) return null;
     const target = `${TXD_SESSION}:=${page}`;
     const listed = await this.command('observe_page_panes', page, [
       'list-panes', '-t', target, '-F', `#{pane_id}\t#{${CANON_OPT}}\t#{pane_dead}`,
     ]);
-    if (listed.code !== 0) return false;
+    if (listed.code !== 0) return null;
     const anchors = new Map<string, string>();
     for (const line of listed.stdout.split('\n')) {
       const [pane, canon, dead] = line.split('\t');
       if (pane && canon && dead === '0' && !anchors.has(canon)) anchors.set(canon, pane);
     }
-    if (anchors.size === 0) return false;
-    if (!(await this.clearPageZoom(page, target))) return false;
+    if (anchors.size === 0) return null;
+    if (!(await this.clearPageZoom(page, target))) return null;
     const spec = REPAIR_SPLITS[seatId];
     const sourcePane = (spec && anchors.get(spec.source)) ?? [...anchors.values()][0]!;
     const repairedCouncilRows = page === 'council' && spec && anchors.has(spec.source)
@@ -1893,13 +1905,14 @@ export class RealTmux implements TmuxControlPlane {
         `repair ${seatId}`,
         seatId,
       );
-      await this.tag(created, seatId);
+      const replacementGeneration = await this.tag(created, seatId);
       if (page === 'council') await this.applyCouncilGeometry(target);
       const verified = await this.command('verify_repair_seat_tag', seatId, ['display-message', '-p', '-t', created, `#{${CANON_OPT}}`]);
-      return verified.code === 0 && verified.stdout.trim() === seatId && await this.setSeatTint(seatId, null);
+      if (verified.code !== 0 || verified.stdout.trim() !== seatId || !(await this.setSeatTint(seatId, null))) return null;
+      return replacementGeneration;
     } catch (error) {
       console.error(JSON.stringify({ level: 'error', event: 'seat_repair_failed', seat: seatId, error: String(error) }));
-      return false;
+      return null;
     }
   }
 
@@ -2814,7 +2827,7 @@ export class FakeTmux implements TmuxControlPlane {
     s.pane = 'live';
     return true;
   }
-  async resetSeat(seatId: string): Promise<boolean> {
+  async resetSeat(seatId: string): Promise<string | null> {
     // `respawn-pane -k` replaces the pane's process in place: a live process
     // is killed, a remain-on-exit corpse is revived. A missing pane is
     // repaired by splitting a surviving sibling, so it fails only when the
@@ -2823,10 +2836,11 @@ export class FakeTmux implements TmuxControlPlane {
     if (!s) {
       const [page] = seatId.split(':', 1);
       const declared = page ? (TXD_WINDOWS[page as keyof typeof TXD_WINDOWS] as readonly string[] | undefined) : undefined;
-      if (!declared?.includes(seatId)) return false;
+      if (!declared?.includes(seatId)) return null;
       const anchors = declared.filter((seat) => this.seats.get(seat)?.pane === 'live');
-      if (anchors.length === 0) return false;
-      this.seats.set(seatId, { pane: 'live', generation: crypto.randomUUID() });
+      if (anchors.length === 0) return null;
+      const generation = crypto.randomUUID();
+      this.seats.set(seatId, { pane: 'live', generation });
       const window = this.shape.windows[page!];
       if (window && !window.includes(seatId)) {
         this.shape.windows[page!] = declared.filter((seat) => window.includes(seat) || seat === seatId);
@@ -2836,18 +2850,18 @@ export class FakeTmux implements TmuxControlPlane {
       this.tints.delete(seatId);
       this.resets.push(seatId);
       this.applyPostResetOccupation(seatId);
-      return true;
+      return generation;
     }
     s.pane = 'live';
     // The replacement process is a new pane lifecycle — same rotation the
-    // real adapter performs.
+    // real adapter performs, and the same returned fence.
     s.generation = crypto.randomUUID();
     this.commands.delete(seatId);
     this.seatEngines.delete(seatId);
     this.tints.delete(seatId);
     this.resets.push(seatId);
     this.applyPostResetOccupation(seatId);
-    return true;
+    return s.generation;
   }
   resetSeats(): string[] { return [...this.resets]; }
   /** Test control: a successor claims the pane the moment a reset completes. */

@@ -609,7 +609,7 @@ describe('disposable canonical estate geometry', () => {
     )).split('\n').map((row) => row.split('\t') as [string, string]));
 
     await tmux(socket, 'kill-pane', '-t', await paneId(socket, 'palace:E'));
-    expect(await control.resetSeat('palace:E')).toBe(true);
+    expect(await control.resetSeat('palace:E')).toBeTruthy();
 
     const after = new Map((await tmux(
       socket, 'list-panes', '-a', '-F', '#{@canonical_id}\t#{pane_pid}',
@@ -632,7 +632,7 @@ describe('disposable canonical estate geometry', () => {
     await tmux(socket, 'resize-window', '-t', 'main:council', '-x', '191', '-y', '48');
 
     await tmux(socket, 'kill-pane', '-t', await paneId(socket, 'council:pax'));
-    expect(await control.resetSeat('council:pax')).toBe(true);
+    expect(await control.resetSeat('council:pax')).toBeTruthy();
 
     const rows = await tmux(
       socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_width}\t#{pane_height}',
@@ -720,6 +720,6 @@ describe('disposable canonical estate geometry', () => {
     await control.ensureEstate();
 
     await tmux(socket, 'kill-window', '-t', 'main:palace');
-    expect(await control.resetSeat('palace:E')).toBe(false);
+    expect(await control.resetSeat('palace:E')).toBeNull();
   });
 });

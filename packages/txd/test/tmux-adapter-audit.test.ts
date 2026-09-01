@@ -89,7 +89,10 @@ test('scoped reset clears history, replaces the process, and verifies the canoni
     },
     audit: () => {},
   });
-  expect(await tmux.resetSeat('palace:N')).toBe(true);
+  // The reset answers with the exact replacement generation it minted — the
+  // fence a post-recovery clear carries instead of re-reading the pane.
+  const replacementGeneration = await tmux.resetSeat('palace:N');
+  expect(typeof replacementGeneration).toBe('string');
   expect(operations).toEqual([
     'list-panes', 'show-options', 'clear-history', 'set-environment', 'respawn-pane', 'set-option', 'display-message',
     'list-panes', 'set-option', 'set-option', 'list-panes', 'show-options', 'show-options',

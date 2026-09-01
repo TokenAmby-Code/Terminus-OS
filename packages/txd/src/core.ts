@@ -4238,9 +4238,12 @@ export class Daemon {
           // old binding truth against replacement pane generations.
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
         }
-      } else {
+      }
+      let replacementGeneration: string | null = null;
+      if (scope !== 'page') {
         const seat = seats[0]!;
-        if (!(await this.tmux.resetSeat(seat))) {
+        replacementGeneration = await this.tmux.resetSeat(seat);
+        if (!replacementGeneration) {
           // Keep the request pending for reconstruction recovery; the physical
           // adapter may already have replaced the process before verification.
           return { ok: false, rotation_id, accepted: false, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: 'reset_failed' };
@@ -4265,6 +4268,14 @@ export class Daemon {
       await this.store.appendAll(inputs);
       this.wakeCommDeliveryFailures(inputs);
       await this.publishRetirements(bindings, 'estate_reset', completedAt);
+      if (scope !== 'page' && trigger !== 'operator' && replacementGeneration) {
+        // Cosmetic aftermath, sequenced strictly AFTER the death transaction
+        // above became durable, fenced to the exact generation THIS reset
+        // minted — never a re-read that could authorize whatever replaced the
+        // pane meanwhile. A page rebuild spawns fresh terminals with nothing
+        // to wipe, and an operator reset is not a death recovery.
+        await this.clearRecoveredIdleScreenUnlocked(seats[0]!, rotation_id, replacementGeneration, transportReceipt);
+      }
     return { ok: true, rotation_id, accepted: true, force: req.force, scope, seats, bound_seats, foreground_workloads, reason: null };
   }
 
@@ -4396,11 +4407,6 @@ export class Daemon {
           if (reset.accepted) reconstructed = true;
           if (reset.ok) {
             reset_seats.push(seat);
-            // Cosmetic aftermath, sequenced strictly AFTER the death
-            // transaction above became durable. A page rebuild spawns fresh
-            // terminals with nothing to wipe, so only this respawned-corpse
-            // path carries residue of the dead TUI.
-            await this.clearRecoveredIdleScreenUnlocked(seat, reset.rotation_id, transportReceipt);
           } else {
             // The durable request stays open; reconstruction recovery resumes
             // it. One seat's physical failure never blocks a sibling's repair.
@@ -4430,23 +4436,21 @@ export class Daemon {
   private async clearRecoveredIdleScreenUnlocked(
     seatId: string,
     rotationId: string | null,
+    replacementGeneration: string,
     transportReceipt: string | null,
   ): Promise<void> {
-    const generation = await this.tmux.seatGeneration(seatId);
-    const outcome = generation === undefined
-      ? { ok: false as const, reason: 'generation_unobserved' }
-      : await this.tmux.clearIdleSeatScreen(seatId, generation);
+    const outcome = await this.tmux.clearIdleSeatScreen(seatId, replacementGeneration);
     if (outcome.ok) {
       await this.store.append({
         entity_type: 'seat', entity_id: seatId, event_type: 'estate.idle_screen_cleared',
-        payload: { rotation_id: rotationId, pane_generation: generation },
+        payload: { rotation_id: rotationId, pane_generation: replacementGeneration },
         provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
       });
       return;
     }
     await this.store.append({
       entity_type: 'seat', entity_id: seatId, event_type: 'estate.idle_screen_clear_failed',
-      payload: { rotation_id: rotationId, pane_generation: generation ?? null, reason: outcome.reason },
+      payload: { rotation_id: rotationId, pane_generation: replacementGeneration, reason: outcome.reason },
       provenance: this.prov('observer', transportReceipt), occurred_at: this.now(),
     });
     console.error(JSON.stringify({ level: 'error', event: 'idle_screen_clear_failed', seat: seatId, reason: outcome.reason }));
