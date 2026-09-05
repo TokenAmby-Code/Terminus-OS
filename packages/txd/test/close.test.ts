@@ -154,6 +154,79 @@ test('ticket truth unavailable refuses retirement and terminal truth admits the 
   expect(closed.verdicts[0]).toMatchObject({ closed: true, retirement: null });
 });
 
+test('a delayed retirement consultation does not hold the writer lock', async () => {
+  let announceConsult!: () => void;
+  const consultationStarted = new Promise<void>((resolve) => { announceConsult = resolve; });
+  let releaseConsult!: () => void;
+  const consultationReleased = new Promise<void>((resolve) => { releaseConsult = resolve; });
+  const { store, d } = setup(async () => {
+    announceConsult();
+    await consultationReleased;
+    return {
+      ok: true,
+      ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+      open_node_count: 0,
+      reason: null,
+    };
+  });
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'w-1');
+
+  const closing = d.close(req({ targets: ['w-1'], force: true }));
+  await consultationStarted;
+  const unrelated = await d.launch({
+    seat_id: 'somnium:N', schema_version: SCHEMA_VERSION,
+    identity: 'w-2', persona: 'black-shields', rank: 'astartes', tint: '#111111',
+  });
+  expect(unrelated.ok).toBe(true);
+
+  releaseConsult();
+  expect(await closing).toMatchObject({ ok: true, closed_count: 1 });
+});
+
+test('retirement consultation is fenced from a successor binding on the same seat', async () => {
+  let announceConsult!: () => void;
+  const consultationStarted = new Promise<void>((resolve) => { announceConsult = resolve; });
+  let releaseConsult!: () => void;
+  const consultationReleased = new Promise<void>((resolve) => { releaseConsult = resolve; });
+  const { store, d } = setup(async () => {
+    announceConsult();
+    await consultationReleased;
+    return {
+      ok: true,
+      ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+      open_node_count: 0,
+      reason: null,
+    };
+  });
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'w-1');
+
+  const closing = d.close(req({ targets: ['palace:W'], force: true }));
+  await consultationStarted;
+  await store.appendAll([
+    { entity_type: 'agent', entity_id: 'w-1', event_type: 'reg.retired', payload: {}, provenance: PROV, occurred_at: T },
+    { entity_type: 'seat', entity_id: 'palace:W', event_type: 'reg.process_reaped', payload: { agent_id: 'w-1' }, provenance: PROV, occurred_at: T },
+    { entity_type: 'seat', entity_id: 'palace:W', event_type: 'reg.seat_cleared', payload: {}, provenance: PROV, occurred_at: T },
+  ]);
+  await bind(d, store, 'palace:W', 'w-2');
+  releaseConsult();
+
+  const refused = await closing;
+  expect(refused).toMatchObject({ ok: false, closed_count: 0, refused_count: 1 });
+  expect(refused.verdicts[0]).toMatchObject({
+    target: 'palace:W',
+    seat_id: 'palace:W',
+    agent_id: 'w-2',
+    closed: false,
+    retirement: {
+      reason: 'not_yet_determinable',
+      detail: 'binding changed while retirement truth was consulted',
+    },
+  });
+  expect(buildProjections(await store.readAll()).currentBindings.map((binding) => binding.agent_id)).toContain('w-2');
+});
+
 test('close resolves by agent id as well as seat id', async () => {
   const { store, d } = setup();
   await overseer(d, store);

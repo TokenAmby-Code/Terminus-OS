@@ -3369,12 +3369,62 @@ export class Daemon {
   // terminal chain (retired + process_reaped + seat_cleared) is atomic per seat
   // and only written AFTER that process is confirmed reaped — a retire-with-
   // live-process is unspellable (spec §4). Bulk is N independent single-seat
-  // closes under one lock acquisition: each target gets its own verdict and its
-  // own facts, a refused sibling never blocks a close, and a page is never
-  // rebuilt. No silent no-op: an unbound target, a mid-turn agent (absent
+  // closes through a snapshot/consult/fenced-close sequence: each target gets
+  // its own verdict and its own facts, a refused sibling never blocks a close,
+  // and a page is never rebuilt. No silent no-op: an unbound target, a mid-turn agent (absent
   // force), an underranked caller, or a failed reap all
   // refuse loud.
-  close(req: CloseRequest, transportReceipt: string | null = null): Promise<CloseResponse> {
+  async close(req: CloseRequest, transportReceipt: string | null = null): Promise<CloseResponse> {
+    // Snapshot every registered binding this request could close while holding
+    // the writer lock, then consult ticket truth without it. The close phase
+    // below re-resolves and fences each binding against this snapshot before
+    // performing any irreversible effect.
+    const consultationCandidates = await this.locked(async (): Promise<CurrentBinding[]> => {
+      if (req.schema_version !== SCHEMA_VERSION) return [];
+      const proj = await this.projections();
+      const source = routableBindings(proj).find((binding) =>
+        binding.agent_id === req.source_agent_id);
+      if (!source || source.rank !== CLOSE_REQUIRED_RANK) return [];
+      if (req.targets) {
+        const candidates = req.targets.flatMap((target) => {
+          const binding = proj.currentBindings.find((row) =>
+            row.seat_id === target || row.agent_id === target);
+          return binding?.registered ? [binding] : [];
+        });
+        return [...new Map(candidates.map((binding) => [binding.bound_seq, binding])).values()];
+      }
+      return proj.currentBindings.filter((binding) => {
+        if (!binding.agent_id || !binding.registered) return false;
+        if (binding.rank === CLOSE_REQUIRED_RANK) return false;
+        if (proj.turnByAgent.get(binding.agent_id) === 'working') return false;
+        return !req.page || binding.seat_id.split(':', 1)[0] === req.page;
+      });
+    });
+    const consultations = new Map<number, { binding: CurrentBinding; result: RetirementConsultation }>();
+    await Promise.all(consultationCandidates.map(async (binding) => {
+      let result: RetirementConsultation;
+      try {
+        result = this.retirementConsult
+          ? await this.retirementConsult(binding.agent_id ?? '')
+          : {
+              ok: false,
+              ticket_id: null,
+              open_node_count: null,
+              reason: 'not_yet_determinable',
+              detail: 'lifecycled retirement consult is unavailable',
+            };
+      } catch (error) {
+        result = {
+          ok: false,
+          ticket_id: null,
+          open_node_count: null,
+          reason: 'not_yet_determinable',
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
+      consultations.set(binding.bound_seq, { binding, result });
+    }));
+
     return this.locked(async () => {
       const refused = (reason: string): CloseResponse => (
         { ok: false, closed_count: 0, refused_count: 0, verdicts: [], reason }
@@ -3410,26 +3460,21 @@ export class Daemon {
       const verdicts: CloseVerdict[] = [];
       const closeOne = async (target: string, binding: CurrentBinding): Promise<void> => {
         if (binding.registered) {
-          let consultation: RetirementConsultation;
-          try {
-            consultation = this.retirementConsult
-              ? await this.retirementConsult(binding.agent_id ?? "")
-              : {
-                  ok: false,
-                  ticket_id: null,
-                  open_node_count: null,
-                  reason: "not_yet_determinable",
-                  detail: "lifecycled retirement consult is unavailable",
-                };
-          } catch (error) {
-            consultation = {
-              ok: false,
-              ticket_id: null,
-              open_node_count: null,
-              reason: "not_yet_determinable",
-              detail: error instanceof Error ? error.message : String(error),
-            };
-          }
+          const consulted = consultations.get(binding.bound_seq);
+          const snapshot = consulted?.binding;
+          const consultation = snapshot
+            && snapshot.agent_id === binding.agent_id
+            && snapshot.seat_id === binding.seat_id
+            && snapshot.birth_generation === binding.birth_generation
+            && snapshot.bound_seq === binding.bound_seq
+            ? consulted.result
+            : {
+                ok: false as const,
+                ticket_id: binding.ticket_id,
+                open_node_count: null,
+                reason: 'not_yet_determinable' as const,
+                detail: 'binding changed while retirement truth was consulted',
+              };
           if (!consultation.ok) {
             verdicts.push({
               target,
