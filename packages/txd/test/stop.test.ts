@@ -2,13 +2,13 @@ import { expect, test } from 'bun:test';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
-import { bindOverseerSource, closeRequest } from './close-fixture.ts';
+import { bindOverseerSource, closeRequest, retirementClear } from './close-fixture.ts';
 import { buildProjections } from '../src/projections.ts';
 
 function setup() {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
-  return { store, tmux, d: new Daemon(store, tmux) };
+  return { store, tmux, d: new Daemon(store, tmux, undefined, undefined, null, null, null, null, undefined, retirementClear) };
 }
 
 const FULL = { schema_version: 14, identity: 'i1', persona: 'salamander', tint: '#302800' } as const;

@@ -14,7 +14,7 @@ import { UnregisteredClosedSchema, type PhysicalDeclaration } from '@tokenamby-c
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
-import { bindOverseerSource, closeRequest } from './close-fixture.ts';
+import { bindOverseerSource, closeRequest, retirementClear } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 import { AGENT_TICKET_ID } from './agent-fixture.ts';
 
@@ -39,7 +39,7 @@ function setup(options: { failPublish?: boolean } = {}) {
       published.push({ type, payload });
     },
   };
-  return { store, tmux, published, d: new Daemon(store, tmux, undefined, undefined, runtime) };
+  return { store, tmux, published, d: new Daemon(store, tmux, undefined, undefined, runtime, null, null, null, undefined, retirementClear) };
 }
 
 async function bindUnregistered(tmux: FakeTmux, d: Daemon, seatId: string): Promise<PhysicalDeclaration> {

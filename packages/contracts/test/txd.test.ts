@@ -15,6 +15,7 @@ import {
   EventTypeSchema,
   ModeTransitionRequestSchema,
   REG_EVENT_NAMES,
+  RetirementConsultationSchema,
   SCHEMA_VERSION,
   TmuxLifecycleEventRequestSchema,
   eventDomain,
@@ -25,6 +26,27 @@ import {
 describe("txd lifecycle vocabulary", () => {
   test("schema_version pins at 14 (pane-death recovery publishes its idle-screen clear outcome)", () => {
     expect(SCHEMA_VERSION).toBe(14);
+  });
+
+  test("retirement consultation distinguishes terminal ticket truth from typed refusal", () => {
+    expect(RetirementConsultationSchema.parse({
+      ok: true,
+      reason: null,
+      ticket_id: "48f891b0-2140-4a70-ad1e-50cabca36e61",
+      open_node_count: 0,
+    }).ok).toBe(true);
+    expect(RetirementConsultationSchema.parse({
+      ok: false,
+      reason: "ticket_not_closeable",
+      ticket_id: "48f891b0-2140-4a70-ad1e-50cabca36e61",
+      open_node_count: 1,
+    }).ok).toBe(false);
+    expect(() => RetirementConsultationSchema.parse({
+      ok: true,
+      reason: null,
+      ticket_id: "48f891b0-2140-4a70-ad1e-50cabca36e61",
+      open_node_count: 1,
+    })).toThrow();
   });
 
   test('lifecycle comm actuator requests pin one stable effect and two exact generations', () => {

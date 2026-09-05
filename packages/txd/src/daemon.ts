@@ -17,6 +17,7 @@ import { parseClipboardMachineRegistry } from './clipboard-origin.ts';
 import { SERVICE_VERSION } from './identity.ts';
 import { createTxdObservationSource, makeTxdObservationHandler } from './observation.ts';
 import { loadFleetTimezone } from '@tokenamby-code/stc-contract/fleet-time';
+import { RetirementConsultationSchema } from '@terminus-os/contracts';
 
 await loadFleetTimezone();
 
@@ -32,6 +33,10 @@ const cfg = await loadConfig();
 // let one pane monopolize txd long enough for hook delivery to time out.
 const LIFECYCLED_LOCAL_RESPONSE_MARGIN_MS = 1_000;
 const lifecycledFetchCeilingMs = cfg.commWatchTimeoutMs + LIFECYCLED_LOCAL_RESPONSE_MARGIN_MS;
+// lifecycled's retirement authority owns a 10-second ticketd read ceiling.
+// This is that server-owned ceiling plus the same local transport margin; it
+// is deliberately unrelated to the five-minute comm-watch contract.
+const RETIREMENT_CONSULT_CEILING_MS = 10_000 + LIFECYCLED_LOCAL_RESPONSE_MARGIN_MS;
 
 async function postLifecycledGate(
   path: '/agents/comm/gate' | '/agents/composer/gate',
@@ -86,6 +91,44 @@ const composerGate = cfg.lifecycledSocket
       await postLifecycledGate('/agents/composer/gate', { schema_version: 1, ...input, stream_class: 'interactive' }, 'lifecycled_composer_gate');
     }
   : null;
+const retirementConsult = async (agentId: string) => {
+  if (!cfg.lifecycledSocket) return {
+    ok: false as const,
+    reason: 'not_yet_determinable' as const,
+    ticket_id: null,
+    open_node_count: null,
+    detail: 'lifecycled retirement consult is disabled',
+  };
+  let response: Response;
+  try {
+    response = await fetch('http://lifecycled/agents/retirement-consult', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      unix: cfg.lifecycledSocket,
+      signal: AbortSignal.timeout(RETIREMENT_CONSULT_CEILING_MS),
+      body: JSON.stringify({ schema_version: 1, agent_id: agentId }),
+    });
+  } catch (error) {
+    return {
+      ok: false as const,
+      reason: 'not_yet_determinable' as const,
+      ticket_id: null,
+      open_node_count: null,
+      detail: `lifecycled retirement consult failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const parsed = RetirementConsultationSchema.safeParse(await response.json().catch(() => null));
+  if (!parsed.success || response.ok !== parsed.data.ok) return {
+    ok: false as const,
+    reason: 'not_yet_determinable' as const,
+    ticket_id: null,
+    open_node_count: null,
+    detail: `lifecycled retirement consult was not authoritative: HTTP ${response.status}`,
+  };
+  return parsed.data.ok
+    ? { ok: true as const, ticket_id: parsed.data.ticket_id, open_node_count: 0 as const, reason: null }
+    : parsed.data;
+};
 // The journal connection owns both txd's durable cursor and its producer.
 // It is opened before physical registration is exposed so no outcome can
 // accidentally fall back to a transport service.
@@ -104,7 +147,10 @@ const physicalRegistration = cfg.physicalRegistration
       publish: makeJournalPublisher(journalConnection.sql, cfg.machine),
     }
   : null;
-const daemon = new Daemon(store, tmux, undefined, rotationBarrier, physicalRegistration, realRemoteEnvelopeLister, commWatchArm, composerGate);
+const daemon = new Daemon(
+  store, tmux, undefined, rotationBarrier, physicalRegistration, realRemoteEnvelopeLister,
+  commWatchArm, composerGate, undefined, retirementConsult,
+);
 const eventJournal = createTxdEventJournal({
   machine: cfg.machine,
   endpoint: cfg.db,

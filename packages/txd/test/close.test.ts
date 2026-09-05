@@ -3,12 +3,22 @@ import { SCHEMA_VERSION } from '@terminus-os/contracts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
+import type { RetirementConsultation } from '@terminus-os/contracts';
 import { buildProjections } from '../src/projections.ts';
 
-function setup() {
+function setup(retirementConsult: (agentId: string) => Promise<RetirementConsultation> = async () => ({
+  ok: true,
+  ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+  open_node_count: 0,
+  reason: null,
+})) {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
-  return { store, tmux, d: new Daemon(store, tmux) };
+  return {
+    store,
+    tmux,
+    d: new Daemon(store, tmux, undefined, undefined, null, null, null, null, undefined, retirementConsult),
+  };
 }
 
 const T = '2026-08-01T00:00:00.000Z';
@@ -71,7 +81,7 @@ test('overseer closes an idle agent by seat id: retire chain, pane kept, seat fr
   const res = await d.close(req({ targets: ['palace:W'] }));
   expect(res).toMatchObject({ ok: true, closed_count: 1, refused_count: 0, reason: null });
   expect(res.verdicts).toEqual([
-    { target: 'palace:W', seat_id: 'palace:W', agent_id: 'w-1', closed: true, reason: null },
+    { target: 'palace:W', seat_id: 'palace:W', agent_id: 'w-1', closed: true, reason: null, retirement: null },
   ]);
 
   const types = (await store.readAll()).map((e) => e.event_type);
@@ -84,6 +94,137 @@ test('overseer closes an idle agent by seat id: retire chain, pane kept, seat fr
   expect(p.freelist).toContainEqual({ seat_id: 'palace:W', pane_state: 'live' });
   expect((await tmux.listSeats()).find((s) => s.seat_id === 'palace:W')!.pane).toBe('live');
   expect(await tmux.seatTint('palace:W')).toBeNull();
+});
+
+test('overseer close refuses an open birth obligation before any retirement effect', async () => {
+  const consulted: string[] = [];
+  const { store, tmux, d } = setup(async (agentId) => {
+    consulted.push(agentId);
+    return {
+      ok: false,
+      ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+      open_node_count: 1,
+      reason: 'ticket_not_closeable',
+    };
+  });
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'w-1');
+  const before = await store.count();
+  const hookReadinessBefore = await tmux.lifecycleHookReadiness();
+
+  const refused = await d.close(req({ targets: ['w-1'], force: true }));
+
+  expect(refused).toMatchObject({ ok: false, closed_count: 0, refused_count: 1 });
+  expect(refused.verdicts[0]).toMatchObject({
+    target: 'w-1',
+    agent_id: 'w-1',
+    closed: false,
+    retirement: {
+      reason: 'ticket_not_closeable',
+      ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+      open_node_count: 1,
+    },
+  });
+  expect(consulted).toEqual(['w-1']);
+  expect(await store.count()).toBe(before);
+  expect(await tmux.lifecycleHookReadiness()).toEqual(hookReadinessBefore);
+  expect((await tmux.listSeats()).find((seat) => seat.seat_id === 'palace:W')?.pane).toBe('live');
+  expect(buildProjections(await store.readAll()).currentBindings.map((binding) => binding.agent_id)).toContain('w-1');
+});
+
+test('ticket truth unavailable refuses retirement and terminal truth admits the same close path', async () => {
+  let available = false;
+  const { store, d } = setup(async () => available
+    ? { ok: true, ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61', open_node_count: 0, reason: null }
+    : { ok: false, ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61', open_node_count: null,
+        reason: 'not_yet_determinable', detail: 'ticketd unavailable' });
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'w-1');
+
+  const unavailable = await d.close(req({ targets: ['w-1'], force: true }));
+  expect(unavailable.verdicts[0]).toMatchObject({
+    closed: false,
+    retirement: { reason: 'not_yet_determinable', open_node_count: null },
+  });
+  expect(buildProjections(await store.readAll()).currentBindings.map((binding) => binding.agent_id)).toContain('w-1');
+
+  available = true;
+  const closed = await d.close(req({ targets: ['w-1'], force: true }));
+  expect(closed).toMatchObject({ ok: true, closed_count: 1, refused_count: 0 });
+  expect(closed.verdicts[0]).toMatchObject({ closed: true, retirement: null });
+});
+
+test('a delayed retirement consultation does not hold the writer lock', async () => {
+  let announceConsult!: () => void;
+  const consultationStarted = new Promise<void>((resolve) => { announceConsult = resolve; });
+  let releaseConsult!: () => void;
+  const consultationReleased = new Promise<void>((resolve) => { releaseConsult = resolve; });
+  const { store, d } = setup(async () => {
+    announceConsult();
+    await consultationReleased;
+    return {
+      ok: true,
+      ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+      open_node_count: 0,
+      reason: null,
+    };
+  });
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'w-1');
+
+  const closing = d.close(req({ targets: ['w-1'], force: true }));
+  await consultationStarted;
+  const unrelated = await d.launch({
+    seat_id: 'somnium:N', schema_version: SCHEMA_VERSION,
+    identity: 'w-2', persona: 'black-shields', rank: 'astartes', tint: '#111111',
+  });
+  expect(unrelated.ok).toBe(true);
+
+  releaseConsult();
+  expect(await closing).toMatchObject({ ok: true, closed_count: 1 });
+});
+
+test('retirement consultation is fenced from a successor binding on the same seat', async () => {
+  let announceConsult!: () => void;
+  const consultationStarted = new Promise<void>((resolve) => { announceConsult = resolve; });
+  let releaseConsult!: () => void;
+  const consultationReleased = new Promise<void>((resolve) => { releaseConsult = resolve; });
+  const { store, d } = setup(async () => {
+    announceConsult();
+    await consultationReleased;
+    return {
+      ok: true,
+      ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+      open_node_count: 0,
+      reason: null,
+    };
+  });
+  await overseer(d, store);
+  await bind(d, store, 'palace:W', 'w-1');
+
+  const closing = d.close(req({ targets: ['palace:W'], force: true }));
+  await consultationStarted;
+  await store.appendAll([
+    { entity_type: 'agent', entity_id: 'w-1', event_type: 'reg.retired', payload: {}, provenance: PROV, occurred_at: T },
+    { entity_type: 'seat', entity_id: 'palace:W', event_type: 'reg.process_reaped', payload: { agent_id: 'w-1' }, provenance: PROV, occurred_at: T },
+    { entity_type: 'seat', entity_id: 'palace:W', event_type: 'reg.seat_cleared', payload: {}, provenance: PROV, occurred_at: T },
+  ]);
+  await bind(d, store, 'palace:W', 'w-2');
+  releaseConsult();
+
+  const refused = await closing;
+  expect(refused).toMatchObject({ ok: false, closed_count: 0, refused_count: 1 });
+  expect(refused.verdicts[0]).toMatchObject({
+    target: 'palace:W',
+    seat_id: 'palace:W',
+    agent_id: 'w-2',
+    closed: false,
+    retirement: {
+      reason: 'not_yet_determinable',
+      detail: 'binding changed while retirement truth was consulted',
+    },
+  });
+  expect(buildProjections(await store.readAll()).currentBindings.map((binding) => binding.agent_id)).toContain('w-2');
 });
 
 test('close resolves by agent id as well as seat id', async () => {
@@ -137,7 +278,12 @@ test('behavioral pin: a running-daemon retirement sweep re-attests lifecycle hoo
 
   const store = new MemoryEventStore();
   const tmux = new HookStrippingRetirementTmux();
-  const d = new Daemon(store, tmux);
+  const d = new Daemon(store, tmux, undefined, undefined, null, null, null, null, undefined, async () => ({
+    ok: true,
+    ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
+    open_node_count: 0,
+    reason: null,
+  }));
   await d.constructEstate();
   await overseer(d, store);
   const agents = Array.from({ length: 9 }, (_, index) => `retirement-${index}`);

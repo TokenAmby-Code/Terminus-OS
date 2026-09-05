@@ -12,6 +12,7 @@ import {
   type CloseRequest,
   type CloseResponse,
   type CloseVerdict,
+  type RetirementConsultation,
   type ClipboardPullRequest,
   type ClipboardPushRequest,
   type ClipboardSelectionRequest,
@@ -156,6 +157,7 @@ export type CommWatchArmInput = {
   source_agent_id: string;
   composer_interactive_observed: boolean;
 };
+
 export type ComposerGateInput = { correlation_id: string; target_agent_id: string };
 /** One staged idle-target receipt's lost-Enter watch, armed at its tier-1 deadline. */
 type LostEnterArm = {
@@ -319,6 +321,7 @@ export class Daemon {
     private commWatchArm: ((input: CommWatchArmInput) => Promise<void>) | null = null,
     private composerGate: ((input: ComposerGateInput) => Promise<void>) | null = null,
     private commReceiptRuntime: CommReceiptRuntime = DEFAULT_COMM_RECEIPT_RUNTIME,
+    private retirementConsult: ((agentId: string) => Promise<RetirementConsultation>) | null = null,
   ) {
     // Install the commit observer before taking the boot snapshot. An append
     // racing that SELECT is either present in the snapshot or queued by seq;
@@ -3366,12 +3369,62 @@ export class Daemon {
   // terminal chain (retired + process_reaped + seat_cleared) is atomic per seat
   // and only written AFTER that process is confirmed reaped — a retire-with-
   // live-process is unspellable (spec §4). Bulk is N independent single-seat
-  // closes under one lock acquisition: each target gets its own verdict and its
-  // own facts, a refused sibling never blocks a close, and a page is never
-  // rebuilt. No silent no-op: an unbound target, a mid-turn agent (absent
+  // closes through a snapshot/consult/fenced-close sequence: each target gets
+  // its own verdict and its own facts, a refused sibling never blocks a close,
+  // and a page is never rebuilt. No silent no-op: an unbound target, a mid-turn agent (absent
   // force), an underranked caller, or a failed reap all
   // refuse loud.
-  close(req: CloseRequest, transportReceipt: string | null = null): Promise<CloseResponse> {
+  async close(req: CloseRequest, transportReceipt: string | null = null): Promise<CloseResponse> {
+    // Snapshot every registered binding this request could close while holding
+    // the writer lock, then consult ticket truth without it. The close phase
+    // below re-resolves and fences each binding against this snapshot before
+    // performing any irreversible effect.
+    const consultationCandidates = await this.locked(async (): Promise<CurrentBinding[]> => {
+      if (req.schema_version !== SCHEMA_VERSION) return [];
+      const proj = await this.projections();
+      const source = routableBindings(proj).find((binding) =>
+        binding.agent_id === req.source_agent_id);
+      if (!source || source.rank !== CLOSE_REQUIRED_RANK) return [];
+      if (req.targets) {
+        const candidates = req.targets.flatMap((target) => {
+          const binding = proj.currentBindings.find((row) =>
+            row.seat_id === target || row.agent_id === target);
+          return binding?.registered ? [binding] : [];
+        });
+        return [...new Map(candidates.map((binding) => [binding.bound_seq, binding])).values()];
+      }
+      return proj.currentBindings.filter((binding) => {
+        if (!binding.agent_id || !binding.registered) return false;
+        if (binding.rank === CLOSE_REQUIRED_RANK) return false;
+        if (proj.turnByAgent.get(binding.agent_id) === 'working') return false;
+        return !req.page || binding.seat_id.split(':', 1)[0] === req.page;
+      });
+    });
+    const consultations = new Map<number, { binding: CurrentBinding; result: RetirementConsultation }>();
+    await Promise.all(consultationCandidates.map(async (binding) => {
+      let result: RetirementConsultation;
+      try {
+        result = this.retirementConsult
+          ? await this.retirementConsult(binding.agent_id ?? '')
+          : {
+              ok: false,
+              ticket_id: null,
+              open_node_count: null,
+              reason: 'not_yet_determinable',
+              detail: 'lifecycled retirement consult is unavailable',
+            };
+      } catch (error) {
+        result = {
+          ok: false,
+          ticket_id: null,
+          open_node_count: null,
+          reason: 'not_yet_determinable',
+          detail: error instanceof Error ? error.message : String(error),
+        };
+      }
+      consultations.set(binding.bound_seq, { binding, result });
+    }));
+
     return this.locked(async () => {
       const refused = (reason: string): CloseResponse => (
         { ok: false, closed_count: 0, refused_count: 0, verdicts: [], reason }
@@ -3406,6 +3459,39 @@ export class Daemon {
 
       const verdicts: CloseVerdict[] = [];
       const closeOne = async (target: string, binding: CurrentBinding): Promise<void> => {
+        if (binding.registered) {
+          const consulted = consultations.get(binding.bound_seq);
+          const snapshot = consulted?.binding;
+          const consultation = snapshot
+            && snapshot.agent_id === binding.agent_id
+            && snapshot.seat_id === binding.seat_id
+            && snapshot.birth_generation === binding.birth_generation
+            && snapshot.bound_seq === binding.bound_seq
+            ? consulted.result
+            : {
+                ok: false as const,
+                ticket_id: binding.ticket_id,
+                open_node_count: null,
+                reason: 'not_yet_determinable' as const,
+                detail: 'binding changed while retirement truth was consulted',
+              };
+          if (!consultation.ok) {
+            verdicts.push({
+              target,
+              seat_id: binding.seat_id,
+              agent_id: binding.agent_id,
+              closed: false,
+              reason: `retirement_refused: ${consultation.reason}`,
+              retirement: {
+                reason: consultation.reason,
+                ticket_id: consultation.ticket_id,
+                open_node_count: consultation.open_node_count,
+                ...(consultation.detail === undefined ? {} : { detail: consultation.detail }),
+              },
+            });
+            return;
+          }
+        }
         // Reap FIRST; attest only on a confirmed kill. executeClose is the one
         // close mechanism for bound seats: abortRegistration (which passes
         // signalUnregistered=false) and the bound-seat branch of dead-stack-seat
@@ -3418,6 +3504,7 @@ export class Daemon {
           agent_id: binding.agent_id,
           closed,
           reason: closed ? null : 'reap_failed: agent process could not be reaped; seat left bound (fail-loud, no half-close)',
+          retirement: null,
         });
       };
 
@@ -3480,11 +3567,11 @@ export class Daemon {
         for (const binding of selected) await closeOne(binding.agent_id!, binding);
       }
 
-      // Pane kills in a bulk retirement can rewrite tmux's global hook state.
-      // Make physical read-back part of the running-daemon convergence just as
-      // boot does, after the last close has had a chance to clobber it.
-      await this.tmux.ensureLifecycleHooks();
       const closedCount = verdicts.filter((v) => v.closed).length;
+      // Pane kills in a bulk retirement can rewrite tmux's global hook state.
+      // Reconcile only after an actual close; a refused request has no physical
+      // effect to repair and must leave hook readiness untouched.
+      if (closedCount > 0) await this.tmux.ensureLifecycleHooks();
       return {
         ok: closedCount === verdicts.length && verdicts.length > 0,
         closed_count: closedCount,
