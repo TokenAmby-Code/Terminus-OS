@@ -12,6 +12,7 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
+import { retirementClear } from './close-fixture.ts';
 
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
 
@@ -34,7 +35,7 @@ async function setup(perpetual: Record<string, 'claude' | 'codex'>) {
       published.push({ type, payload });
     },
   };
-  const d = new Daemon(store, tmux, undefined, undefined, runtime);
+  const d = new Daemon(store, tmux, undefined, undefined, runtime, null, null, null, undefined, retirementClear);
   await d.constructEstate();
   published.length = 0;
   return { store, tmux, published, runtime, d };

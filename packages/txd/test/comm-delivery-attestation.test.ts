@@ -30,6 +30,7 @@ import { Daemon } from '../src/core.ts';
 import { commTokenForMessageId } from '../src/comm-frame.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
+import { retirementClear } from './close-fixture.ts';
 
 const PROV = { source: 'observer', transport_receipt: null, emitter_version: SCHEMA_VERSION } as const;
 const T = '2026-08-19T21:55:54.000Z';
@@ -41,7 +42,7 @@ const OPERATOR_DRAFT = 'im going to wait until home from the gym to do the ';
 async function rig() {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
-  const daemon = new Daemon(store, tmux);
+  const daemon = new Daemon(store, tmux, undefined, undefined, null, null, null, null, undefined, retirementClear);
   for (const [seat, identity, persona, rank] of [
     ['palace:W', 'worker', 'black-shields', 'astartes'],
     ['council:custodes', 'custodes', 'custodes', 'overseer'],

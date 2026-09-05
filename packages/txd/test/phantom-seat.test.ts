@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
-import { bindOverseerSource, closeRequest, OVERSEER_SOURCE } from './close-fixture.ts';
+import { bindOverseerSource, closeRequest, OVERSEER_SOURCE, retirementClear } from './close-fixture.ts';
 
 // Lane: behavioral-pin (the gating lane).
 //
@@ -35,7 +35,7 @@ import { bindOverseerSource, closeRequest, OVERSEER_SOURCE } from './close-fixtu
 function setup() {
   const tmux = new FakeTmux();
   const store = new MemoryEventStore();
-  return { tmux, store, d: new Daemon(store, tmux) };
+  return { tmux, store, d: new Daemon(store, tmux, undefined, undefined, null, null, null, null, undefined, retirementClear) };
 }
 
 // The proof:bus shape: an ad-hoc seat launched through the door, reaped and

@@ -12,6 +12,7 @@ import {
   type CloseRequest,
   type CloseResponse,
   type CloseVerdict,
+  type RetirementConsultation,
   type ClipboardPullRequest,
   type ClipboardPushRequest,
   type ClipboardSelectionRequest,
@@ -156,6 +157,7 @@ export type CommWatchArmInput = {
   source_agent_id: string;
   composer_interactive_observed: boolean;
 };
+
 export type ComposerGateInput = { correlation_id: string; target_agent_id: string };
 /** One staged idle-target receipt's lost-Enter watch, armed at its tier-1 deadline. */
 type LostEnterArm = {
@@ -319,6 +321,7 @@ export class Daemon {
     private commWatchArm: ((input: CommWatchArmInput) => Promise<void>) | null = null,
     private composerGate: ((input: ComposerGateInput) => Promise<void>) | null = null,
     private commReceiptRuntime: CommReceiptRuntime = DEFAULT_COMM_RECEIPT_RUNTIME,
+    private retirementConsult: ((agentId: string) => Promise<RetirementConsultation>) | null = null,
   ) {
     // Install the commit observer before taking the boot snapshot. An append
     // racing that SELECT is either present in the snapshot or queued by seq;
@@ -3406,6 +3409,44 @@ export class Daemon {
 
       const verdicts: CloseVerdict[] = [];
       const closeOne = async (target: string, binding: CurrentBinding): Promise<void> => {
+        if (binding.registered) {
+          let consultation: RetirementConsultation;
+          try {
+            consultation = this.retirementConsult
+              ? await this.retirementConsult(binding.agent_id ?? "")
+              : {
+                  ok: false,
+                  ticket_id: null,
+                  open_node_count: null,
+                  reason: "not_yet_determinable",
+                  detail: "lifecycled retirement consult is unavailable",
+                };
+          } catch (error) {
+            consultation = {
+              ok: false,
+              ticket_id: null,
+              open_node_count: null,
+              reason: "not_yet_determinable",
+              detail: error instanceof Error ? error.message : String(error),
+            };
+          }
+          if (!consultation.ok) {
+            verdicts.push({
+              target,
+              seat_id: binding.seat_id,
+              agent_id: binding.agent_id,
+              closed: false,
+              reason: `retirement_refused: ${consultation.reason}`,
+              retirement: {
+                reason: consultation.reason,
+                ticket_id: consultation.ticket_id,
+                open_node_count: consultation.open_node_count,
+                ...(consultation.detail === undefined ? {} : { detail: consultation.detail }),
+              },
+            });
+            return;
+          }
+        }
         // Reap FIRST; attest only on a confirmed kill. executeClose is the one
         // close mechanism for bound seats: abortRegistration (which passes
         // signalUnregistered=false) and the bound-seat branch of dead-stack-seat
@@ -3418,6 +3459,7 @@ export class Daemon {
           agent_id: binding.agent_id,
           closed,
           reason: closed ? null : 'reap_failed: agent process could not be reaped; seat left bound (fail-loud, no half-close)',
+          retirement: null,
         });
       };
 

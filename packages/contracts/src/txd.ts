@@ -551,8 +551,31 @@ export const CloseVerdictSchema = z.object({
   agent_id: z.string().nullable(),
   closed: z.boolean(), // true = full retire chain attested + seat freed
   reason: z.string().nullable(),
+  retirement: z.object({
+    reason: z.enum(["ticket_not_closeable", "not_yet_determinable"]),
+    ticket_id: z.string().uuid().nullable(),
+    open_node_count: z.number().int().nonnegative().nullable(),
+    detail: z.string().optional(),
+  }).nullable().optional(),
 });
 export type CloseVerdict = z.infer<typeof CloseVerdictSchema>;
+
+export const RetirementConsultationSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    ticket_id: z.string().uuid(),
+    open_node_count: z.literal(0),
+    reason: z.null(),
+  }).passthrough(),
+  z.object({
+    ok: z.literal(false),
+    reason: z.enum(["ticket_not_closeable", "not_yet_determinable"]),
+    ticket_id: z.string().uuid().nullable(),
+    open_node_count: z.number().int().nonnegative().nullable(),
+    detail: z.string().optional(),
+  }).passthrough(),
+]);
+export type RetirementConsultation = z.infer<typeof RetirementConsultationSchema>;
 
 export const CloseResponseSchema = z.object({
   ok: z.boolean(), // true = every selected target closed (selection non-empty)

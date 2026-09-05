@@ -10,7 +10,7 @@ import { AgentRetiredSchema, type PhysicalDeclaration } from '@tokenamby-code/ag
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
-import { bindOverseerSource, closeRequest } from './close-fixture.ts';
+import { bindOverseerSource, closeRequest, retirementClear } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 import { AGENT_TICKET_ID } from './agent-fixture.ts';
 
@@ -35,7 +35,7 @@ function setup(options: { failPublish?: boolean } = {}) {
       published.push({ type, payload });
     },
   };
-  return { store, tmux, published, d: new Daemon(store, tmux, undefined, undefined, runtime) };
+  return { store, tmux, published, d: new Daemon(store, tmux, undefined, undefined, runtime, null, null, null, undefined, retirementClear) };
 }
 
 async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): Promise<PhysicalDeclaration> {
@@ -241,7 +241,7 @@ test('a publication that lands leaves no trace — the drop event means a drop',
 test('an unregistered daemon (no bus runtime) closes without publishing', async () => {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
-  const d = new Daemon(store, tmux);
+  const d = new Daemon(store, tmux, undefined, undefined, null, null, null, null, undefined, retirementClear);
   await d.launch({ seat_id: 'palace:W', schema_version: 14, identity: 'i1', persona: 'salamander', tint: '#302800' });
 
   await bindOverseerSource(d, store);
