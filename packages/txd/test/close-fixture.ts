@@ -1,9 +1,9 @@
-import { SCHEMA_VERSION } from '@terminus-os/contracts';
+import { SCHEMA_VERSION, type RetirementConsultation } from '@terminus-os/contracts';
 import type { EventStore } from '../src/store.ts';
 import type { Daemon } from '../src/core.ts';
 
 export const OVERSEER_SOURCE = 'test-overseer-source';
-export const retirementClear = async () => ({
+export const retirementClear = async (): Promise<RetirementConsultation> => ({
   ok: true as const,
   ticket_id: '48f891b0-2140-4a70-ad1e-50cabca36e61',
   open_node_count: 0 as const,

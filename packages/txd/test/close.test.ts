@@ -110,6 +110,7 @@ test('overseer close refuses an open birth obligation before any retirement effe
   await overseer(d, store);
   await bind(d, store, 'palace:W', 'w-1');
   const before = await store.count();
+  const hookReadinessBefore = await tmux.lifecycleHookReadiness();
 
   const refused = await d.close(req({ targets: ['w-1'], force: true }));
 
@@ -126,6 +127,7 @@ test('overseer close refuses an open birth obligation before any retirement effe
   });
   expect(consulted).toEqual(['w-1']);
   expect(await store.count()).toBe(before);
+  expect(await tmux.lifecycleHookReadiness()).toEqual(hookReadinessBefore);
   expect((await tmux.listSeats()).find((seat) => seat.seat_id === 'palace:W')?.pane).toBe('live');
   expect(buildProjections(await store.readAll()).currentBindings.map((binding) => binding.agent_id)).toContain('w-1');
 });
