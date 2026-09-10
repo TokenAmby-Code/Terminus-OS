@@ -65,6 +65,7 @@ import {
   AgentIdSchema,
   AgentSchema,
   PLACEMENT_REFUSAL_REASONS,
+  type PlacementRefusalReason,
   type RetirementCause,
   type SeatDisqualifier,
   type WrapperStartHook,
@@ -121,7 +122,7 @@ import { attributedCommFrame, commFrame, commTokenForMessageId, type CommFrameSo
 import type { SshSeatTargets } from './config.ts';
 import { ENVELOPE_PREFIX, envelopeSessionName, type RemoteEnvelopeLister } from './envelopes.ts';
 import { NOOP_ROTATION_BARRIER, type EstateRotationBarrier } from './rotation-lock.ts';
-import type { TmuxControlPlane } from './tmux.ts';
+import type { TmuxControlPlane, WrapperPlacementAttestation } from './tmux.ts';
 import type { ClipboardOriginOutcome } from './clipboard-origin.ts';
 import type { TxdPublishedEventType } from './events.ts';
 
@@ -131,6 +132,31 @@ import type { TxdPublishedEventType } from './events.ts';
 export const DOOR1_REQUIRED_ATTESTATIONS = ['identity', 'persona', 'tint'] as const;
 
 type Now = () => string;
+type PlacementObservationReason =
+  | Extract<WrapperPlacementAttestation, { ok: false }>['reason']
+  | 'pane_id_mismatch'
+  | 'pane_generation_mismatch';
+
+/**
+ * A placement audit outcome for which txd published the terminal refusal
+ * receipt. The event lane consumes this typed signal; it is not journal
+ * poison. `observation_reason` remains internal until the shared agent
+ * contract gains its separately coordinated optional field.
+ */
+export class PlacementRefusalError extends Error {
+  override readonly name = 'PlacementRefusalError';
+
+  constructor(
+    readonly reason: PlacementRefusalReason,
+    readonly observation_reason: PlacementObservationReason | null = null,
+  ) {
+    super(reason);
+  }
+}
+
+function isPlacementRefusalReason(reason: string): reason is PlacementRefusalReason {
+  return (PLACEMENT_REFUSAL_REASONS as readonly string[]).includes(reason);
+}
 // What txd hands lifecycled to arm one comm watch: enough to name the
 // subscription's agent stream and the message whose hook will assert delivery.
 /**
@@ -696,7 +722,11 @@ export class Daemon {
    * assertion (including tint) is in hand, so the agent is bound and visible
    * before its engine takes a first turn.
    */
-  async recordPhysicalDeclaration(input: PhysicalDeclaration, receipt: string | null = null): Promise<void> {
+  async recordPhysicalDeclaration(
+    input: PhysicalDeclaration,
+    receipt: string | null = null,
+    declarationOccurredAt: string | null = null,
+  ): Promise<void> {
     await this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const declaration = PhysicalDeclarationSchema.parse(input);
@@ -709,8 +739,24 @@ export class Daemon {
         // on. Contradiction classes (conflicting evidence for one entity)
         // stay unpublished — they are audit faults, not placement outcomes.
         const reason = error instanceof Error ? error.message : String(error);
-        if ((PLACEMENT_REFUSAL_REASONS as readonly string[]).includes(reason)) {
-          await this.publishPlacementRefusal(declaration, reason);
+        if (isPlacementRefusalReason(reason)) {
+          const refusal = error instanceof PlacementRefusalError
+            ? error
+            : new PlacementRefusalError(reason);
+          await this.publishPlacementRefusal(
+            declaration,
+            refusal.reason,
+            declarationOccurredAt ?? this.now(),
+          );
+          console.info(JSON.stringify({
+            level: 'info',
+            event: 'placement_refused_published',
+            agent_id: declaration.agent_id,
+            birth_generation: declaration.birth_generation,
+            reason: refusal.reason,
+            observation_reason: refusal.observation_reason,
+          }));
+          throw refusal;
         }
         throw error;
       }
@@ -730,10 +776,14 @@ export class Daemon {
         throw new Error('physical_configuration_skew');
       }
       const observed = await this.tmux.attestWrapperPlacement(declaration.wrapper_pid);
-      if (!observed.ok
-          || observed.pane_id !== declaration.pane_id
-          || observed.pane_generation !== declaration.pane_generation) {
-        throw new Error('physical_declaration_contradicted');
+      if (!observed.ok) {
+        throw new PlacementRefusalError('physical_declaration_contradicted', observed.reason);
+      }
+      if (observed.pane_id !== declaration.pane_id) {
+        throw new PlacementRefusalError('physical_declaration_contradicted', 'pane_id_mismatch');
+      }
+      if (observed.pane_generation !== declaration.pane_generation) {
+        throw new PlacementRefusalError('physical_declaration_contradicted', 'pane_generation_mismatch');
       }
       // Level-two coherence. The asserted persona is checked against the seat
       // tmux says the wrapper is in — never against the pane the declaration
@@ -898,9 +948,13 @@ export class Daemon {
     }
   }
 
-  private async publishPlacementRefusal(declaration: PhysicalDeclaration, reason: string): Promise<void> {
-    if (!this.physicalRegistration) return;
-    const refusal = PlacementRefusedSchema.safeParse({
+  private async publishPlacementRefusal(
+    declaration: PhysicalDeclaration,
+    reason: PlacementRefusalReason,
+    refusedAt: string,
+  ): Promise<void> {
+    if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
+    const refusal = PlacementRefusedSchema.parse({
       schema_version: AGENT_SCHEMA_VERSION,
       agent_id: declaration.agent_id,
       birth_generation: declaration.birth_generation,
@@ -908,28 +962,9 @@ export class Daemon {
       pane_generation: declaration.pane_generation,
       machine: this.physicalRegistration.machine,
       reason,
-      refused_at: this.now(),
+      refused_at: refusedAt,
     });
-    if (!refusal.success) {
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'placement_refused_publish_skipped',
-        agent_id: declaration.agent_id,
-        reason,
-      }));
-      return;
-    }
-    try {
-      await this.physicalRegistration.publish('agent.placement_refused', refusal.data);
-    } catch (error) {
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'placement_refused_publish_failed',
-        agent_id: declaration.agent_id,
-        reason,
-        error: String(error),
-      }));
-    }
+    await this.physicalRegistration.publish('agent.placement_refused', refusal);
   }
 
   // The abort-path close (chapter-locks spec §4): registrationd aborted its

@@ -1,6 +1,9 @@
 import { SQL } from 'bun';
 import { userInfo } from 'node:os';
-import { AgentSchema } from '@tokenamby-code/agent-contract/agent';
+import {
+  AgentSchema,
+  PLACEMENT_REFUSAL_REASONS,
+} from '@tokenamby-code/agent-contract/agent';
 import {
   DispatchRequestedSchema,
   PhysicalDeclarationSchema,
@@ -19,7 +22,7 @@ import {
   type JournalPoisonDisposition,
   type JournalPoisonDispositionRow,
 } from '@tokenamby-code/stc-contract/journal/consumer';
-import type { Daemon } from './core.ts';
+import { PlacementRefusalError, type Daemon } from './core.ts';
 import { makeJournalReceipt } from './journal-receipt.ts';
 
 export type TxdJournalEvent = JournalEvent & { seq: number };
@@ -54,20 +57,20 @@ export function createTxdJournalPoisonDisposer(sql: SQL): TxdJournalPoisonDispos
   };
 }
 
-const PHYSICAL_REFUSALS = new Set([
+const POISON_ONLY_PHYSICAL_FAILURES = new Set([
   'physical_registration_unconfigured',
-  'physical_configuration_skew',
-  'physical_declaration_contradicted',
-  'persona_seat_incoherent',
   'physical_declaration_conflict',
-  'physical_binding_conflict',
-  'tint_attestation_failed',
-  'physical_binding_incomplete',
   'registered_agent_physical_conflict',
   'registered_agent_package_conflict',
   'abort_of_registered_agent',
   'abort_reap_failed',
 ]);
+
+for (const reason of PLACEMENT_REFUSAL_REASONS) {
+  if (POISON_ONLY_PHYSICAL_FAILURES.has(reason)) {
+    throw new Error(`placement refusal cannot also be poison-only: ${reason}`);
+  }
+}
 
 function poison(code: string, event: TxdJournalEvent, detail: Record<string, unknown> = {}): never {
   throw new PoisonEventError(code, { event_type: event.event_type, ...detail });
@@ -117,7 +120,7 @@ export function createTxdEventLane(options: {
         if (event.event_type === 'agent.physical_declared') {
           const parsed = PhysicalDeclarationSchema.safeParse(event.payload);
           if (!parsed.success) poison('invalid_physical_declaration', event);
-          await options.daemon.recordPhysicalDeclaration(parsed.data, receipt);
+          await options.daemon.recordPhysicalDeclaration(parsed.data, receipt, event.occurred_at.toISOString());
           return;
         }
         if (event.event_type === 'agent.registration_aborted') {
@@ -135,8 +138,9 @@ export function createTxdEventLane(options: {
         poison('unhandled_txd_event', event);
       } catch (error) {
         if (error instanceof PoisonEventError) throw error;
+        if (error instanceof PlacementRefusalError) return;
         const reason = error instanceof Error ? error.message : String(error);
-        if (PHYSICAL_REFUSALS.has(reason)) {
+        if (POISON_ONLY_PHYSICAL_FAILURES.has(reason)) {
           poison(reason, event);
         }
         throw error;
