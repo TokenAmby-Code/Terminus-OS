@@ -128,8 +128,6 @@ export type ReplayEventPage = z.infer<typeof ReplayEventPageSchema>;
 export const UnfinishedReplayPageSchema = z.object({
   replays: z.array(ReplayIdSchema).max(500),
   next_cursor: ReplayIdSchema.nullable(),
-  // Present on the indexed machine/kind query. The legacy global query stays
-  // byte-compatible while githubd generations roll across the two machines.
-  total: z.number().int().nonnegative().optional(),
+  total: z.number().int().nonnegative(),
 }).strict();
 export type UnfinishedReplayPage = z.infer<typeof UnfinishedReplayPageSchema>;
