@@ -3,12 +3,26 @@ import {
   CanonicalRequestHashSchema,
   ReplayEventInputSchema,
   ReplayIdSchema,
+  UnfinishedReplayPageSchema,
 } from "../src/replay.ts";
 
 const replayId = "d9428888-122b-4c26-b269-0a3f62f4f06b";
 const eventId = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
 describe("generic replay wire contract", () => {
+  test("unfinished replay pages require the total count", () => {
+    const page = {
+      replays: [replayId],
+      next_cursor: null,
+    };
+
+    expect(UnfinishedReplayPageSchema.safeParse(page).success).toBe(false);
+    expect(UnfinishedReplayPageSchema.parse({ ...page, total: 1 })).toEqual({
+      ...page,
+      total: 1,
+    });
+  });
+
   test("accepts the complete immutable event vocabulary", () => {
     expect(ReplayEventInputSchema.parse({
       replay_id: replayId,
