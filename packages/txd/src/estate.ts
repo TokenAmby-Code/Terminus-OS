@@ -41,11 +41,45 @@ export const COUNCIL_GEOMETRY = {
   verticalBorders: 1,
 } as const;
 
+export const PALACE_GEOMETRY = {
+  eastRegion: { numerator: 7, denominator: 10 },
+  eastColumn: { numerator: 43, denominator: 100 },
+  south: { numerator: 1, denominator: 2 },
+  verticalBorders: 2,
+  horizontalBorders: 1,
+} as const;
+
 export type CouncilPaneGeometry = { left: number; top: number; width: number; height: number };
 export type CouncilGeometry = {
   shape: 'columns' | 'stack';
   panes: readonly [CouncilPaneGeometry, CouncilPaneGeometry, CouncilPaneGeometry, CouncilPaneGeometry];
 };
+export type PalaceGeometry = {
+  shape: 'columns';
+  panes: readonly [CouncilPaneGeometry, CouncilPaneGeometry, CouncilPaneGeometry, CouncilPaneGeometry];
+};
+
+/** Canonical Palace projection derived solely from the observed window. */
+export function palaceGeometry(windowWidth: number, windowHeight: number): PalaceGeometry {
+  const usableWidth = windowWidth - PALACE_GEOMETRY.verticalBorders;
+  const westWidth = Math.round(usableWidth * (1 - PALACE_GEOMETRY.eastRegion.numerator / PALACE_GEOMETRY.eastRegion.denominator));
+  const eastRegionWidth = usableWidth - westWidth;
+  const eastWidth = Math.round(eastRegionWidth * PALACE_GEOMETRY.eastColumn.numerator / PALACE_GEOMETRY.eastColumn.denominator);
+  const centerWidth = eastRegionWidth - eastWidth;
+  const usableHeight = windowHeight - PALACE_GEOMETRY.horizontalBorders;
+  const southHeight = Math.round(usableHeight * PALACE_GEOMETRY.south.numerator / PALACE_GEOMETRY.south.denominator);
+  const northHeight = usableHeight - southHeight;
+  const centerLeft = westWidth + 1;
+  return {
+    shape: 'columns',
+    panes: [
+      { left: 0, top: 0, width: westWidth, height: windowHeight },
+      { left: centerLeft, top: 0, width: centerWidth, height: northHeight },
+      { left: centerLeft, top: northHeight + 1, width: centerWidth, height: southHeight },
+      { left: centerLeft + centerWidth + 1, top: 0, width: eastWidth, height: windowHeight },
+    ],
+  };
+}
 
 export function councilGeometryRows(windowHeight: number): { top: number; bottom: number } {
   const usable = windowHeight - COUNCIL_GEOMETRY.horizontalBorders;

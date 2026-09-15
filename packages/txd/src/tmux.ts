@@ -1583,6 +1583,10 @@ export class RealTmux implements TmuxControlPlane {
     if (!(await this.clearDefaultAgentEnvironment())) {
       throw new Error('txd could not clear the tmux server agent environment');
     }
+    await this.checked(
+      ['source-file', new URL('../tmux/tx.conf', import.meta.url).pathname],
+      'source canonical tmux interaction configuration',
+    );
     await this.ensureLifecycleHooks();
     const rows = await this.estateRows();
     if (rows.length > 0) {
@@ -1907,6 +1911,13 @@ export class RealTmux implements TmuxControlPlane {
       );
       const replacementGeneration = await this.tag(created, seatId);
       if (page === 'council') await this.applyCouncilGeometry(target);
+      if (page === 'palace') {
+        await this.checked(
+          ['run-shell', `${new URL('../tmux/reflow-council', import.meta.url).pathname} window-layout-changed`],
+          'apply palace geometry after seat repair',
+          page,
+        );
+      }
       const verified = await this.command('verify_repair_seat_tag', seatId, ['display-message', '-p', '-t', created, `#{${CANON_OPT}}`]);
       if (verified.code !== 0 || verified.stdout.trim() !== seatId || !(await this.setSeatTint(seatId, null))) return null;
       return replacementGeneration;
