@@ -26,8 +26,11 @@ test('opening a mitosis pane invokes the built-in tiled rebalancer exactly once'
 
 test('closing a mitosis pane is wired to one built-in tiled rebalance hook', async () => {
   const installedByHook = new Map<string, string>();
+  const calls: string[][] = [];
   const tmux = new RealTmux('scratch', {
     run: async (_socket, args) => {
+      calls.push(args);
+      if (args[0] === 'source-file') return { code: 0, stdout: '', stderr: '' };
       if (args[0] === 'set-hook') {
         installedByHook.set(args.at(-2)!, args.at(-1)!);
         return { code: 0, stdout: '', stderr: '' };
@@ -41,8 +44,13 @@ test('closing a mitosis pane is wired to one built-in tiled rebalance hook', asy
     audit: () => {},
   });
   await tmux.ensureLifecycleHooks();
+  expect(calls.find((args) => args[0] === 'source-file')).toEqual([
+    'source-file', expect.stringContaining('/packages/txd/tmux/tx.conf'),
+  ]);
   const rebalancers = [...installedByHook.entries()].filter(([, command]) =>
     command.includes('select-layout') && command.includes('tiled'),
   );
   expect(rebalancers.map(([hook]) => hook)).toEqual(['after-kill-pane']);
+  expect(installedByHook.get('after-kill-pane')).toContain('#{==:#{hook_window_name},palace}');
+  expect(installedByHook.get('after-kill-pane')).toContain('reflow-council window-layout-changed');
 });

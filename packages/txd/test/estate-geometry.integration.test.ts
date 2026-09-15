@@ -1,16 +1,30 @@
 // Canonical estate geometry on disposable tmux servers — behavioral-pin lane.
 
 import { afterEach, describe, expect, test } from 'bun:test';
-import { readFile } from 'node:fs/promises';
+import { mkdtempSync } from 'node:fs';
+import { readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { RealTmux } from '../src/tmux.ts';
-import { COUNCIL_GEOMETRY, TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
+import { COUNCIL_GEOMETRY, palaceGeometry, TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
 
 const conf = new URL('../tmux/tx.conf', import.meta.url).pathname;
 const reflowCouncil = new URL('../tmux/reflow-council', import.meta.url).pathname;
 const sockets: string[] = [];
+const socketDirs = new Map<string, string>();
+
+function freshSocket(label: string): string {
+  const directory = mkdtempSync(join(tmpdir(), `txd-${label}-${process.pid}-`));
+  const socket = `${label}-${process.pid}-${crypto.randomUUID()}`;
+  sockets.push(socket);
+  socketDirs.set(socket, directory);
+  return socket;
+}
 
 async function tmux(socket: string, ...args: string[]): Promise<string> {
-  const proc = Bun.spawn(['tmux', '-L', socket, ...args], { stdout: 'pipe', stderr: 'pipe' });
+  const proc = Bun.spawn(['tmux', '-L', socket, ...args], {
+    stdout: 'pipe', stderr: 'pipe', env: { ...process.env, TMUX_TMPDIR: socketDirs.get(socket)! },
+  });
   const [stdout, stderr, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -27,7 +41,7 @@ async function tmux(socket: string, ...args: string[]): Promise<string> {
     ];
     for (const [hook, command] of hooks) {
       const installed = Bun.spawn(['tmux', '-L', socket, 'set-hook', '-g', hook, command], {
-        stdout: 'ignore', stderr: 'pipe',
+        stdout: 'ignore', stderr: 'pipe', env: { ...process.env, TMUX_TMPDIR: socketDirs.get(socket)! },
       });
       const [hookStderr, hookCode] = await Promise.all([new Response(installed.stderr).text(), installed.exited]);
       if (hookCode !== 0) throw new Error(`disposable tmux hook install failed: ${hook}: ${hookStderr.trim()}`);
@@ -38,8 +52,13 @@ async function tmux(socket: string, ...args: string[]): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(sockets.splice(0).map(async (socket) => {
-    const proc = Bun.spawn(['tmux', '-L', socket, 'kill-server'], { stdout: 'ignore', stderr: 'ignore' });
+    const directory = socketDirs.get(socket)!;
+    const proc = Bun.spawn(['tmux', '-L', socket, 'kill-server'], {
+      stdout: 'ignore', stderr: 'ignore', env: { ...process.env, TMUX_TMPDIR: directory },
+    });
     await proc.exited;
+    socketDirs.delete(socket);
+    await rm(directory, { recursive: true, force: true });
   }));
 });
 
@@ -110,8 +129,7 @@ async function awaitPaneShell(socket: string, seat: string): Promise<void> {
 }
 
 async function constructAt(width: number, height: number): Promise<Record<'palace' | 'somnium' | 'council', Pane[]>> {
-  const socket = `txd-geometry-${process.pid}-${width}x${height}`;
-  sockets.push(socket);
+  const socket = freshSocket(`geometry-${width}x${height}`);
   await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
   const control = new RealTmux(socket);
   await control.ensureEstate();
@@ -136,8 +154,7 @@ async function constructAt(width: number, height: number): Promise<Record<'palac
 
 describe('disposable canonical estate geometry', () => {
   test('fresh construction pins mitosis pages at windows 0, 4, and 5', async () => {
-    const socket = `txd-window-order-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('window-order');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     await new RealTmux(socket).ensureEstate();
 
@@ -157,8 +174,7 @@ describe('disposable canonical estate geometry', () => {
     // the 78 usable rows divide exactly to 52/26. Constructor and acceptance
     // must derive those rows from the same declaration; disagreement on a boot
     // recovery is a crash loop, not merely a red check.
-    const socket = `txd-council-cockpit-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-cockpit');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -167,8 +183,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('81x66 Council construction and acceptance agree on stacked two-thirds pairs', async () => {
-    const socket = `txd-council-81x66-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-81x66');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -185,8 +200,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('Council acceptance rejects the next integer outside two-thirds rounding', async () => {
-    const socket = `txd-council-rounding-boundary-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-rounding-boundary');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -202,8 +216,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('191x37 observed client dimensions select the canonical two-column Council without drift', async () => {
-    const socket = `txd-council-wide-observed-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-wide-observed');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -221,8 +234,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('phone-width observed dimensions select the canonical single-column Council without drift', async () => {
-    const socket = `txd-council-phone-observed-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-phone-observed');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -240,8 +252,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('current narrow dimensions with wrong Council proportions report geometry drift', async () => {
-    const socket = `txd-council-phone-proportion-drift-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-phone-proportion-drift');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -253,8 +264,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('wide to narrow to wide client resize re-derives Council shape without page-drift contradictions', async () => {
-    const socket = `txd-council-responsive-sequence-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-responsive-sequence');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     const { MemoryEventStore } = await import('../src/store.ts');
@@ -278,9 +288,39 @@ describe('disposable canonical estate geometry', () => {
     expect(await tmux(socket, 'list-panes', '-t', 'main:council', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
   });
 
+  test('a Palace layout change at unchanged dimensions restores the canonical split and pane processes', async () => {
+    const socket = freshSocket('palace-layout-restoration');
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'resize-window', '-t', 'main:palace', '-x', '120', '-y', '24');
+    await tmux(socket, 'run-shell', `${reflowCouncil} window-resized`);
+    const before = await tmux(socket, 'list-panes', '-t', 'main:palace', '-F', '#{@canonical_id}\t#{pane_pid}');
+
+    await tmux(socket, 'select-layout', '-t', 'main:palace', 'even-vertical');
+    await tmux(socket, 'run-shell', `${reflowCouncil} window-layout-changed`);
+
+    const observed = await paneLayout(socket, 'palace');
+    TXD_WINDOWS.palace.forEach((seat, index) => expect(observed[seat]).toMatchObject(palaceGeometry(120, 24).panes[index]!));
+    expect(await tmux(socket, 'list-panes', '-t', 'main:palace', '-F', '#{@canonical_id}\t#{pane_pid}')).toBe(before);
+  });
+
+  test('a Palace reflow preserves zoom and focused pane', async () => {
+    const socket = freshSocket('palace-zoomed-reflow');
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    const focused = await paneId(socket, 'palace:E');
+    await tmux(socket, 'resize-pane', '-Z', '-t', focused);
+    await tmux(socket, 'resize-window', '-t', 'main:palace', '-x', '120', '-y', '24');
+    await tmux(socket, 'run-shell', `${reflowCouncil} window-resized`);
+
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{window_zoomed_flag}')).toBe('1');
+    expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{pane_id}')).toBe(focused);
+  });
+
   test('a small-client window resize preserves Council two-thirds geometry and pane processes', async () => {
-    const socket = `txd-council-small-client-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-small-client');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -302,8 +342,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('a client resize reflows beneath Council zoom without consuming zoom or focus', async () => {
-    const socket = `txd-council-zoomed-client-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-zoomed-client');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -333,8 +372,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('boot reprojects a small-client Council without replacing pane processes', async () => {
-    const socket = `txd-council-small-client-boot-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-small-client-boot');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -354,8 +392,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('every canonical pane owns its placement environment and txd restamps it on respawn', async () => {
-    const socket = `txd-pane-environment-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('pane-environment');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket, { machine: 'k12-personal' });
     await control.ensureEstate();
@@ -437,8 +474,7 @@ describe('disposable canonical estate geometry', () => {
   }
 
   test('untagged operator panes are preserved outside estate identity while unknown tagged seats stay foreign', async () => {
-    const socket = `txd-geometry-untagged-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('geometry-untagged');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const adapter = new RealTmux(socket);
     await adapter.ensureEstate();
@@ -463,8 +499,7 @@ describe('disposable canonical estate geometry', () => {
   // throwing; the drift itself is red on health until an operator verb
   // repairs it.
   test('a drifted Council layout holding live panes is reported, not rebuilt, and recovery converges', async () => {
-    const socket = `txd-geometry-layout-drift-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('geometry-layout-drift');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const adapter = new RealTmux(socket);
     await adapter.ensureEstate();
@@ -487,8 +522,7 @@ describe('disposable canonical estate geometry', () => {
   // reconstruction that provably cannot converge still fails — once, loud,
   // naming the page and the exact divergence.
   test('a Council with no live tagged pane is rebuilt, and an impossible rebuild names the page', async () => {
-    const socket = `txd-geometry-unconvergeable-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('geometry-unconvergeable');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const adapter = new RealTmux(socket);
     await adapter.ensureEstate();
@@ -521,8 +555,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('starts every canonical estate pane in the user home directory', async () => {
-    const socket = `txd-cwd-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('cwd');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     await new RealTmux(socket).ensureEstate();
 
@@ -533,8 +566,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('page reconstruction restores a deleted terminal and wipes every page process and pane option', async () => {
-    const socket = `txd-page-rebuild-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('page-rebuild');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -571,8 +603,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('Council reconstruction replaces all four Council processes, clears tint, and preserves every other process', async () => {
-    const socket = `txd-council-rebuild-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-rebuild');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -598,8 +629,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('a raw kill-pane is repaired as one seat: siblings keep their processes and the page keeps its border', async () => {
-    const socket = `txd-kill-repair-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('kill-repair');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket, { machine: 'k12-personal' });
     await control.ensureEstate();
@@ -624,8 +654,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('a killed Council quadrant is repaired back to its exact quadrant geometry', async () => {
-    const socket = `txd-council-repair-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('council-repair');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -660,8 +689,7 @@ describe('disposable canonical estate geometry', () => {
     // the estate that way made an operator's zoom indistinguishable from an
     // estate coming apart, which is what drove the zoom-destroying repairs
     // this pin now forbids.
-    const socket = `txd-zoom-canonical-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('zoom-canonical');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     const store = new (await import('../src/store.ts')).MemoryEventStore();
@@ -700,8 +728,7 @@ describe('disposable canonical estate geometry', () => {
     // The zoom-independent read must not become blanket forgiveness: with a
     // council pane zoomed, a seat killed out of another page is still the
     // estate diverging and still has to be seen.
-    const socket = `txd-zoom-divergence-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('zoom-divergence');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
@@ -713,8 +740,7 @@ describe('disposable canonical estate geometry', () => {
   });
 
   test('seat repair refuses when the page window itself is gone', async () => {
-    const socket = `txd-window-gone-${process.pid}`;
-    sockets.push(socket);
+    const socket = freshSocket('window-gone');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
     const control = new RealTmux(socket);
     await control.ensureEstate();
