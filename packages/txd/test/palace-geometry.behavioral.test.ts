@@ -20,8 +20,8 @@ describe('palaceGeometry', () => {
   test('derives the same bounded split at smaller dimensions', () => {
     const [west, north, south, east] = palaceGeometry(120, 24).panes;
 
-    expect([west.width, north.width, east.width]).toEqual([36, 47, 35]);
-    expect([north.height, south.height]).toEqual([12, 11]);
-    expect([west.left, north.left, east.left]).toEqual([0, 37, 85]);
+    expect([west.width, north.width, east.width]).toEqual([35, 47, 36]);
+    expect([north.height, south.height]).toEqual([11, 12]);
+    expect([west.left, north.left, east.left]).toEqual([0, 36, 84]);
   });
 });

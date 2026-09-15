@@ -153,6 +153,20 @@ async function constructAt(width: number, height: number): Promise<Record<'palac
 }
 
 describe('disposable canonical estate geometry', () => {
+  test('txd convergence reloads both derived-page resize hooks on a persistent server', async () => {
+    const socket = freshSocket('resize-hook-convergence');
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'set-hook', '-gu', 'window-resized');
+    await tmux(socket, 'set-hook', '-gu', 'window-layout-changed');
+
+    await control.ensureEstate();
+
+    expect(await tmux(socket, 'show-hooks', '-g', 'window-resized')).toContain('reflow-council window-resized');
+    expect(await tmux(socket, 'show-hooks', '-g', 'window-layout-changed')).toContain('reflow-council window-layout-changed');
+  });
+
   test('fresh construction pins mitosis pages at windows 0, 4, and 5', async () => {
     const socket = freshSocket('window-order');
     await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
@@ -317,6 +331,20 @@ describe('disposable canonical estate geometry', () => {
 
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{window_zoomed_flag}')).toBe('1');
     expect(await tmux(socket, 'display-message', '-p', '-t', 'main:palace', '#{pane_id}')).toBe(focused);
+  });
+
+  test('a pane-killed repair reapplies derived Palace geometry after the missing seat returns', async () => {
+    const socket = freshSocket('palace-kill-repair');
+    await tmux(socket, '-f', conf, 'start-server', ';', 'set-option', '-g', 'exit-empty', 'off');
+    const control = new RealTmux(socket);
+    await control.ensureEstate();
+    await tmux(socket, 'resize-window', '-t', 'main:palace', '-x', '120', '-y', '24');
+    await tmux(socket, 'kill-pane', '-t', await paneId(socket, 'palace:E'));
+
+    expect(await control.resetSeat('palace:E')).not.toBeNull();
+
+    const observed = await paneLayout(socket, 'palace');
+    TXD_WINDOWS.palace.forEach((seat, index) => expect(observed[seat]).toMatchObject(palaceGeometry(120, 24).panes[index]!));
   });
 
   test('a small-client window resize preserves Council two-thirds geometry and pane processes', async () => {

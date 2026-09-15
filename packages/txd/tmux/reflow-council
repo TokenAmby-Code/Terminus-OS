@@ -1,13 +1,15 @@
 #!/usr/bin/env bun
 
-import { councilGeometry, TXD_WINDOWS } from '../src/estate.ts';
+import { councilGeometry, palaceGeometry, TXD_WINDOWS } from '../src/estate.ts';
 
 const event = process.argv[2] ?? 'window-resized';
 if (event !== 'window-resized' && event !== 'window-layout-changed') process.exit(0);
 
-const target = 'main:=council';
-const lock = 'txd-council-reflow';
-const dimensionsWitness = '@txd_council_geometry_dimensions';
+const lock = 'txd-derived-page-reflow';
+const pages = [
+  { page: 'council', geometry: councilGeometry, seats: TXD_WINDOWS.council, witness: '@txd_council_geometry_dimensions' },
+  { page: 'palace', geometry: palaceGeometry, seats: TXD_WINDOWS.palace, witness: '@txd_palace_geometry_dimensions' },
+] as const;
 
 function tmux(args: string[]): string | null {
   const result = Bun.spawnSync(['tmux', ...args], { stdout: 'pipe', stderr: 'ignore' });
@@ -25,9 +27,8 @@ function checksum(layout: string): string {
   return value.toString(16).padStart(4, '0');
 }
 
-function reflow(): void {
-  if (tmux(['wait-for', '-L', lock]) === null) return;
-  try {
+function reflowPage({ page, geometry, seats, witness }: typeof pages[number]): void {
+    const target = `main:=${page}`;
     const dimensions = tmux(['display-message', '-p', '-t', target, '#{window_width}\t#{window_height}']);
     if (!dimensions) return;
     const [rawWidth = '', rawHeight = ''] = dimensions.split('\t');
@@ -35,28 +36,29 @@ function reflow(): void {
     const height = Number(rawHeight);
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 7) return;
     const observedDimensions = `${width}x${height}`;
-    if (tmux(['show-options', '-wv', '-t', target, dimensionsWitness]) === observedDimensions) return;
-
     const zoomed = tmux(['display-message', '-p', '-t', target, '#{window_zoomed_flag}']) === '1';
     const focusedPane = zoomed ? tmux(['display-message', '-p', '-t', target, '#{pane_id}']) : null;
 
     const observed = tmux(['list-panes', '-t', target, '-F', '#{@canonical_id}\t#{pane_id}']);
     if (!observed) return;
     const bySeat = new Map(observed.split('\n').map((row) => row.split('\t') as [string, string]));
-    const paneIds = TXD_WINDOWS.council.map((seat) => bySeat.get(seat));
-    if (paneIds.some((pane) => !pane) || bySeat.size !== TXD_WINDOWS.council.length) return;
+    const paneIds = seats.map((seat) => bySeat.get(seat));
+    if (paneIds.some((pane) => !pane) || bySeat.size !== seats.length) return;
 
-    const desired = councilGeometry(width, height);
+    const desired = geometry(width, height);
     const leaf = (index: number): string => {
       const pane = paneIds[index]!.replace(/^%/, '');
       const geometry = desired.panes[index]!;
       return `${geometry.width}x${geometry.height},${geometry.left},${geometry.top},${pane}`;
     };
-    const body = desired.shape === 'columns'
-      ? `${width}x${height},0,0{`
-        + `${desired.panes[0].width}x${height},0,0[${leaf(0)},${leaf(1)}],`
-        + `${desired.panes[2].width}x${height},${desired.panes[2].left},0[${leaf(2)},${leaf(3)}]}`
-      : `${width}x${height},0,0[${leaf(0)},${leaf(1)},${leaf(2)},${leaf(3)}]`;
+    const body = page === 'palace'
+      ? `${width}x${height},0,0{${leaf(0)},`
+        + `${desired.panes[1].width}x${height},${desired.panes[1].left},0[${leaf(1)},${leaf(2)}],${leaf(3)}}`
+      : desired.shape === 'columns'
+        ? `${width}x${height},0,0{`
+          + `${desired.panes[0].width}x${height},0,0[${leaf(0)},${leaf(1)}],`
+          + `${desired.panes[2].width}x${height},${desired.panes[2].left},0[${leaf(2)},${leaf(3)}]}`
+        : `${width}x${height},0,0[${leaf(0)},${leaf(1)},${leaf(2)},${leaf(3)}]`;
     const layout = `${checksum(body)},${body}`;
     if (tmux(['display-message', '-p', '-t', target, '#{window_layout}']) !== layout) {
       if (tmux(['select-layout', '-t', target, layout]) === null) return;
@@ -65,7 +67,13 @@ function reflow(): void {
         if (tmux(['resize-pane', '-Z', '-t', focusedPane]) === null) return;
       }
     }
-    tmux(['set-option', '-w', '-t', target, dimensionsWitness, observedDimensions]);
+    tmux(['set-option', '-w', '-t', target, witness, observedDimensions]);
+}
+
+function reflow(): void {
+  if (tmux(['wait-for', '-L', lock]) === null) return;
+  try {
+    for (const page of pages) reflowPage(page);
   } finally {
     tmux(['wait-for', '-U', lock]);
   }
