@@ -12,7 +12,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { bindOverseerSource, closeRequest, retirementClear } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -48,7 +48,7 @@ async function bindRegisteredAgent(tmux: FakeTmux, d: Daemon, seatId: string): P
 // Its close travels as agent.unregistered_closed, never agent.retired.
 async function declarePhysically(tmux: FakeTmux, d: Daemon, seatId: string): Promise<PhysicalDeclaration> {
   const declaration = await physicalDeclaration(tmux, seatId);
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
   return declaration;
 }
 

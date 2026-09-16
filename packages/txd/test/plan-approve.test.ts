@@ -10,7 +10,7 @@ import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux, RealTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -44,7 +44,7 @@ async function launched() {
     rank: 'astartes',
     tint: '#111111',
   };
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
   const agent: Agent = {
     schema_version: AGENT_SCHEMA_VERSION,
     ticket_id: AGENT_TICKET_ID,

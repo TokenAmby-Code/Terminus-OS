@@ -14,6 +14,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { resolveSshSeatTargets } from '../src/config.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
+import { DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const DISPATCH_ID = '9f1b1f6a-5d4e-4a0f-9a2b-6c3d4e5f6071';
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
@@ -71,7 +72,7 @@ async function bindSeat(d: Daemon, tmux: FakeTmux, seatId: string): Promise<void
     rank: 'astartes',
     tint: '#111111',
   };
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
 }
 
 test('a page target autofills the first free seat in declared order', async () => {

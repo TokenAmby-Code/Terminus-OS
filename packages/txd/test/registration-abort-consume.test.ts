@@ -15,7 +15,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { bindOverseerSource, closeRequest, retirementClear } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -113,7 +113,7 @@ test('a door-1 audit refusal publishes agent.placement_refused with the audit re
   const decl = await declaration(tmux, 'palace:W');
   // Asserting a council persona into a worker seat is incoherent at Door 1.
   const incoherent = { ...decl, persona: 'custodes', rank: null, tint: '#c9a227' };
-  await expect(d.recordPhysicalDeclaration(incoherent, 'bus:9')).rejects.toThrow('persona_seat_incoherent');
+  await expect(d.recordPhysicalDeclaration(incoherent, 'bus:9', DRIVING_FACT_OCCURRED_AT)).rejects.toThrow('persona_seat_incoherent');
   const refusals = ofType(published, 'agent.placement_refused');
   expect(refusals).toHaveLength(1);
   const refusal = PlacementRefusedSchema.parse(refusals[0]!.payload);
@@ -129,7 +129,7 @@ test('a tint attestation failure aborts the binding fail-dark and publishes plac
   const { tmux, published, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
   tmux.failTintSeat('palace:W');
-  await expect(d.recordPhysicalDeclaration(decl, 'bus:9')).rejects.toThrow('tint_attestation_failed');
+  await expect(d.recordPhysicalDeclaration(decl, 'bus:9', DRIVING_FACT_OCCURRED_AT)).rejects.toThrow('tint_attestation_failed');
   const refusals = ofType(published, 'agent.placement_refused');
   expect(refusals).toHaveLength(1);
   expect(PlacementRefusedSchema.parse(refusals[0]!.payload).reason).toBe('tint_attestation_failed');
@@ -139,7 +139,7 @@ test('a tint attestation failure aborts the binding fail-dark and publishes plac
 test('consuming an abort closes the binding, un-tints the seat, and publishes NO agent.retired', async () => {
   const { tmux, store, published, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
-  await d.recordPhysicalDeclaration(decl, 'bus:9');
+  await d.recordPhysicalDeclaration(decl, 'bus:9', DRIVING_FACT_OCCURRED_AT);
   expect(await tmux.seatTint('palace:W')).toBe('#111111');
   await bindOverseerSource(d, store);
   await d.abortRegistration(abortEvent(), 'bus:10');
@@ -153,7 +153,7 @@ test('consuming an abort closes the binding, un-tints the seat, and publishes NO
 test('an abort replay converges: the second delivery finds nothing standing and changes nothing', async () => {
   const { tmux, published, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
-  await d.recordPhysicalDeclaration(decl, 'bus:9');
+  await d.recordPhysicalDeclaration(decl, 'bus:9', DRIVING_FACT_OCCURRED_AT);
   await d.abortRegistration(abortEvent(), 'bus:10');
   const eventsAfterFirst = published.length;
   await d.abortRegistration(abortEvent(), 'bus:11');
@@ -164,7 +164,7 @@ test('an abort replay converges: the second delivery finds nothing standing and 
 test('an abort for a registered agent refuses: post-birth cleanup is retirement, never abort', async () => {
   const { tmux, store, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
-  await d.recordPhysicalDeclaration(decl, 'bus:9');
+  await d.recordPhysicalDeclaration(decl, 'bus:9', DRIVING_FACT_OCCURRED_AT);
   await d.activateRegisteredAgent(registeredAgent(decl));
   await expect(d.abortRegistration(abortEvent(), 'bus:10')).rejects.toThrow('abort_of_registered_agent');
   // The binding stands untouched: the registered agent still holds its tint
@@ -177,7 +177,7 @@ test('an abort for a registered agent refuses: post-birth cleanup is retirement,
 test('closing a never-registered binding publishes no agent.retired — retirement is post-birth', async () => {
   const { tmux, store, published, d } = setup();
   const decl = await declaration(tmux, 'palace:W');
-  await d.recordPhysicalDeclaration(decl, 'bus:9');
+  await d.recordPhysicalDeclaration(decl, 'bus:9', DRIVING_FACT_OCCURRED_AT);
   await bindOverseerSource(d, store);
   const result = await d.close(closeRequest(['palace:W']));
   expect(result.ok).toBe(true);

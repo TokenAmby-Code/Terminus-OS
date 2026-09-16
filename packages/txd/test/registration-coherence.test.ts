@@ -13,6 +13,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { buildProjections } from '../src/projections.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
+import { DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -63,19 +64,19 @@ async function declare(
 test('a council persona is refused in a worker seat', async () => {
   const { tmux, d } = setup();
   const declaration = await declare(tmux, 'palace:W', 'custodes', 'overseer', '#302800');
-  await expect(d.recordPhysicalDeclaration(declaration)).rejects.toThrow('persona_seat_incoherent');
+  await expect(d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT)).rejects.toThrow('persona_seat_incoherent');
 });
 
 test('a council persona is refused in another council seat', async () => {
   const { tmux, d } = setup();
   const declaration = await declare(tmux, 'council:fabricator-general', 'custodes', 'overseer', '#302800');
-  await expect(d.recordPhysicalDeclaration(declaration)).rejects.toThrow('persona_seat_incoherent');
+  await expect(d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT)).rejects.toThrow('persona_seat_incoherent');
 });
 
 test('a council persona is admitted in its own seat', async () => {
   const { store, tmux, d } = setup();
   const declaration = await declare(tmux, 'council:custodes', 'custodes', 'overseer', '#302800');
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
   expect(buildProjections(await store.readAll()).physicalDeclarations.get(AGENT_ID))
     .toMatchObject({ pane_id: 'council:custodes', persona: 'custodes' });
 });
@@ -83,7 +84,7 @@ test('a council persona is admitted in its own seat', async () => {
 test('a Black Shield is admitted in a worker seat and binds under its own persona', async () => {
   const { store, tmux, d } = setup();
   const declaration = await declare(tmux, 'palace:W', 'black-shields', 'astartes', '#111111');
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
   const binding = buildProjections(await store.readAll())
     .currentBindings.find((candidate) => candidate.agent_id === AGENT_ID)!;
   expect(binding).toMatchObject({
@@ -97,7 +98,7 @@ test('a Black Shield is admitted in a worker seat and binds under its own person
 
 test('Black Shields take no lock — a second one binds a second worker seat', async () => {
   const { store, tmux, d } = setup();
-  await d.recordPhysicalDeclaration(await declare(tmux, 'palace:W', 'black-shields', 'astartes', '#111111'));
+  await d.recordPhysicalDeclaration(await declare(tmux, 'palace:W', 'black-shields', 'astartes', '#111111'), null, DRIVING_FACT_OCCURRED_AT);
 
   const second = '7b1a6c22-3b0e-4a52-9d1f-2c8e5f4a1b93';
   await tmux.createSeat('palace:N');
@@ -115,7 +116,7 @@ test('Black Shields take no lock — a second one binds a second worker seat', a
     rank: 'astartes',
     tint: '#111111',
   };
-  await d.recordPhysicalDeclaration(secondDeclaration);
+  await d.recordPhysicalDeclaration(secondDeclaration, null, DRIVING_FACT_OCCURRED_AT);
   const shields = buildProjections(await store.readAll())
     .currentBindings.filter((binding) => binding.persona === 'black-shields');
   expect(shields.map((binding) => binding.seat_id).sort()).toEqual(['palace:N', 'palace:W']);

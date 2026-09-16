@@ -620,7 +620,7 @@ export function buildRoutes(
         if (fact.fact_type === 'wrapper_started') {
           const hook = WrapperStartHookSchema.safeParse(fact.payload);
           if (!hook.success) return ack(false, 'invalid_wrapper_start_payload');
-          const result = await daemon.attestWrapperStart(hook.data);
+          const result = await daemon.attestWrapperStart(hook.data, fact.occurred_at);
           return ack(result.attested, result.reason);
         }
         return ack(false, 'not_consumed');

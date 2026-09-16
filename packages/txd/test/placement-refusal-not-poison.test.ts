@@ -9,7 +9,7 @@ import { createTxdEventLane, type TxdJournalEvent } from '../src/event-journal.t
 import { Daemon } from '../src/core.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -104,7 +104,7 @@ test('the typed internal refusal retains wrapper_process_missing without changin
   const { daemon, publications } = absentWrapperSetup();
 
   try {
-    await daemon.recordPhysicalDeclaration(declaration(), 'bus:26679');
+    await daemon.recordPhysicalDeclaration(declaration(), 'bus:26679', DRIVING_FACT_OCCURRED_AT);
     throw new Error('expected placement refusal');
   } catch (error) {
     expect(error).toMatchObject({
