@@ -6,7 +6,7 @@ import { expect, test } from 'bun:test';
 import { AGENT_SCHEMA_VERSION } from '@tokenamby-code/agent-contract/agent';
 import { type Agent } from '@tokenamby-code/agent-contract/agent';
 import { type PhysicalDeclaration } from '@tokenamby-code/agent-contract/events';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
@@ -47,7 +47,7 @@ test('adversarial: a persona asserted into a seat that cannot hold it never reac
     rank: 'overseer',
     tint: '#300808',
   };
-  await expect(d.recordPhysicalDeclaration(declaration)).rejects.toThrow('persona_seat_incoherent');
+  await expect(d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT)).rejects.toThrow('persona_seat_incoherent');
   expect(await store.readAll()).toEqual([]);
 });
 
@@ -68,7 +68,7 @@ test('adversarial: a bound seat never carries a blank persona waiting to be fill
     rank: 'astartes',
     tint: '#111111',
   };
-  await d.recordPhysicalDeclaration(bound_declaration);
+  await d.recordPhysicalDeclaration(bound_declaration, null, DRIVING_FACT_OCCURRED_AT);
   const bound = (await store.readAll()).find((event) => event.event_type === 'reg.bound')!;
   expect(bound.payload.persona).toBe('black-shields');
   expect(bound.payload.rank).toBe('astartes');
@@ -93,7 +93,7 @@ test('adversarial: an ambiguous identity is never resolved by picking one', asyn
       rank: 'astartes',
       tint: '#111111',
     };
-    await d.recordPhysicalDeclaration(seatDeclaration);
+    await d.recordPhysicalDeclaration(seatDeclaration, null, DRIVING_FACT_OCCURRED_AT);
     const agent: Agent = {
       schema_version: AGENT_SCHEMA_VERSION,
       ticket_id: AGENT_TICKET_ID,

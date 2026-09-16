@@ -249,6 +249,7 @@ export type PhysicalRegistrationRuntime = {
   publish: (
     eventType: TxdPublishedEventType,
     payload: Record<string, unknown>,
+    occurredAt: string,
   ) => Promise<unknown>;
 };
 
@@ -368,6 +369,7 @@ export class Daemon {
 
   async attestWrapperStart(
     hook: WrapperStartHook,
+    hookOccurredAt: string,
   ): Promise<{ attested: boolean; reason: string | null }> {
     return this.locked(async () => {
       if (!this.physicalRegistration) {
@@ -382,7 +384,7 @@ export class Daemon {
           wrapper_pid: hook.wrapper_pid,
           reason: observed.reason,
         });
-        await this.physicalRegistration.publish('agent.pane_refused', refusal);
+        await this.physicalRegistration.publish('agent.pane_refused', refusal, hookOccurredAt);
         return { attested: false, reason: observed.reason };
       }
       // The transport claim is recorded as the wrapper asserted it and audited
@@ -422,7 +424,7 @@ export class Daemon {
           process_start_ticks: observed.process_start_ticks,
         },
       });
-      await this.physicalRegistration.publish('agent.pane_attested', attestation);
+      await this.physicalRegistration.publish('agent.pane_attested', attestation, hookOccurredAt);
       return { attested: true, reason: null };
     });
   }
@@ -456,6 +458,7 @@ export class Daemon {
         await publish(
           priorTerminal.payload.outcome_event_type as TxdPublishedEventType,
           priorTerminal.payload.outcome as Record<string, unknown>,
+          priorTerminal.occurred_at,
         );
         return;
       }
@@ -473,15 +476,19 @@ export class Daemon {
         eventType: 'agent.dispatch_attested' | 'agent.dispatch_refused',
         outcome: Record<string, unknown>,
       ): Promise<void> => {
+        // The outcome's instant is durably recorded before the publication and
+        // read back by the replay branch above, so a redelivered dispatch
+        // republishes byte-identical content instead of conflicting.
+        const outcomeOccurredAt = this.now();
         await this.store.append({
           entity_type: 'agent',
           entity_id: request.agent_id,
           event_type: 'reg.dispatch_requested',
           payload: { dispatch_id: request.dispatch_id, outcome_event_type: eventType, outcome },
           provenance: this.prov('observer', receipt),
-          occurred_at: this.now(),
+          occurred_at: outcomeOccurredAt,
         });
-        await publish(eventType, outcome);
+        await publish(eventType, outcome, outcomeOccurredAt);
       };
       const refuse = async (reason: DispatchRefused['reason'], seats: DispatchRefused['seats'] = []) => terminalize(
         'agent.dispatch_refused',
@@ -724,14 +731,14 @@ export class Daemon {
    */
   async recordPhysicalDeclaration(
     input: PhysicalDeclaration,
-    receipt: string | null = null,
-    declarationOccurredAt: string | null = null,
+    receipt: string | null,
+    declarationOccurredAt: string,
   ): Promise<void> {
     await this.locked(async () => {
       if (!this.physicalRegistration) throw new Error('physical_registration_unconfigured');
       const declaration = PhysicalDeclarationSchema.parse(input);
       try {
-        await this.auditAndBindDeclaration(declaration, receipt);
+        await this.auditAndBindDeclaration(declaration, receipt, declarationOccurredAt);
       } catch (error) {
         // A Door-1 refusal is the placement's terminal outcome for this
         // birth: any partial binding was already aborted fail-dark, so the
@@ -746,7 +753,7 @@ export class Daemon {
           await this.publishPlacementRefusal(
             declaration,
             refusal.reason,
-            declarationOccurredAt ?? this.now(),
+            declarationOccurredAt,
           );
           console.info(JSON.stringify({
             level: 'info',
@@ -767,6 +774,7 @@ export class Daemon {
   private async auditAndBindDeclaration(
     declaration: PhysicalDeclaration,
     receipt: string | null,
+    declarationOccurredAt: string,
   ): Promise<void> {
     const physicalRegistration = this.physicalRegistration;
     if (!physicalRegistration) throw new Error('physical_registration_unconfigured');
@@ -936,7 +944,7 @@ export class Daemon {
             }
           : { physical_declared_receipt: receipt },
       });
-      await physicalRegistration.publish('agent.placement_attested', placement);
+      await physicalRegistration.publish('agent.placement_attested', placement, declarationOccurredAt);
       await this.store.append({
         entity_type: 'agent',
         entity_id: binding.agent_id,
@@ -964,7 +972,7 @@ export class Daemon {
       reason,
       refused_at: refusedAt,
     });
-    await this.physicalRegistration.publish('agent.placement_refused', refusal);
+    await this.physicalRegistration.publish('agent.placement_refused', refusal, refusedAt);
   }
 
   // The abort-path close (chapter-locks spec §4): registrationd aborted its
@@ -1546,7 +1554,7 @@ export class Daemon {
         seat_id: observation.seatId,
         pane_generation: observation.paneGeneration,
         observed_at: occurredAt,
-      });
+      }, occurredAt);
       await this.locked(async () => {
         const events = await this.events();
         if (events.some((event) => event.entity_id === observation.observationId
@@ -3667,7 +3675,7 @@ export class Daemon {
         continue;
       }
       try {
-        await this.physicalRegistration.publish('agent.retired', retirement.data);
+        await this.physicalRegistration.publish('agent.retired', retirement.data, retirement.data.retired_at);
       } catch (error) {
         await this.recordDroppedPublication(
           'agent.retired',
@@ -3708,7 +3716,7 @@ export class Daemon {
       return;
     }
     try {
-      await this.physicalRegistration.publish('agent.unregistered_closed', signal.data);
+      await this.physicalRegistration.publish('agent.unregistered_closed', signal.data, signal.data.closed_at);
     } catch (error) {
       await this.recordDroppedPublication(
         'agent.unregistered_closed',
@@ -3814,7 +3822,7 @@ export class Daemon {
         machine: this.physicalRegistration!.machine,
         seat_id: binding.seat_id,
         engine: perpetualEngine,
-      }));
+      }), this.now());
     }
     return true;
   }
@@ -4188,7 +4196,7 @@ export class Daemon {
           machine,
           seat_id: seatId,
           engine,
-        }));
+        }), this.now());
       }
     });
   }
@@ -4251,7 +4259,7 @@ export class Daemon {
         return;
       }
       try {
-        await this.physicalRegistration!.publish('agent.estate_occupancy_census', census.data);
+        await this.physicalRegistration!.publish('agent.estate_occupancy_census', census.data, census.data.taken_at);
       } catch (error) {
         await this.recordDroppedPublication(
           'agent.estate_occupancy_census',

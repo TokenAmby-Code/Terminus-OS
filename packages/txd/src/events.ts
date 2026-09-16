@@ -44,26 +44,33 @@ function eventId(key: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-function occurredAt(payload: Record<string, unknown>): string {
-  for (const field of ['observed_at', 'retired_at', 'closed_at', 'taken_at']) {
-    if (typeof payload[field] === 'string') return payload[field];
-  }
-  return new Date().toISOString();
-}
-
+// journal.publish hashes occurred_at into the event's content hash and refuses
+// idempotency_conflict when a matching key arrives with different content. The
+// keys above are derived from a producer-owned occurrence, so the same fact
+// republishes under the same key — which makes the instant part of the fact's
+// identity, not a timestamp taken at the moment of the call. Every publication
+// therefore names the instant of the occurrence it is reporting, and the caller
+// is the only thing that knows it: the driving journal event's occurred_at, the
+// driving lifecycle fact's occurred_at, or the instant txd durably recorded for
+// its own outcome before the external effect. A clock read here would make an
+// at-least-once redelivery unpublishable and park the lane that carried it.
 export function makeJournalPublisher(
   sql: Pick<SQL, 'begin'>,
   machine: string,
-): (eventType: TxdPublishedEventType, payload: Record<string, unknown>) => Promise<void> {
+): (
+  eventType: TxdPublishedEventType,
+  payload: Record<string, unknown>,
+  occurredAt: string,
+) => Promise<void> {
   const publisher = new PostgresJournalPublisher(sql, 'txd');
-  return async (eventType, payload) => {
+  return async (eventType, payload, occurredAt) => {
     const key = eventIdentity(eventType, payload);
     await publisher.publish({
       eventId: eventId(key),
       eventType,
       schemaVersion: 1,
       idempotencyKey: key,
-      occurredAt: occurredAt(payload),
+      occurredAt,
       payload,
       provenance: { ingress: 'txd', machine },
     });

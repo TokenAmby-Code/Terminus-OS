@@ -13,7 +13,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { makeServer } from '../src/server.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
 
@@ -92,7 +92,7 @@ async function register(d: Daemon, tmux: FakeTmux, seat: string, agentId: string
   tmux.bindWrapper(wrapperPid, seat);
   const paneGeneration = (await tmux.seatGeneration(seat))!;
   const decl = declaration(seat, paneGeneration, agentId, persona, engine, wrapperPid);
-  await d.recordPhysicalDeclaration(decl);
+  await d.recordPhysicalDeclaration(decl, null, DRIVING_FACT_OCCURRED_AT);
   await d.activateRegisteredAgent(registeredAgent(seat, paneGeneration, decl));
 }
 
@@ -234,7 +234,7 @@ test('a binding mid-birth blocks the shell branch: the arriving agent owns that 
   await tmux.createSeat('palace:W');
   tmux.bindWrapper(wrapperPid, 'palace:W');
   const paneGeneration = (await tmux.seatGeneration('palace:W'))!;
-  await d.recordPhysicalDeclaration(declaration('palace:W', paneGeneration, crypto.randomUUID(), 'scout', 'claude', wrapperPid));
+  await d.recordPhysicalDeclaration(declaration('palace:W', paneGeneration, crypto.randomUUID(), 'scout', 'claude', wrapperPid), null, DRIVING_FACT_OCCURRED_AT);
   await expect(d.run({ schema_version: SCHEMA_VERSION, target: 'palace:W', command: 'echo x' }))
     .rejects.toThrow('seat_binding_pending: palace:W');
 });

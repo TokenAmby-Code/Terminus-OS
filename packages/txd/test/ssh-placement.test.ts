@@ -20,7 +20,7 @@ import { Daemon } from '../src/core.ts';
 import { TXD_ESTATE, TXD_WINDOWS } from '../src/estate.ts';
 import { resolveSshSeatTargets } from '../src/config.ts';
 import { envelopeSessionName } from '../src/envelopes.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const DISPATCH_ID = '9f1b1f6a-5d4e-4a0f-9a2b-6c3d4e5f6071';
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
@@ -112,7 +112,7 @@ async function wrapperStart(
     claimed_pane_id: seatId,
     argv: [],
     placement_hints: hints,
-  });
+  }, DRIVING_FACT_OCCURRED_AT);
 }
 
 function declaration(seatId: string, paneGeneration: string, wrapperPid: number): PhysicalDeclaration {
@@ -250,7 +250,7 @@ async function sshBirth(
   await wrapperStart(d, tmux, SSH_SEAT, 4101, hints);
   return {
     facts,
-    declare: () => d.recordPhysicalDeclaration(declaration(SSH_SEAT, facts.paneGeneration, 4101)),
+    declare: () => d.recordPhysicalDeclaration(declaration(SSH_SEAT, facts.paneGeneration, 4101), null, DRIVING_FACT_OCCURRED_AT),
   };
 }
 
@@ -310,7 +310,7 @@ test('Door 1 refuses an ssh claim on a local seat', async () => {
   await wrapperStart(d, tmux, LOCAL_SEAT, 4101, sshHints(facts.launchNonce));
   published.length = 0;
   await expect(
-    d.recordPhysicalDeclaration(declaration(LOCAL_SEAT, facts.paneGeneration, 4101)),
+    d.recordPhysicalDeclaration(declaration(LOCAL_SEAT, facts.paneGeneration, 4101), null, DRIVING_FACT_OCCURRED_AT),
   ).rejects.toThrow('placement_kind_incoherent');
 });
 
@@ -319,7 +319,7 @@ test('a local birth with a local claim still attests kind local end to end', asy
   const facts = await dispatchTo(d, tmux, LOCAL_SEAT);
   await wrapperStart(d, tmux, LOCAL_SEAT, 4101, { kind: 'local' });
   published.length = 0;
-  await d.recordPhysicalDeclaration(declaration(LOCAL_SEAT, facts.paneGeneration, 4101));
+  await d.recordPhysicalDeclaration(declaration(LOCAL_SEAT, facts.paneGeneration, 4101), null, DRIVING_FACT_OCCURRED_AT);
   const attested = published.find((event) => event.type === 'agent.placement_attested');
   expect(attested!.payload).toMatchObject({ kind: 'local', machine: 'k12-personal' });
 });
@@ -387,7 +387,7 @@ test('a registered agent claiming kind ssh on a local seat is a physical conflic
   const { tmux, d } = await setup();
   const facts = await dispatchTo(d, tmux, LOCAL_SEAT);
   await wrapperStart(d, tmux, LOCAL_SEAT, 4101, { kind: 'local' });
-  await d.recordPhysicalDeclaration(declaration(LOCAL_SEAT, facts.paneGeneration, 4101));
+  await d.recordPhysicalDeclaration(declaration(LOCAL_SEAT, facts.paneGeneration, 4101), null, DRIVING_FACT_OCCURRED_AT);
   await expect(
     d.activateRegisteredAgent(registeredAgent(LOCAL_SEAT, facts.paneGeneration, { kind: 'ssh', machine: 'k12-work' })),
   ).rejects.toThrow('registered_agent_physical_conflict');
@@ -418,7 +418,7 @@ test('the zombie report lists remote envelopes with no live binding and ignores 
   await d.constructEstate();
   const facts = await dispatchTo(d, tmux, SSH_SEAT);
   await wrapperStart(d, tmux, SSH_SEAT, 4101, sshHints(facts.launchNonce));
-  await d.recordPhysicalDeclaration(declaration(SSH_SEAT, facts.paneGeneration, 4101));
+  await d.recordPhysicalDeclaration(declaration(SSH_SEAT, facts.paneGeneration, 4101), null, DRIVING_FACT_OCCURRED_AT);
   const live = envelopeSessionName(SSH_SEAT, facts.launchNonce);
   const zombie = envelopeSessionName('somnium:S', crypto.randomUUID());
   remote = [live, zombie, 'civic-dev-shell'];

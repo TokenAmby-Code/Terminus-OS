@@ -19,7 +19,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { bindOverseerSource, closeRequest, retirementClear } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const AGENT_ID = '708f52b6-5d8d-49cb-abab-caa3312244f9';
 const BIRTH_GENERATION = 'd78bdf2f-661b-471f-a561-a25c2230a0b7';
@@ -74,7 +74,7 @@ async function seatRegisteredAgent(
     rank: 'astartes',
     tint: '#1b3a2f',
   };
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
   await d.activateRegisteredAgent({
     schema_version: AGENT_SCHEMA_VERSION,
     ticket_id: AGENT_TICKET_ID,

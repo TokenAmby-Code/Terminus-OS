@@ -16,7 +16,7 @@ import { FakeTmux } from '../src/tmux.ts';
 import { Daemon } from '../src/core.ts';
 import { buildProjections } from '../src/projections.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
-import { AGENT_TICKET_ID } from './agent-fixture.ts';
+import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
 
 const AGENT_ID = '2ea2d049-0106-4957-8649-31f93bdc8c9a';
 const BIRTH_GENERATION = '1cc2112c-9c38-45a1-839f-831c33a1096a';
@@ -67,7 +67,7 @@ async function declareWrapperOnly(
 test('a declaration alone binds the seat, applies the tint, and attests placement', async () => {
   const { store, tmux, published, d } = setup();
   const declaration = await declareWrapperOnly(tmux, 'palace:W');
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
 
   expect(await tmux.seatTint('palace:W')).toBe('#111111');
 
@@ -93,8 +93,8 @@ test('a declaration alone binds the seat, applies the tint, and attests placemen
 test('a redelivered declaration is idempotent — one binding, one placement', async () => {
   const { store, tmux, published, d } = setup();
   const declaration = await declareWrapperOnly(tmux, 'palace:W');
-  await d.recordPhysicalDeclaration(declaration);
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
 
   const events = await store.readAll();
   expect(events.filter((event) => event.event_type === 'reg.bound')).toHaveLength(1);
@@ -106,7 +106,7 @@ test('a tint the estate cannot attest aborts the binding', async () => {
   const { store, tmux, d } = setup();
   const declaration = await declareWrapperOnly(tmux, 'palace:W');
   tmux.failTintSeat('palace:W');
-  await expect(d.recordPhysicalDeclaration(declaration)).rejects.toThrow('tint_attestation_failed');
+  await expect(d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT)).rejects.toThrow('tint_attestation_failed');
   const projections = buildProjections(await store.readAll());
   expect(projections.currentBindings.find((candidate) => candidate.agent_id === AGENT_ID))
     .toBeUndefined();
@@ -115,7 +115,7 @@ test('a tint the estate cannot attest aborts the binding', async () => {
 test('a null tint binds dark', async () => {
   const { store, tmux, published, d } = setup();
   const declaration = await declareWrapperOnly(tmux, 'palace:W', null);
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
   expect((await tmux.seatTint('palace:W')) ?? null).toBeNull();
   expect(buildProjections(await store.readAll()).currentBindings
     .find((candidate) => candidate.agent_id === AGENT_ID))
@@ -175,7 +175,7 @@ test('placement and agent contracts attest the wrapper, not an engine process', 
 test('a registered agent activates against a wrapper-placement binding', async () => {
   const { tmux, d, store } = setup();
   const declaration = await declareWrapperOnly(tmux, 'palace:W');
-  await d.recordPhysicalDeclaration(declaration);
+  await d.recordPhysicalDeclaration(declaration, null, DRIVING_FACT_OCCURRED_AT);
   await d.activateRegisteredAgent(AgentSchema.parse({
     schema_version: AGENT_SCHEMA_VERSION,
     ticket_id: AGENT_TICKET_ID,
