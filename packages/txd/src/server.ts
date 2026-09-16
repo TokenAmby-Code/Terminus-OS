@@ -283,9 +283,9 @@ export function buildRoutes(
         }
         if (result.mode === 'agent') return json(result.response);
         // The command runs exactly as long as it runs: the headers commit now
-        // and the body completes from the pane's wait-for signal (same
-        // transport contract as /agents/comm/wait — no deadline over the
-        // wait). A late failure still lands as a typed refusal body.
+        // and the body completes when the pane's own stream carries the run's
+        // sentinel (same transport contract as /agents/comm/wait — no deadline
+        // over the wait). A late failure still lands as a typed refusal body.
         return deferredJson(result.pending.catch((error) => ({
           ok: false,
           error: 'run_refused',

@@ -971,11 +971,11 @@ export type CommWaitResponse = z.infer<typeof CommWaitResponseSchema>;
 // `tx run` branches on txd's own event truth, never on process heuristics: a
 // target resolving to a REGISTERED binding is an agent pane and receives the
 // engine's shell-escape composer form (`!` — the harness runs the command and
-// its output lands in that agent's conversation); a bare declared seat executes
-// the command in its pane shell and the caller receives the captured
-// stdout/stderr and exit code. Completion of a pane run is event-driven — the
-// pane shell signals a tmux wait-for channel when the command exits — so the
-// response carries the command's real exit, not a deadline's.
+// its output lands in that agent's conversation); a bare declared seat runs the
+// command in the shell that pane is showing and the caller receives the pane's
+// own output and exit code. Completion of a pane run is event-driven — txd
+// captures the pane's byte stream and reads it until the run's sentinel line —
+// so the response carries the command's real exit, not a deadline's.
 export const RunRequestSchema = z.strictObject({
   schema_version: z.number().int(),
   target: CanonicalIdSchema,
@@ -986,10 +986,10 @@ export const RunRequestSchema = z.strictObject({
 });
 export type RunRequest = z.infer<typeof RunRequestSchema>;
 
-// Per-stream capture ceiling for pane runs, derived from a real transport
-// ceiling: the tx client refuses response bodies over 8 MiB (client.ts), and
-// both captured streams plus the JSON envelope must fit under it. Truncation
-// is reported, never silent.
+// Capture ceiling for one pane run, derived from a real transport ceiling: the
+// tx client refuses response bodies over 8 MiB (client.ts), and the captured
+// pane stream plus the JSON envelope must fit under it. Truncation is
+// reported, never silent.
 export const MAX_RUN_CAPTURE_BYTES = 3 * 1024 * 1024;
 
 export const RunAgentResponseSchema = z.object({
@@ -1013,10 +1013,11 @@ export const RunPaneResponseSchema = z.object({
   run_id: z.string(),
   seat_id: z.string(),
   exit_code: z.number().int(),
-  stdout: z.string(),
-  stderr: z.string(),
-  stdout_truncated: z.boolean(),
-  stderr_truncated: z.boolean(),
+  // The pane's own stream between submission and the run's sentinel: stdout
+  // and stderr merged as the terminal rendered them, bounded by
+  // MAX_RUN_CAPTURE_BYTES with any excess reported as truncation.
+  output: z.string(),
+  truncated: z.boolean(),
 });
 export type RunPaneResponse = z.infer<typeof RunPaneResponseSchema>;
 

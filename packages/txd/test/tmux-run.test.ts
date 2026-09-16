@@ -1,19 +1,24 @@
 // The run mechanisms below the membrane.
 //
-// Pane-shell branch: the command lives in a script file, the ONE staged line
-// carries only fixed paths (no quoting hazard can break the epilogue), and
-// completion is the pane's own `tmux wait-for` signal — armed before the line
-// is typed, no polling loop, no deadline.
+// Pane-shell branch: the pane prints the operator's own command plus one
+// sentinel epilogue carrying `$?`, and the run rides the pane's own byte
+// stream — a per-run capture armed before the line is submitted, read until
+// the sentinel line, then disarmed. Nothing in the submitted line names a
+// path, a file, or a socket, so the same line means the same thing in a local
+// shell and in an ssh session the pane is showing.
 //
 // Agent branch: Claude's bash mode is entered by a literal `!` KEYSTROKE on an
 // empty composer (a bracketed paste of `!` stays text and would submit a
 // prompt); Codex parses a literal `!`-prefixed line at submit, so its form
 // rides the verified send path whole.
 import { expect, test } from 'bun:test';
-import { readFile, writeFile } from 'node:fs/promises';
-import { RealTmux, type TmuxCommandResult } from '../src/tmux.ts';
+import { appendFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { PassThrough } from 'node:stream';
+import { RealTmux, type PaneStreamSink, type TmuxCommandResult } from '../src/tmux.ts';
 
 const RUN_ID = '11111111-1111-4111-8111-111111111111';
+const SENTINEL = `txd-run-${RUN_ID}`;
 
 type Runner = (socket: string, args: string[], stdin?: Uint8Array) => Promise<TmuxCommandResult>;
 
@@ -29,71 +34,88 @@ function shellPaneRunner(state: { calls: string[][]; payloads: string[]; workloa
   };
 }
 
-test('a pane run stages one fixed-path line, waits on the signal, and harvests the exact streams', async () => {
-  const state: { calls: string[][]; payloads: string[] } = { calls: [], payloads: [] };
-  let channel = '';
-  let release!: () => void;
-  const signalled = new Promise<void>((resolve) => { release = resolve; });
-  const tmux = new RealTmux('scratch', {
-    run: shellPaneRunner(state),
-    waitForSignal: async (_socket, waited) => { channel = waited; await signalled; },
-  });
+/** The capture transport a real run gets from a FIFO, driven by the test. */
+function paneCapture() {
+  const pane = new PassThrough();
+  const state = { path: '/tmp/txd-run-fake/pane-stream', opened: 0, disposed: 0 };
+  const sink: PaneStreamSink = {
+    path: state.path,
+    read: () => { state.opened += 1; return pane; },
+    dispose: async () => { state.disposed += 1; pane.destroy(); },
+  };
+  return { pane, state, open: async () => sink };
+}
 
-  const staged = await tmux.runInShellPane('palace:E', RUN_ID, `printf 'proof: "$HOME" intact'`, new AbortController().signal);
+test('a pane showing an ssh session runs the operator line and harvests its stream', async () => {
+  const state: { calls: string[][]; payloads: string[]; workload?: string } = { calls: [], payloads: [], workload: 'ssh' };
+  const capture = paneCapture();
+  const tmux = new RealTmux('scratch', { run: shellPaneRunner(state), paneStream: capture.open });
 
-  // The waiter is armed on the per-run channel before anything was typed.
-  expect(channel).toBe(`txd-run-${RUN_ID}`);
-  const line = state.payloads.at(-1)!;
-  const parsed = line.match(/^bash (\S+\/run\.sh) >(\S+) 2>(\S+); printf '%s' "\$\?" >(\S+); tmux -L scratch wait-for -S (\S+)$/);
-  expect(parsed).not.toBeNull();
-  expect(parsed![5]).toBe(`txd-run-${RUN_ID}`);
-  // The command's bytes live in the script verbatim — quotes and all.
-  expect(await readFile(parsed![1]!, 'utf8')).toBe(`printf 'proof: "$HOME" intact'\n`);
-  expect(state.calls.filter((args) => args[0] === 'send-keys')).toEqual([['send-keys', '-t', '%7', 'Enter']]);
+  const command = 'sudo -n bash /var/tmp/r5-k12-work/r5pre.sh';
+  const staged = await tmux.runInShellPane('palace:E', RUN_ID, command, new AbortController().signal);
 
-  // The shell's own redirections write the harvest; the signal releases it.
-  await writeFile(parsed![2]!, 'proof\n');
-  await writeFile(parsed![3]!, 'warned\n');
-  await writeFile(parsed![4]!, '3');
-  release();
-  expect(await staged.completion).toEqual({
-    exit_code: 3, stdout: 'proof\n', stderr: 'warned\n',
-    stdout_truncated: false, stderr_truncated: false,
-  });
+  // In-pane print: the operator's own command, plus a sentinel epilogue that
+  // names no path, no file, and no socket.
+  expect(state.payloads).toEqual([`${command}; printf '\\n${SENTINEL}:%s\\n' "$?"`]);
+  // The capture is armed on the pane BEFORE the line is submitted.
+  expect(state.calls.filter((args) => args[0] === 'pipe-pane' || args[0] === 'send-keys')).toEqual([
+    ['pipe-pane', '-t', '%7', `cat >> '${capture.state.path}'`],
+    ['send-keys', '-t', '%7', 'Enter'],
+  ]);
+
+  // The pane's stream carries the output and, on its own line, the exit code.
+  capture.pane.write('\x1b]0;tokenamby@k12-work\x07\x1b[32mk12-work\x1b[0m\r\n');
+  capture.pane.write(`\n${SENTINEL}:7\n`);
+
+  expect(await staged.completion).toEqual({ exit_code: 7, output: 'k12-work\n', truncated: false });
+  // Disarmed once, on completion.
+  expect(state.calls.filter((args) => args[0] === 'pipe-pane')).toHaveLength(2);
+  expect(state.calls.at(-1)).toEqual(['pipe-pane', '-t', '%7']);
+  expect(capture.state.disposed).toBe(1);
 });
 
-test('a pane whose foreground command is not an idle shell refuses pane_busy with the command named', async () => {
+test('the run asks the pane no process question: readiness is never a foreground-command sniff', async () => {
   const state: { calls: string[][]; payloads: string[]; workload?: string } = { calls: [], payloads: [], workload: 'vim' };
-  const tmux = new RealTmux('scratch', {
-    run: shellPaneRunner(state),
-    waitForSignal: async () => { throw new Error('must not arm a waiter for a refused run'); },
-  });
-  await expect(tmux.runInShellPane('palace:E', RUN_ID, 'echo x', new AbortController().signal))
-    .rejects.toThrow('pane_busy: vim');
-  expect(state.payloads).toEqual([]);
+  const capture = paneCapture();
+  const tmux = new RealTmux('scratch', { run: shellPaneRunner(state), paneStream: capture.open });
+
+  const staged = await tmux.runInShellPane('palace:E', RUN_ID, 'echo x', new AbortController().signal);
+  capture.pane.write(`proof\n\n${SENTINEL}:0\n`);
+
+  expect(await staged.completion).toEqual({ exit_code: 0, output: 'proof\n', truncated: false });
+  expect(state.calls.some((args) => args.some((arg) => arg.includes('pane_current_command')))).toBe(false);
 });
 
-test('a failed staging retires the armed waiter instead of stranding a wait-for client', async () => {
+test('a refused paste never arms a capture on the pane', async () => {
   const state: { calls: string[][]; payloads: string[] } = { calls: [], payloads: [] };
-  let waiterAborted = false;
+  const capture = paneCapture();
   const run: Runner = async (_socket, args, stdin) => {
     const base = await shellPaneRunner(state)(_socket, args, stdin);
-    // The line loads, but the paste refuses: nothing was typed, so nothing
-    // will ever signal the channel.
     if (args[0] === 'paste-buffer') return { code: 1, stdout: '', stderr: 'no such pane' };
     return base;
   };
-  const tmux = new RealTmux('scratch', {
-    run,
-    waitForSignal: (_socket, _channel, signal) => new Promise((_resolve, reject) => {
-      const fail = () => { waiterAborted = true; reject(new Error('pane_lost_mid_run')); };
-      if (signal.aborted) fail();
-      else signal.addEventListener('abort', fail, { once: true });
-    }),
-  });
+  const tmux = new RealTmux('scratch', { run, paneStream: capture.open });
+
   await expect(tmux.runInShellPane('palace:E', RUN_ID, 'echo x', new AbortController().signal))
     .rejects.toThrow('stage_failed: palace:E');
-  expect(waiterAborted).toBe(true);
+  expect(state.calls.some((args) => args[0] === 'pipe-pane')).toBe(false);
+  expect(capture.state.opened).toBe(0);
+});
+
+test('a pane whose output cannot be piped refuses capture_unarmed instead of running blind', async () => {
+  const state: { calls: string[][]; payloads: string[] } = { calls: [], payloads: [] };
+  const capture = paneCapture();
+  const run: Runner = async (_socket, args, stdin) => {
+    const base = await shellPaneRunner(state)(_socket, args, stdin);
+    if (args[0] === 'pipe-pane') return { code: 1, stdout: '', stderr: 'no such pane' };
+    return base;
+  };
+  const tmux = new RealTmux('scratch', { run, paneStream: capture.open });
+
+  await expect(tmux.runInShellPane('palace:E', RUN_ID, 'echo x', new AbortController().signal))
+    .rejects.toThrow('capture_unarmed: palace:E');
+  expect(state.calls.some((args) => args[0] === 'send-keys')).toBe(false);
+  expect(capture.state.disposed).toBe(1);
 });
 
 test('an unresolvable seat refuses before staging anything', async () => {
@@ -106,18 +128,50 @@ test('an unresolvable seat refuses before staging anything', async () => {
     .rejects.toThrow('seat_unresolved: palace:E');
 });
 
-test('an aborted run (the pane died) rejects pane_lost_mid_run instead of hanging on a dead signal', async () => {
+test('an aborted run (the pane died) rejects pane_lost_mid_run instead of reading a dead stream', async () => {
   const state: { calls: string[][]; payloads: string[] } = { calls: [], payloads: [] };
+  const capture = paneCapture();
   const controller = new AbortController();
-  const tmux = new RealTmux('scratch', {
-    run: shellPaneRunner(state),
-    waitForSignal: (_socket, _channel, signal) => new Promise((_resolve, reject) => {
-      signal.addEventListener('abort', () => reject(new Error('pane_lost_mid_run')), { once: true });
-    }),
-  });
+  const tmux = new RealTmux('scratch', { run: shellPaneRunner(state), paneStream: capture.open });
+
   const staged = await tmux.runInShellPane('palace:E', RUN_ID, 'sleep forever', controller.signal);
   controller.abort();
   await expect(staged.completion).rejects.toThrow('pane_lost_mid_run: palace:E');
+});
+
+test('the default capture reads the sink tmux appends to, woken by the sink itself', async () => {
+  const state: { calls: string[][]; payloads: string[] } = { calls: [], payloads: [] };
+  let sink = '';
+  const run: Runner = async (socket, args, stdin) => {
+    const armed = args[0] === 'pipe-pane' ? String(args[3] ?? '').match(/^cat >> '(.+)'$/) : null;
+    if (armed) sink = armed[1]!;
+    return shellPaneRunner(state)(socket, args, stdin);
+  };
+  // No injected transport: this is the sink a real run opens.
+  const tmux = new RealTmux('scratch', { run });
+
+  const staged = await tmux.runInShellPane('palace:E', RUN_ID, 'hostname', new AbortController().signal);
+  expect(sink).toMatch(/pane-stream$/);
+
+  // tmux's own `cat >>` is the writer; the harvest wakes on the append.
+  await appendFile(sink, 'k12-work\r\n');
+  await appendFile(sink, `\n${SENTINEL}:0\n`);
+
+  expect(await staged.completion).toEqual({ exit_code: 0, output: 'k12-work\n', truncated: false });
+  // Disarmed and collected: the sink does not outlive the run.
+  expect(existsSync(sink)).toBe(false);
+});
+
+test('a capture that ends before its sentinel fails the run loudly', async () => {
+  const state: { calls: string[][]; payloads: string[] } = { calls: [], payloads: [] };
+  const capture = paneCapture();
+  const tmux = new RealTmux('scratch', { run: shellPaneRunner(state), paneStream: capture.open });
+
+  const staged = await tmux.runInShellPane('palace:E', RUN_ID, 'echo x', new AbortController().signal);
+  capture.pane.write('half an answer\n');
+  capture.pane.end();
+
+  await expect(staged.completion).rejects.toThrow('run_stream_lost: palace:E');
 });
 
 // ── Agent branch: Claude bash mode ─────────────────────────────────────────

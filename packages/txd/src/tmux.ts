@@ -22,7 +22,7 @@ import {
   TXD_WINDOWS,
   type TxdPage,
 } from './estate.ts';
-import { mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rm, watch, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -168,22 +168,31 @@ export type AgentModeTransitionOutcome = {
   mechanism: ModeTransitionMechanism;
 };
 
-// A pane-shell run's harvest. Streams are captured to files the command's own
-// redirections write, so stdout and stderr come back separated and byte-exact
-// (lossily decoded to UTF-8 for the JSON surface); the exit code is the
-// command's real one, read after the completion signal.
+// A pane-shell run's harvest. The pane's own byte stream is the transport, so
+// stdout and stderr come back merged exactly as the terminal rendered them
+// (lossily decoded to UTF-8, control sequences removed, bounded by
+// MAX_RUN_CAPTURE_BYTES); the exit code rides the run's sentinel line.
 export type ShellRunOutcome = {
   exit_code: number;
-  stdout: string;
-  stderr: string;
-  stdout_truncated: boolean;
-  stderr_truncated: boolean;
+  output: string;
+  truncated: boolean;
 };
 
 // Staging is split from completion so the caller can refuse loudly and fast
-// (unresolvable seat, busy pane, failed stage) before anything defers, then
-// await the completion promise for as long as the command actually runs.
+// (unresolvable seat, unarmed capture, failed stage) before anything defers,
+// then await the completion promise for as long as the command actually runs.
 export type ShellRunStaged = { completion: Promise<ShellRunOutcome> };
+
+// One run's capture transport: the sink tmux pipes the pane into, and the
+// bytes read back out of it. The sink exists before the pipe is armed and
+// `read` is called once the pipe holds it open, so no byte the pane emits
+// after arming can be missed.
+export type PaneStreamSink = {
+  path: string;
+  read(): AsyncIterable<Uint8Array>;
+  dispose(): Promise<void>;
+};
+export type OpenPaneStreamSink = (runId: string) => Promise<PaneStreamSink>;
 
 export interface TmuxControlPlane {
   reachable(): Promise<boolean>;
@@ -256,13 +265,16 @@ export interface TmuxControlPlane {
    */
   runInAgentComposer(seatId: string, runId: string, command: string, engine: 'claude' | 'codex', expectedPaneGeneration?: string): Promise<SendOutcome | { verdict: ComposerRefusal; bytes: number }>;
   /**
-   * Execute one shell command in a BARE pane's idle shell and harvest its
-   * stdout/stderr/exit code. Refuses loud and typed before staging:
-   * `seat_unresolved` (no such pane), `pane_busy: <command>` (a foreground
-   * workload owns the pane), `stage_failed`. Completion is event-driven — the
-   * staged line signals a per-run `tmux wait-for` channel when the command
-   * exits — no polling loop, no deadline; aborting `signal` (the pane died
-   * mid-run) rejects the completion with `pane_lost_mid_run`.
+   * Execute one shell command in a BARE pane's shell — whatever shell that
+   * pane is showing, this machine's or an ssh session's — and harvest it from
+   * the pane's own byte stream. Refuses loud and typed before staging:
+   * `seat_unresolved` (no such pane), `capture_unarmed` (the pane's output
+   * could not be piped), `stage_failed`. Completion is event-driven: the
+   * capture delivers bytes as the pane emits them and the run's sentinel line
+   * carries the command's exit code — no polling loop, no deadline. Aborting
+   * `signal` (the pane died or was reset mid-run) rejects the completion with
+   * `pane_lost_mid_run`; a capture that ends before the sentinel rejects
+   * `run_stream_lost`.
    */
   runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged>;
   /** Observe whether the live engine exposes an interactive prompt. */
@@ -329,6 +341,10 @@ const REPAIR_SPLITS: Record<string, { source: string; flags: string[]; size?: st
 };
 
 const CANON_OPT = '@canonical_id';
+
+// One run's completion marker, unique to that run: the pane prints it with the
+// command's own exit status, and txd reads it off the pane's byte stream.
+const RUN_SENTINEL = 'txd-run-';
 const GENERATION_OPT = '@txd_generation';
 const PANE_ID_ENV = 'PANE_ID';
 const AGENT_ID_ENV = 'AGENT_ID';
@@ -513,38 +529,107 @@ async function spawnTmux(
   return { code, stdout: stdout.bytes, stderr, overflow: stdout.overflow };
 }
 
-type WaitForSignal = (socket: string, channel: string, signal: AbortSignal) => Promise<void>;
+// One read of the sink per wake; the pane's own writes size the harvest, so
+// this is the reader's buffer and nothing else.
+const PANE_STREAM_READ_BYTES = 64 * 1024;
 
-// The pane run's completion event: one client blocked on `tmux wait-for`
-// wakes exactly when the staged line signals the channel after the command
-// exits. Nothing here observes state repeatedly — the tmux server holds the
-// client until the signal — and the only exits are the signal itself, the
-// caller's abort (the pane died mid-run), or the tmux server dying. All loud.
-async function waitForSignal(socket: string, channel: string, signal: AbortSignal): Promise<void> {
-  const proc = spawnTmuxProcess(socket, ['wait-for', channel], { stdout: 'pipe', stderr: 'pipe' });
-  const abort = () => proc.kill();
-  if (signal.aborted) abort();
-  else signal.addEventListener('abort', abort, { once: true });
-  const code = await proc.exited;
-  signal.removeEventListener('abort', abort);
-  if (signal.aborted) throw new Error('pane_lost_mid_run');
-  if (code !== 0) throw new Error('run_wait_failed');
+// The pane run's transport. tmux appends the pane's output to a per-run sink
+// this process reads as it grows: the sink's own modification events wake the
+// reader, so nothing here observes anything on a timer, and an ordinary file
+// can never stall the pane behind a slow reader the way an unread pipe would.
+// The only ends are the sentinel line, a disposed capture, or the pipe dying.
+async function openPaneStreamSink(runId: string): Promise<PaneStreamSink> {
+  const dir = await mkdtemp(join(tmpdir(), `txd-run-${runId}-`));
+  const path = join(dir, 'pane-stream');
+  // The sink exists before the pipe is armed: tmux's append has somewhere to
+  // land, and the reader has something to watch.
+  await writeFile(path, '', { mode: 0o600 });
+  const closed = new AbortController();
+  return {
+    path,
+    read: async function* () {
+      const handle = await open(path, 'r');
+      let cursor = 0;
+      const drain = async function* (): AsyncGenerator<Uint8Array> {
+        while (true) {
+          const buffer = Buffer.alloc(PANE_STREAM_READ_BYTES);
+          const { bytesRead } = await handle.read(buffer, 0, buffer.length, cursor);
+          if (bytesRead === 0) return;
+          cursor += bytesRead;
+          yield buffer.subarray(0, bytesRead);
+        }
+      };
+      const events = watch(path, { signal: closed.signal })[Symbol.asyncIterator]();
+      try {
+        // The next wake is requested BEFORE each drain, so a write landing
+        // while the reader is draining is a wake it still receives.
+        let wake = events.next();
+        yield* drain();
+        while (!(await wake).done) {
+          wake = events.next();
+          yield* drain();
+        }
+      } finally {
+        await handle.close();
+      }
+    },
+    dispose: async () => {
+      closed.abort();
+      await rm(dir, { recursive: true, force: true });
+    },
+  };
 }
 
-// Read one captured stream file up to the contract ceiling; a byte past it is
+// Terminal control bytes the pane carries around real output: OSC strings
+// (window title) and CSI sequences (cursor, colour). The harvest is what the
+// terminal rendered, so both are removed instead of reaching the caller.
+const ANSI_OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const renderCaptured = (line: string): string => stripAnsi(line.replace(ANSI_OSC, '')).replace(/\r/g, '');
+
+// Read the pane until the run's sentinel line, which carries the command's own
+// exit code. The harvest is every line the pane emitted between submission and
+// that sentinel, bounded by MAX_RUN_CAPTURE_BYTES — a byte past the ceiling is
 // reported as truncation, never silently dropped bytes plus a clean flag.
-async function readCapturedStream(path: string): Promise<{ text: string; truncated: boolean }> {
-  const handle = await open(path, 'r').catch(() => null);
-  if (!handle) return { text: '', truncated: false };
+async function harvestRun(
+  seatId: string,
+  sentinel: string,
+  chunks: AsyncIterable<Uint8Array>,
+  signal: AbortSignal,
+): Promise<ShellRunOutcome> {
+  const sentinelLine = new RegExp(`^${sentinel}:(\\d+)$`);
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  let carry = '';
+  let output = '';
+  let bytes = 0;
+  let truncated = false;
   try {
-    const buffer = Buffer.alloc(MAX_RUN_CAPTURE_BYTES + 1);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const truncated = bytesRead > MAX_RUN_CAPTURE_BYTES;
-    const bytes = buffer.subarray(0, Math.min(bytesRead, MAX_RUN_CAPTURE_BYTES));
-    return { text: new TextDecoder('utf-8', { fatal: false }).decode(bytes), truncated };
-  } finally {
-    await handle.close();
+    for await (const chunk of chunks) {
+      carry += decoder.decode(chunk, { stream: true });
+      const lines = carry.split('\n');
+      carry = lines.pop() ?? '';
+      for (const raw of lines) {
+        const line = renderCaptured(raw);
+        const finished = line.match(sentinelLine);
+        if (finished) {
+          // The epilogue's own leading newline exists to guarantee the
+          // sentinel starts a line; it is not output the command wrote.
+          const blank = output.endsWith('\n\n') || output === '\n';
+          return { exit_code: Number(finished[1]), output: blank ? output.slice(0, -1) : output, truncated };
+        }
+        const width = Buffer.byteLength(line, 'utf8') + 1;
+        if (bytes + width > MAX_RUN_CAPTURE_BYTES) {
+          truncated = true;
+          continue;
+        }
+        bytes += width;
+        output += `${line}\n`;
+      }
+    }
+  } catch {
+    // The capture ended under the reader. Which end it was is the typed
+    // refusal below; a raw stream error is never what the caller sees.
   }
+  throw new Error(signal.aborted ? `pane_lost_mid_run: ${seatId}` : `run_stream_lost: ${seatId}`);
 }
 
 async function run(socket: string, args: string[], stdin?: Uint8Array): Promise<TmuxCommandResult> {
@@ -565,7 +650,7 @@ export class RealTmux implements TmuxControlPlane {
   private observeClipboardOrigin: ObserveClipboardOrigin;
   private machineRegistry: ClipboardMachineRegistry;
   private machine: string | undefined;
-  private waitFor: WaitForSignal;
+  private openPaneStream: OpenPaneStreamSink;
   private paneInputQueues = new Map<string, Promise<unknown>>();
 
   constructor(
@@ -578,7 +663,7 @@ export class RealTmux implements TmuxControlPlane {
       machineRegistry?: ClipboardMachineRegistry;
       audit?: AuditSink;
       machine?: string;
-      waitForSignal?: WaitForSignal;
+      paneStream?: OpenPaneStreamSink;
     } = {},
   ) {
     this.runner = options.run ?? run;
@@ -609,7 +694,7 @@ export class RealTmux implements TmuxControlPlane {
     this.observeClipboardOrigin = options.observeClipboardOrigin
       ?? ((clientTty) => this.readClipboardOrigin(clientTty));
     this.machine = options.machine;
-    this.waitFor = options.waitForSignal ?? waitForSignal;
+    this.openPaneStream = options.paneStream ?? openPaneStreamSink;
   }
 
   private paneEnvironment(seatId: string, agentId?: string): string[] {
@@ -2369,67 +2454,72 @@ export class RealTmux implements TmuxControlPlane {
       : { bytes, verdict: 'submit_failed' };
   }
 
+  /** A refusal in the run path is a txd fact, not only an HTTP body. */
+  private auditRunRefusal(seatId: string, reason: string): void {
+    this.audit({
+      operation: `run_shell_${reason}`,
+      target: seatId,
+      outcome: 'failed',
+      duration_ms: 0,
+      stderr_category: reason === 'seat_unresolved' ? 'not_found' : 'command_failed',
+    });
+  }
+
+  private async disarmPaneCapture(seatId: string, paneId: string, sink: PaneStreamSink): Promise<void> {
+    await this.command('disarm_pane_capture', seatId, ['pipe-pane', '-t', paneId]);
+    await sink.dispose();
+  }
+
   async runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged> {
     const paneId = await this.resolvePane(seatId);
-    if (!paneId) throw new Error(`seat_unresolved: ${seatId}`);
-    const workload = (await this.workloads()).find((entry) => entry.seat_id === seatId);
-    if (!workload) throw new Error(`seat_unresolved: ${seatId}`);
-    if (!workload.idle) throw new Error(`pane_busy: ${workload.command}`);
-    // /tmp is one shared namespace with the pane shells by pinned unit
-    // contract (no PrivateTmp — test/systemd-unit.test.ts), so the command's
-    // own redirections write files this daemon can harvest.
-    const dir = await mkdtemp(join(tmpdir(), 'txd-run-'));
-    const script = join(dir, 'run.sh');
-    const stdoutPath = join(dir, 'stdout');
-    const stderrPath = join(dir, 'stderr');
-    const codePath = join(dir, 'code');
-    await writeFile(script, `${command}\n`, { mode: 0o700 });
-    const channel = `txd-run-${runId}`;
-    // A local scope over the caller's signal, so a refused staging can retire
-    // the armed waiter: no line was typed, so nothing will ever signal its
-    // channel, and an unaborted client would sit on the tmux server forever.
-    const waitScope = new AbortController();
-    const relay = () => waitScope.abort();
-    if (signal.aborted) waitScope.abort();
-    else signal.addEventListener('abort', relay, { once: true });
-    // Armed BEFORE the line is staged, so the completion signal can never
-    // fire unobserved.
-    const waiter = this.waitFor(this.socket, channel, waitScope.signal);
-    waiter.catch(() => {});
-    // The command itself lives in the script file, so the one staged line
-    // carries only fixed paths — no quoting hazard can break the epilogue
-    // that signals completion.
-    const line = `bash ${script} >${stdoutPath} 2>${stderrPath}; printf '%s' "$?" >${codePath}; tmux -L ${this.socket} wait-for -S ${channel}`;
-    const staged = await this.pasteLiteral(seatId, paneId, line, 'run_shell_line');
-    const enter = staged ? await this.command('run_shell_submit', seatId, ['send-keys', '-t', paneId, 'Enter']) : null;
-    if (!staged || enter?.code !== 0) {
-      signal.removeEventListener('abort', relay);
-      waitScope.abort();
-      await rm(dir, { recursive: true, force: true });
+    if (!paneId) {
+      this.auditRunRefusal(seatId, 'seat_unresolved');
+      throw new Error(`seat_unresolved: ${seatId}`);
+    }
+    // The pane prints the operator's own command. The single addition is a
+    // sentinel epilogue carrying `$?`: POSIX printf, no local path, no local
+    // socket, so the line means exactly the same thing in this machine's shell
+    // and in an ssh session the pane happens to be showing.
+    const sentinel = `${RUN_SENTINEL}${runId}`;
+    const line = `${command}; printf '\\n${sentinel}:%s\\n' "$?"`;
+    if (!await this.pasteLiteral(seatId, paneId, line, 'run_shell_line')) {
+      this.auditRunRefusal(seatId, 'stage_failed');
+      throw new Error(`stage_failed: ${seatId}`);
+    }
+    let sink: PaneStreamSink;
+    try {
+      sink = await this.openPaneStream(runId);
+    } catch {
+      this.auditRunRefusal(seatId, 'capture_unarmed');
+      throw new Error(`capture_unarmed: ${seatId}`);
+    }
+    // Armed BEFORE the line is submitted, so the run's completion — its
+    // output and its sentinel — can never pass through the pane unobserved.
+    const armed = await this.command('arm_pane_capture', seatId, ['pipe-pane', '-t', paneId, `cat >> '${sink.path}'`]);
+    if (armed.code !== 0) {
+      await sink.dispose();
+      this.auditRunRefusal(seatId, 'capture_unarmed');
+      throw new Error(`capture_unarmed: ${seatId}`);
+    }
+    const chunks = sink.read();
+    const enter = await this.command('run_shell_submit', seatId, ['send-keys', '-t', paneId, 'Enter']);
+    if (enter.code !== 0) {
+      await this.disarmPaneCapture(seatId, paneId, sink);
+      this.auditRunRefusal(seatId, 'stage_failed');
       throw new Error(`stage_failed: ${seatId}`);
     }
     const completion = (async (): Promise<ShellRunOutcome> => {
+      // A pane replacement is this run's death: disposing the capture ends
+      // the read, which is what turns the abort into a typed refusal instead
+      // of a reader parked on a stream nothing will ever write to again.
+      const abort = () => { void sink.dispose(); };
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
       try {
-        await waiter;
-        const [exitCode, stdout, stderr] = await Promise.all([
-          readFile(codePath, 'utf8').then((value) => Number(value.trim())).catch(() => Number.NaN),
-          readCapturedStream(stdoutPath),
-          readCapturedStream(stderrPath),
-        ]);
-        if (!Number.isInteger(exitCode)) throw new Error(`run_exit_unreadable: ${seatId}`);
-        return {
-          exit_code: exitCode,
-          stdout: stdout.text,
-          stderr: stderr.text,
-          stdout_truncated: stdout.truncated,
-          stderr_truncated: stderr.truncated,
-        };
-      } catch (error) {
-        if (signal.aborted) throw new Error(`pane_lost_mid_run: ${seatId}`);
-        throw error;
+        return await harvestRun(seatId, sentinel, chunks, signal);
       } finally {
-        signal.removeEventListener('abort', relay);
-        await rm(dir, { recursive: true, force: true });
+        signal.removeEventListener('abort', abort);
+        await this.disarmPaneCapture(seatId, paneId, sink);
       }
     })();
     return { completion };
@@ -3083,12 +3173,9 @@ export class FakeTmux implements TmuxControlPlane {
   async runInShellPane(seatId: string, runId: string, command: string, signal: AbortSignal): Promise<ShellRunStaged> {
     const s = this.seats.get(seatId);
     if (!s || s.pane === 'dead') throw new Error(`seat_unresolved: ${seatId}`);
-    const workload = (await this.workloads()).find((entry) => entry.seat_id === seatId);
-    if (!workload) throw new Error(`seat_unresolved: ${seatId}`);
-    if (!workload.idle) throw new Error(`pane_busy: ${workload.command}`);
     this.shellRuns.push({ seat_id: seatId, run_id: runId, command });
     const outcome = this.shellRunResults.get(seatId)
-      ?? { exit_code: 0, stdout: '', stderr: '', stdout_truncated: false, stderr_truncated: false };
+      ?? { exit_code: 0, output: '', truncated: false };
     const held = this.heldShellRuns.has(seatId);
     const completion = new Promise<ShellRunOutcome>((resolve, reject) => {
       const fail = () => reject(new Error(`pane_lost_mid_run: ${seatId}`));

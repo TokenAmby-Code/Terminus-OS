@@ -138,7 +138,7 @@ test('a codex binding rides the same branch with its own engine named', async ()
 test('a bare declared seat executes in the pane shell and returns the harvest', async () => {
   const { tmux, d } = estate();
   await tmux.createSeat('palace:E');
-  tmux.setShellRunResult('palace:E', { exit_code: 3, stdout: 'proof\n', stderr: 'warned\n', stdout_truncated: false, stderr_truncated: false });
+  tmux.setShellRunResult('palace:E', { exit_code: 3, output: 'proof\nwarned\n', truncated: false });
 
   const result = await d.run({ schema_version: SCHEMA_VERSION, target: 'palace:E', command: 'printf proof' });
 
@@ -147,8 +147,7 @@ test('a bare declared seat executes in the pane shell and returns the harvest', 
   const response = await result.pending;
   expect(response).toMatchObject({
     ok: true, mode: 'pane', seat_id: 'palace:E',
-    exit_code: 3, stdout: 'proof\n', stderr: 'warned\n',
-    stdout_truncated: false, stderr_truncated: false,
+    exit_code: 3, output: 'proof\nwarned\n', truncated: false,
   });
   expect(tmux.paneShellRuns()).toEqual([
     { seat_id: 'palace:E', run_id: response.run_id, command: 'printf proof' },
@@ -161,13 +160,7 @@ test('a bare stable seat accepts its page-less alias and runs only on the canoni
   const tmux = new FakeTmux();
   const d = new Daemon(store, tmux);
   await tmux.createSeat('council:custodes');
-  tmux.setShellRunResult('council:custodes', {
-    exit_code: 0,
-    stdout: 'alias proof\n',
-    stderr: '',
-    stdout_truncated: false,
-    stderr_truncated: false,
-  });
+  tmux.setShellRunResult('council:custodes', { exit_code: 0, output: 'alias proof\n', truncated: false });
 
   const result = await d.run({ schema_version: SCHEMA_VERSION, target: 'custodes', command: 'printf alias-proof' });
 
@@ -177,7 +170,7 @@ test('a bare stable seat accepts its page-less alias and runs only on the canoni
     ok: true,
     mode: 'pane',
     seat_id: 'council:custodes',
-    stdout: 'alias proof\n',
+    output: 'alias proof\n',
   });
   expect(tmux.paneShellRuns()).toEqual([
     { seat_id: 'council:custodes', run_id: expect.any(String), command: 'printf alias-proof' },
@@ -220,12 +213,33 @@ test('a persona worn by two registered agents is ambiguous', async () => {
     .rejects.toThrow('identity_ambiguous');
 });
 
-test('a foreground workload owns the pane: pane_busy names the command', async () => {
+test('a pane already carrying an armed run refuses the second one typed', async () => {
   const { tmux, d } = estate();
   await tmux.createSeat('palace:E');
-  tmux.setCommand('palace:E', 'vim');
+  tmux.holdShellRun('palace:E');
+
+  const first = await d.run({ schema_version: SCHEMA_VERSION, target: 'palace:E', command: 'sleep forever' });
+  expect(first.mode).toBe('pane');
+  if (first.mode !== 'pane') throw new Error('unreachable');
+  first.pending.catch(() => {});
+
   await expect(d.run({ schema_version: SCHEMA_VERSION, target: 'palace:E', command: 'echo x' }))
-    .rejects.toThrow('pane_busy: vim');
+    .rejects.toThrow('run_in_flight: palace:E');
+  // The refused run typed nothing into the pane.
+  expect(tmux.paneShellRuns()).toHaveLength(1);
+});
+
+test("a pane whose foreground process is not this machine's shell still accepts a run", async () => {
+  const { tmux, d } = estate();
+  await tmux.createSeat('palace:E');
+  tmux.setCommand('palace:E', 'ssh');
+  tmux.setShellRunResult('palace:E', { exit_code: 0, output: 'k12-work\n', truncated: false });
+
+  const result = await d.run({ schema_version: SCHEMA_VERSION, target: 'palace:E', command: 'hostname' });
+
+  expect(result.mode).toBe('pane');
+  if (result.mode !== 'pane') throw new Error('unreachable');
+  await expect(result.pending).resolves.toMatchObject({ ok: true, exit_code: 0, output: 'k12-work\n' });
 });
 
 test('a binding mid-birth blocks the shell branch: the arriving agent owns that pane', async () => {
@@ -307,7 +321,7 @@ test('POST /agents/run serves a typed refusal as a loud non-2xx', async () => {
 test('POST /agents/run completes a pane run as a deferred body carrying the harvest', async () => {
   const { tmux, d } = estate();
   await tmux.createSeat('palace:E');
-  tmux.setShellRunResult('palace:E', { exit_code: 0, stdout: 'proof\n', stderr: '', stdout_truncated: false, stderr_truncated: false });
+  tmux.setShellRunResult('palace:E', { exit_code: 0, output: 'proof\n', truncated: false });
   const srv = makeServer({ bind: '127.0.0.1', port: 0, daemon: d, machine: 'test' });
   try {
     const res = await fetch(`http://127.0.0.1:${srv.port}/agents/run`, {
@@ -315,7 +329,7 @@ test('POST /agents/run completes a pane run as a deferred body carrying the harv
       body: JSON.stringify({ schema_version: SCHEMA_VERSION, target: 'palace:E', command: 'printf proof' }),
     });
     expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ ok: true, mode: 'pane', seat_id: 'palace:E', exit_code: 0, stdout: 'proof\n' });
+    expect(await res.json()).toMatchObject({ ok: true, mode: 'pane', seat_id: 'palace:E', exit_code: 0, output: 'proof\n' });
   } finally {
     srv.stop(true);
   }

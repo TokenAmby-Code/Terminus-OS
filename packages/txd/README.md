@@ -81,7 +81,7 @@ each route is the ruled daemon behavior, unchanged.
 | POST   | `/agents/comm/receipt`  | Event-driven, fixed 30-second delivery receipt rendezvous |
 | POST   | `/agents/comm/wait`     | Read the durable callback fold for one admitted ask |
 | POST   | `/agents/mode`          | Engine-aware, event-before-effect plan-mode transition (enter / toggle / approve a posed plan) |
-| POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat executes in its idle pane shell and returns captured stdout/stderr + exit code |
+| POST   | `/agents/run`           | One shell command against one pane (`tx run`): a registered agent seat gets the engine's `!` shell escape; a bare declared seat runs the command in the shell that pane is showing (local or ssh'd) and returns the pane's own stream + exit code |
 | POST   | `/ingress/lifecycle`    | lifecycled typed lifecycle-fact door: consumes `wrapper_started`; 422 only for envelope skew, acks everything else so the lane never wedges |
 | GET    | `/tmux/read/estate`     | Estate observation: seats, bindings, and tint readiness |
 | GET    | `/tmux/read/diagnostics/hooks` | Bounded typed view of tmux-hook records captured in journald |
@@ -142,19 +142,28 @@ each route is the ruled daemon behavior, unchanged.
   Codex takes the whole `!<command>` line through the verified send path), so
   the command's output lands in that agent's conversation, and the injection
   is recorded as `act.agent_input_injected`
-  (`input_class: harness_shell`). A bare declared seat executes the command in
-  its idle pane shell: the command bytes live in a script file, the one staged
-  line carries only fixed paths, and completion is the pane's own
-  `tmux wait-for` signal — armed before the line is typed, no polling loop, no
-  deadline — after which the caller receives the exact captured stdout,
-  stderr, and exit code (each stream bounded by `MAX_RUN_CAPTURE_BYTES`,
-  truncation reported). Refusals are loud and typed:
-  `comm_target_unresolvable` (with the attempted target and softened forms),
-  `identity_absent`, `identity_ambiguous`, `seat_unresolved`, `pane_busy: <command>`,
-  `seat_binding_pending`, `scoped_reset_pending`, `pane_dead`,
-  `seat_abandoned`, `engine_unattested`, `stage_failed`,
-  `run_not_staged`, and a mid-run pane replacement fails the run with
-  `pane_lost_mid_run` instead of hanging on a dead signal.
+  (`input_class: harness_shell`). A bare declared seat runs the command in
+  whatever shell that pane is showing — this machine's shell, or an ssh
+  session to another box — because the pane prints the operator's own command
+  and the run rides the pane's byte stream: the submitted line is the command
+  plus one sentinel epilogue, `; printf '\n<sentinel>:%s\n' "$?"`, which names
+  no path, no file, and no socket, so it means the same thing on every machine.
+  txd arms a per-run `pipe-pane` capture before the line is submitted, reads
+  that stream until the sentinel line appears — the stream's own readiness is
+  the event, no polling loop and no deadline — takes the exit code from the
+  sentinel, and disarms. The caller receives the pane's output between
+  submission and the sentinel: stdout and stderr merged as the terminal
+  rendered them, control sequences removed, bounded by `MAX_RUN_CAPTURE_BYTES`
+  with truncation reported. Whether the pane will accept a line is txd's own
+  event truth, never a `#{pane_current_command}` sniff: a run txd armed and has
+  not yet harvested owns that pane, and a second one refuses `run_in_flight`.
+  Refusals are loud and typed: `comm_target_unresolvable` (with the attempted
+  target and softened forms), `identity_absent`, `identity_ambiguous`,
+  `seat_unresolved`, `run_in_flight`, `seat_binding_pending`,
+  `scoped_reset_pending`, `pane_dead`, `seat_abandoned`, `engine_unattested`,
+  `capture_unarmed`, `stage_failed`, `run_not_staged`; a mid-run pane
+  replacement fails the run with `pane_lost_mid_run`, and a capture that ends
+  before its sentinel fails with `run_stream_lost`, instead of hanging.
 - Ordinary comm payloads are opaque and have no caller-visible length mode or
   size ceiling. Txd loads every verified text segment into a private,
   one-use tmux buffer over stdin. An ordinary message injects as one bracketed

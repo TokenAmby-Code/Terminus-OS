@@ -217,10 +217,11 @@ export const COMMANDS: readonly Command[] = [
   {
     // One command against one pane, branching on txd's event truth: an agent
     // seat gets the engine's `!` shell escape (output lands in that agent's
-    // conversation); a bare seat executes and this caller gets the captured
-    // stdout/stderr and exit code back.
+    // conversation); a bare seat prints and runs the command in the shell that
+    // pane is showing — local or ssh'd — and this caller gets that pane's own
+    // stream (stdout and stderr merged, as rendered) plus the exit code.
     path: ['run'],
-    summary: '<target> <command> — agent panes get the engine !-escape; bare panes execute and return output',
+    summary: '<target> <command> — agent panes get the engine !-escape; bare panes print and run the command, returning the pane stream and exit code',
     run: async ({ args, request, write }) => {
       const positional = positionalOnly(args);
       if (positional.length !== 2) throw new Error('usage: tx run <target> <command>');

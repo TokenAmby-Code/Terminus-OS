@@ -2123,9 +2123,11 @@ export class Daemon {
    * event truth (never a process heuristic). A target resolving to a
    * REGISTERED binding is an agent pane: the command is staged through the
    * engine's `!` shell escape so its output lands in that agent's
-   * conversation. A bare declared seat executes the command in its idle pane
-   * shell; completion is the pane's own wait-for signal (the command exited)
-   * and the harvest returns to the caller as a deferred body.
+   * conversation. A bare declared seat runs the command in whatever shell that
+   * pane is showing — this machine's or an ssh session's — and the pane's own
+   * byte stream carries the output and the exit code back to the caller as a
+   * deferred body. One run at a time owns a pane: a second refuses
+   * `run_in_flight` while the first is still armed.
    */
   async run(req: RunRequest, transportReceipt: string | null = null): Promise<
     | { mode: 'agent'; response: RunAgentResponse }
@@ -2193,21 +2195,27 @@ export class Daemon {
     }
 
     const controller = new AbortController();
-    const registered = this.paneRuns.get(prepared.seatId) ?? new Set<AbortController>();
-    registered.add(controller);
-    this.paneRuns.set(prepared.seatId, registered);
     let staged: Awaited<ReturnType<TmuxControlPlane['runInShellPane']>>;
     try {
-      // Staging under the writer lock: a concurrent reset cannot replace the
-      // pane process between the idle observation and the typed line.
-      staged = await this.locked(() => this.tmux.runInShellPane(prepared.seatId, runId, req.command, controller.signal));
+      // Admission and staging under the writer lock. Whether the pane will
+      // accept a line is txd's own knowledge of what it has already typed
+      // there — a run it armed and has not harvested owns that pane — and the
+      // same lock keeps a concurrent reset from replacing the pane process
+      // between that admission and the typed line.
+      staged = await this.locked(() => {
+        const registered = this.paneRuns.get(prepared.seatId) ?? new Set<AbortController>();
+        if (registered.size > 0) throw new Error(`run_in_flight: ${prepared.seatId}`);
+        registered.add(controller);
+        this.paneRuns.set(prepared.seatId, registered);
+        return this.tmux.runInShellPane(prepared.seatId, runId, req.command, controller.signal);
+      });
     } catch (error) {
-      registered.delete(controller);
+      this.paneRuns.get(prepared.seatId)?.delete(controller);
       throw error;
     }
     const pending = staged.completion
       .then((outcome): RunPaneResponse => ({ ok: true, mode: 'pane', run_id: runId, seat_id: prepared.seatId, ...outcome }))
-      .finally(() => { registered.delete(controller); });
+      .finally(() => { this.paneRuns.get(prepared.seatId)?.delete(controller); });
     return { mode: 'pane', pending };
   }
 
