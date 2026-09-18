@@ -60,6 +60,12 @@ grep -q '^Restart=on-failure' "$txd_src" || {
   echo "apply($machine): txd unit missing Restart=on-failure (fleet convention); refusing to install" >&2
   exit 1
 }
+for directive in 'StartLimitIntervalSec=60' 'StartLimitBurst=5' 'RestartSec=2' 'RestartMaxDelaySec=300'; do
+  grep -qx "$directive" "$txd_src" || {
+    echo "apply($machine): txd unit missing ratified backoff directive $directive; refusing to install" >&2
+    exit 1
+  }
+done
 grep -q '^ExecStart=%h/\.bun/bin/bun ' "$txd_src" || {
   echo "apply($machine): txd unit must ExecStart the pinned absolute bun (%h/.bun/bin/bun, apply-fleet-runtime pin); refusing to install" >&2
   exit 1
@@ -84,6 +90,12 @@ grep -qx 'RestartSec=2' "$estate_src" || {
   echo "apply($machine): estate unit must use the pinned restart delay; refusing to install" >&2
   exit 1
 }
+for directive in 'StartLimitIntervalSec=60' 'StartLimitBurst=5' 'RestartMaxDelaySec=300'; do
+  grep -qx "$directive" "$estate_src" || {
+    echo "apply($machine): estate unit missing ratified backoff directive $directive; refusing to install" >&2
+    exit 1
+  }
+done
 # Terminus-OS owns WHAT txd is, and it ruled that the estate starts txd with a
 # Wants edge rather than upholding it: Upholds periodically reasserts a txd that
 # has deterministically failed, re-arming a fault StartLimit exists to make

@@ -12,6 +12,8 @@ Before=txd.service
 # from event truth. Upholds is deliberately absent: it periodically reasserts
 # a deterministically failed txd even after StartLimit has made the fault loud.
 Wants=txd.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -22,6 +24,7 @@ ExecStart=/usr/bin/tmux -D -L ${TXD_TMUX_SOCKET} -f %h/.local/lib/terminus-os/tx
 ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server
 Restart=always
 RestartSec=2
+RestartMaxDelaySec=300
 NoNewPrivileges=false
 # The server is the durable estate owner. Stopping/restarting txd.service does
 # not signal it; an estate-server exit is the event that rotates both services.

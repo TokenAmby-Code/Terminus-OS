@@ -60,6 +60,7 @@ ExecStartPre=/usr/bin/test -r %h/runtimes/Token-Fleet/live/shared/generated/regi
 ExecStart=%h/.bun/bin/bun src/daemon.ts
 Restart=on-failure
 RestartSec=2
+RestartMaxDelaySec=300
 NoNewPrivileges=true
 # Never start tmux here. NoNewPrivileges is inherited across fork/exec and
 # would propagate from txd to the tmux server and every estate pane. The

@@ -4,7 +4,7 @@ import { createTxdObservationClient } from '../src/observation.ts';
 
 const testTimezone = async () => 'America/Phoenix';
 
-function harness(response: unknown = { ok: true }) {
+function harness(response: unknown = { ok: true, verdict: 'OK', code: 0, serving: true, probes: [{ rung: 'function', state: 'ready' }] }) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
@@ -24,7 +24,7 @@ function harness(response: unknown = { ok: true }) {
 test('health, inspect, and version use the STC observation client', async () => {
   const calls: string[] = [];
   const observation = {
-    health: async () => { calls.push('health'); return { ok: true }; },
+    health: async () => { calls.push('health'); return { ok: true, verdict: 'OK', code: 0, serving: true, probes: [{ rung: 'function', state: 'ready' }] }; },
     inspect: async () => { calls.push('inspect'); return { holdings: [] }; },
   } as never;
   const version = () => ({ service: 'txd', daemon: 'txd', cli: 'tx', version: '0.1.0', stc_version: '1.3.0' });
@@ -43,8 +43,14 @@ test('health returns the report code for all four verdicts', async () => {
     ['UNKNOWN', 3, false],
   ] as const) {
     const h = harness();
+    const state = verdict === 'OK' ? 'ready' : verdict === 'UNKNOWN' ? 'undetermined' : 'failed';
     h.deps.observation = {
-      health: async () => ({ ok: verdict === 'OK', verdict, code, serving }),
+      health: async () => ({
+        ok: verdict === 'OK', verdict, code, serving,
+        probes: verdict === 'WARNING'
+          ? [{ rung: 'dependency', state }, { rung: 'function', state: 'ready' }]
+          : [{ rung: 'function', state }],
+      }),
       inspect: async () => ({}),
     } as never;
     expect(await runCli(['health'], h.deps)).toBe(code);
@@ -312,7 +318,7 @@ test('an answer that quotes a tmux id is PRINTED, not refused', async () => {
 
 test('ordinary prose carrying sigil-shaped tokens is printed', async () => {
   for (const text of ['pin zod@4.4', 'the positional $1', 'it cost $20']) {
-    const h = harness({ ok: true, message: text });
+    const h = harness({ ok: true, verdict: 'OK', code: 0, serving: true, probes: [{ rung: 'function', state: 'ready' }], message: text });
     expect(await runCli(['health'], h.deps)).toBe(0);
     expect(h.stderr).toEqual([]);
     expect(JSON.parse(h.stdout[0]!).message).toBe(text);

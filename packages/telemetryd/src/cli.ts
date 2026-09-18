@@ -5,6 +5,7 @@
 import { createObservationClient } from "@tokenamby-code/stc-contract/client";
 import { runningRuntimeMarker } from "@tokenamby-code/stc-contract/version";
 import { SERVICE_IDENTITY, SERVICE_VERSION } from "./identity.ts";
+import { healthExitCode } from "@terminus-os/contracts";
 
 const USAGE = [
   "usage: tm <health|inspect|version>",
@@ -45,4 +46,4 @@ if (operation.data === "inspect") {
 }
 const report = await client.health();
 process.stdout.write(`${JSON.stringify(report)}\n`);
-process.exit(report.ok ? 0 : 1);
+process.exit(healthExitCode(report));

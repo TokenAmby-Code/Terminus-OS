@@ -2,6 +2,8 @@
 Description=Terminus desktop telemetry ingress
 After=network-online.target postgresql.service
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -12,6 +14,7 @@ Environment=TOKEN_FLEET_MACHINE_CONFIG_ROOT=%h/runtimes/Token-Fleet/live/machine
 ExecStart=%h/.bun/bin/bun src/daemon.ts
 Restart=on-failure
 RestartSec=2
+RestartMaxDelaySec=300
 
 [Install]
 WantedBy=default.target

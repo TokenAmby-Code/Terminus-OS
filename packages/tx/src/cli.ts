@@ -1,7 +1,7 @@
 import { CliGrammarError, COMMANDS, parseInvocation, type Command } from './commands.ts';
 import { createClient, type TxdRequest } from './client.ts';
 import { createLocalClipboard, type LocalClipboard } from './clipboard.ts';
-import { findTmuxIdInIdentifiers } from '@terminus-os/contracts';
+import { findTmuxIdInIdentifiers, healthExitCode } from '@terminus-os/contracts';
 import type { ObservationClient } from '@tokenamby-code/stc-contract/client';
 import { runningRuntimeMarker } from '@tokenamby-code/stc-contract/version';
 import { SERVICE_IDENTITY, SERVICE_VERSION } from '@terminus-os/txd/identity';
@@ -80,7 +80,7 @@ export async function runCli(
       })))();
       assertCanonicalOutput(value);
       deps.stdout(stringifyHuman(value, loadedTimezone, 2));
-      return argv[0] === 'health' && !(value as { ok?: boolean }).ok ? 1 : 0;
+      return argv[0] === 'health' ? healthExitCode(value as { probes: Array<{ rung: string; state: string }> }) : 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const rendered = timezone ? renderHumanText(message, timezone) : message;

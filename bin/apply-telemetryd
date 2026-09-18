@@ -38,6 +38,12 @@ grep -qx 'Restart=on-failure' "$unit_src" || {
   echo "apply($machine): telemetryd must fail loud and restart on failure" >&2
   exit 1
 }
+for directive in 'StartLimitIntervalSec=60' 'StartLimitBurst=5' 'RestartSec=2' 'RestartMaxDelaySec=300'; do
+  grep -qx "$directive" "$unit_src" || {
+    echo "apply($machine): telemetryd unit missing ratified backoff directive $directive" >&2
+    exit 1
+  }
+done
 
 unit_dir="$HOME/.config/systemd/user"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
