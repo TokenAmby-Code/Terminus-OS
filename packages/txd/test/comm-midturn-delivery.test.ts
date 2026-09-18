@@ -1,11 +1,6 @@
-// Behavioral-pin lane: mid-turn delivery is asserted from staged transport;
-// engine engagement remains an independent observation. A WORKING engine
-// produces no UserPromptSubmit (live specimens 994854e0, b9c1ca52, 2a243960;
-// e5757301 pinned the send-time observation racing the busy engine's repaint),
-// so the join reads its evidence when the target's own stop lands: the engine
-// is at rest, and a visible composer that no longer holds the exact frame
-// proves the frame left it into the turn the stop attests complete. The idle
-// path keeps its UserPromptSubmit hook join unchanged.
+// Behavioral-pin lane: mid-turn transport is delivery, while exact engine
+// consumption remains independently attested by UserPromptSubmit. A stop or
+// composer capture cannot name which frame the engine consumed.
 
 import { expect, test } from 'bun:test';
 import { SCHEMA_VERSION } from '@terminus-os/contracts';
@@ -13,8 +8,6 @@ import { Daemon } from '../src/core.ts';
 import { commTokenForMessageId } from '../src/comm-frame.ts';
 import { MemoryEventStore } from '../src/store.ts';
 import { FakeTmux } from '../src/tmux.ts';
-
-const IDLE_COMPOSER = 'transcript\n\n › \n\nchrome\n';
 
 async function rig() {
   const store = new MemoryEventStore();
@@ -42,8 +35,8 @@ async function targetWorking(store: MemoryEventStore) {
   });
 }
 
-test('behavioral pin: a mid-turn staged frame is delivered at injection and observed at target stop', async () => {
-  const { store, tmux, daemon } = await rig();
+test('behavioral pin: a mid-turn staged frame remains unobserved after unrelated stop output', async () => {
+  const { store, daemon } = await rig();
   await targetWorking(store);
 
   const accepted = await daemon.comm({
@@ -57,26 +50,19 @@ test('behavioral pin: a mid-turn staged frame is delivered at injection and obse
   expect(accepted.staged).toBe(true);
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 
-  // At the stop the engine paints its idle composer, the frame long consumed.
-  tmux.setPaneText('palace:W', IDLE_COMPOSER);
   const stop = await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
   expect(stop).toMatchObject({ ok: true, recorded: true });
 
   const delivery = await daemon.commDelivery(accepted.message_id);
   expect(delivery.complete).toBe(true);
-  const assertion = (await store.readAll()).find((event) =>
+  const assertions = (await store.readAll()).filter((event) =>
     event.event_type === 'act.comm_observed'
     && event.payload.message_id === accepted.message_id);
-  expect(assertion?.payload).toMatchObject({
-    message_id: accepted.message_id,
-    target_agent_id: 'target',
-    source_agent_id: 'sender',
-    attestation: 'turn_stop',
-  });
+  expect(assertions).toEqual([]);
 });
 
 test('behavioral pin: the stop join cannot observe a receiver absent from the target snapshot', async () => {
-  const { store, tmux, daemon } = await rig();
+  const { store, daemon } = await rig();
   await targetWorking(store);
   const messageId = crypto.randomUUID();
   const frame = 'snapshot mismatch frame';
@@ -103,7 +89,6 @@ test('behavioral pin: the stop join cannot observe a receiver absent from the ta
     }, provenance, occurred_at: '2026-08-19T00:00:03.000Z',
   });
 
-  tmux.setPaneText('palace:W', IDLE_COMPOSER);
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   expect((await store.readAll()).filter((event) =>
@@ -136,8 +121,8 @@ test('behavioral pin: the bytes-sent receipt records the target turn at send', a
   });
 });
 
-test('behavioral pin: a frame the first stop could not observe is observed on a later fresh stop that can', async () => {
-  const { store, tmux, daemon } = await rig();
+test('behavioral pin: repeated stops never synthesize exact-frame observation', async () => {
+  const { store, daemon } = await rig();
   await targetWorking(store);
   const accepted = await daemon.comm({
     schema_version: SCHEMA_VERSION,
@@ -148,18 +133,15 @@ test('behavioral pin: a frame the first stop could not observe is observed on a 
     reply: false,
   });
 
-  // First stop: the pane is unobservable — no evidence, no assertion.
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
   expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toEqual([]);
 
-  // The engine works again, then stops with the frame verifiably gone.
   await targetWorking(store);
-  tmux.setPaneText('palace:W', IDLE_COMPOSER);
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
-  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toHaveLength(1);
+  expect((await store.readAll()).filter((event) => event.event_type === 'act.comm_observed')).toEqual([]);
   const receipts = (await store.readAll()).filter((event) =>
     event.event_type === 'act.comm_bytes_sent' && event.entity_id === accepted.message_id);
   expect(receipts).toHaveLength(1); // reconciled to confirmed with no duplicate send
@@ -186,8 +168,8 @@ test('behavioral pin: the idle-target UserPromptSubmit hook join is unchanged', 
   expect((await daemon.commDelivery(accepted.message_id)).complete).toBe(true);
 });
 
-test('behavioral pin: a hook-asserted delivery is not re-asserted by the later stop join', async () => {
-  const { store, tmux, daemon } = await rig();
+test('behavioral pin: a hook-asserted observation remains singular after a later stop', async () => {
+  const { store, daemon } = await rig();
   await targetWorking(store);
 
   const accepted = await daemon.comm({
@@ -203,7 +185,6 @@ test('behavioral pin: a hook-asserted delivery is not re-asserted by the later s
     agent_id: 'target',
     comm_tokens: [commTokenForMessageId(accepted.message_id)],
   });
-  tmux.setPaneText('palace:W', IDLE_COMPOSER);
   await daemon.stop({ schema_version: SCHEMA_VERSION, agent_id: 'target' });
 
   const assertions = (await store.readAll()).filter((event) =>
