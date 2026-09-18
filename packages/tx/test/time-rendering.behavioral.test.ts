@@ -9,6 +9,8 @@ test('UTC-stored listener instants render as exact MST wall time in tx health', 
     ok: true,
     probes: [{
       name: 'journal-listener',
+      rung: 'function',
+      state: 'ready',
       evidence: {
         registeredAt: '2026-08-29T03:05:00.000Z',
         lastNotificationAt: '2026-08-29T03:15:30Z',
