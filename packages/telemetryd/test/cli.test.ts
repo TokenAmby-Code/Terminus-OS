@@ -35,13 +35,16 @@ test("tm version names the identity and the executing STC package, touching no d
   expect(JSON.parse(result.out)).toEqual({ service: "telemetryd", daemon: "telemetryd", cli: "tm", version: "0.1.0", stc_version: "1.7.1" });
 });
 
-test("tm health exits 0 on a green daemon and 1 on a red one, printing the report", async () => {
+test("tm health exits with the health report's four-verdict code", async () => {
   const green = await tm(["health"], { TM_URL: serve({ state: "ready", evidence: { select_1: 1 } }) });
   expect(green.code).toBe(0);
-  expect(JSON.parse(green.out).ok).toBe(true);
-  const red = await tm(["health"], { TM_URL: serve({ state: "failed", detail: "postgres down" }) });
-  expect(red.code).toBe(1);
-  expect(JSON.parse(red.out).ok).toBe(false);
+  expect(JSON.parse(green.out)).toMatchObject({ ok: true, verdict: "OK", code: 0, serving: true });
+  const critical = await tm(["health"], { TM_URL: serve({ state: "failed", detail: "postgres down" }) });
+  expect(critical.code).toBe(2);
+  expect(JSON.parse(critical.out)).toMatchObject({ ok: false, verdict: "CRITICAL", code: 2, serving: false });
+  const unknown = await tm(["health"], { TM_URL: serve({ state: "undetermined", detail: "observation unavailable" }) });
+  expect(unknown.code).toBe(3);
+  expect(JSON.parse(unknown.out)).toMatchObject({ ok: false, verdict: "UNKNOWN", code: 3, serving: false });
 });
 
 test("tm inspect prints quantities with no verdict", async () => {

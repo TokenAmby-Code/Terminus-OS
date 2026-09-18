@@ -27,3 +27,11 @@ test("telemetryd runs from its installed generation with Fleet Bun", () => {
   expect(unit).toContain("ExecStart=%h/.bun/bin/bun src/daemon.ts");
   expect(unit).toContain("Restart=on-failure");
 });
+
+test("telemetryd carries the ratified crash-loop backoff contract", () => {
+  expect(unit).toMatch(/^StartLimitIntervalSec=60$/m);
+  expect(unit).toMatch(/^StartLimitBurst=5$/m);
+  expect(unit).toMatch(/^RestartSec=2$/m);
+  expect(unit).toMatch(/^RestartMaxDelaySec=300$/m);
+  expect(unit).not.toContain("RestartSteps");
+});

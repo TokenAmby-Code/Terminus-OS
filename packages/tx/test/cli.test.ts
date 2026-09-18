@@ -35,6 +35,22 @@ test('health, inspect, and version use the STC observation client', async () => 
   expect(calls).toEqual(['health', 'inspect']);
 });
 
+test('health returns the report code for all four verdicts', async () => {
+  for (const [verdict, code, serving] of [
+    ['OK', 0, true],
+    ['WARNING', 1, true],
+    ['CRITICAL', 2, false],
+    ['UNKNOWN', 3, false],
+  ] as const) {
+    const h = harness();
+    h.deps.observation = {
+      health: async () => ({ ok: verdict === 'OK', verdict, code, serving }),
+      inspect: async () => ({}),
+    } as never;
+    expect(await runCli(['health'], h.deps)).toBe(code);
+  }
+});
+
 test('inspect accepts the current STC envelope through an additive funnel mouth', async () => {
   const probe = {
     name: 'postgres',

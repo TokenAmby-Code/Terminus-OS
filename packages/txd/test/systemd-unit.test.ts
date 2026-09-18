@@ -68,6 +68,8 @@ describe('systemd/txd.service pins', () => {
   test('a deterministic startup failure lands in failed instead of crashlooping', () => {
     pin('StartLimitIntervalSec=60');
     pin('StartLimitBurst=5');
+    pin('RestartMaxDelaySec=300');
+    expect(unit).not.toContain('RestartSteps');
     const startLimit = lines.findIndex((l) => l.startsWith('StartLimitIntervalSec='));
     const service = lines.findIndex((l) => l === '[Service]');
     expect(startLimit).toBeGreaterThan(lines.indexOf('[Unit]'));
@@ -123,6 +125,10 @@ describe('systemd/tx-estate.service boundary', () => {
     expect(tmuxLines).toContain('ExecStop=/usr/bin/tmux -L ${TXD_TMUX_SOCKET} kill-server');
     expect(tmuxLines).toContain('Restart=always');
     expect(tmuxLines).toContain('RestartSec=2');
+    expect(tmuxLines).toContain('StartLimitIntervalSec=60');
+    expect(tmuxLines).toContain('StartLimitBurst=5');
+    expect(tmuxLines).toContain('RestartMaxDelaySec=300');
+    expect(tmuxUnit).not.toContain('RestartSteps');
     expect(tmuxLines).toContain('Wants=txd.service');
     expect(tmuxLines).not.toContain('Upholds=txd.service');
     expect(tmuxLines).not.toContain('RemainAfterExit=yes');
