@@ -4072,6 +4072,10 @@ export class Daemon {
       };
     });
     if (councilRebuilt) await this.announceVacantPerpetualSeats();
+    // Reconcile is the typed operator surface for reasserting present estate
+    // truth after a consumer repair. It observes the same binding fold as boot
+    // and publishes no synthetic retirement or job-side state.
+    await this.assertOccupancyCensus();
     return response;
   }
 
@@ -4207,8 +4211,8 @@ export class Daemon {
    * statement: txd owns where an agent sits, so it says so, and consumers fold
    * it like any other journal fact.
    *
-   * The assertion is COMPLETE over this machine — these and only these agents
-   * are seated on it — because completeness is the only thing that reaches an
+   * The assertions are COMPLETE per physical machine — these and only these
+   * agents are seated on each one — because completeness is the only thing that reaches an
    * agent nobody will ever publish another event about. `agent.retired` is
    * published after the close is already committed and a refusal is never
    * revisited; a consumer that missed one is not waiting for anything. Neither
@@ -4216,10 +4220,11 @@ export class Daemon {
    * this machine no longer declares can never be reassigned, so nothing will
    * ever displace the agent recorded in it. A roster of the living can.
    *
-   * It is taken once, at boot fold completion, from binding truth just folded.
-   * Not a timer, not a repeating sweep: the estate changes at close, launch,
-   * and reset, and each of those already publishes its own fact. This is the
-   * assertion of present truth that lets a consumer that missed one recover.
+   * It is taken at boot fold completion, and again only through the explicit
+   * typed reconcile command, from binding truth just folded. Not a timer, not
+   * a repeating sweep: the estate changes at close, launch, and reset, and
+   * each of those already publishes its own fact. This is the assertion of
+   * present truth that lets a consumer that missed one recover.
    *
    * A payload the contract refuses publishes NOTHING. A roster missing an
    * occupant it could not represent, asserted as complete, would tell a
@@ -4229,44 +4234,67 @@ export class Daemon {
   async assertOccupancyCensus(): Promise<void> {
     if (!this.physicalRegistration) return;
     return this.locked(async () => {
-      const machine = this.physicalRegistration!.machine;
+      const localMachine = this.physicalRegistration!.machine;
       const takenAt = this.now();
-      const occupied = (await this.projections()).currentBindings
-        .filter((binding) => binding.agent_id !== null)
-        .map((binding) => ({
+      const machines = [
+        localMachine,
+        ...this.physicalRegistration!.sshSeatTargets.targets.filter((machine) => machine !== localMachine),
+      ];
+      const occupiedByMachine = new Map(machines.map((machine) => [machine, [] as Array<{
+        seat_id: string;
+        agent_id: string;
+        birth_generation: string | null;
+        pane_generation: string | null;
+        registered: boolean;
+      }>]));
+      for (const binding of (await this.projections()).currentBindings) {
+        if (binding.agent_id === null) continue;
+        const machine = this.physicalRegistration!.sshSeatTargets.targetFor(binding.seat_id) ?? localMachine;
+        const occupied = occupiedByMachine.get(machine);
+        if (!occupied) {
+          throw new Error(`binding targets an undeclared census machine: ${binding.seat_id} -> ${machine}`);
+        }
+        occupied.push({
           seat_id: binding.seat_id,
           agent_id: binding.agent_id,
           birth_generation: binding.birth_generation,
           pane_generation: binding.pane_generation,
           registered: binding.registered,
-        }))
-        .sort((left, right) => left.seat_id.localeCompare(right.seat_id));
-      const census = EstateOccupancyCensusSchema.safeParse({
-        schema_version: AGENT_SCHEMA_VERSION,
-        machine,
-        configuration: this.physicalRegistration!.configuration,
-        occupied,
-        taken_at: takenAt,
-      });
-      const subject = { entity_type: 'estate' as const, entity_id: machine, seat_id: null };
-      if (!census.success) {
-        await this.recordDroppedPublication(
-          'agent.estate_occupancy_census',
-          subject,
-          'contract_refused',
-          census.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
-        );
-        return;
+        });
       }
-      try {
-        await this.physicalRegistration!.publish('agent.estate_occupancy_census', census.data, census.data.taken_at);
-      } catch (error) {
-        await this.recordDroppedPublication(
-          'agent.estate_occupancy_census',
-          subject,
-          'transport_refused',
-          String(error),
-        );
+      for (const [machine, occupied] of occupiedByMachine) {
+        occupied.sort((left, right) => left.seat_id.localeCompare(right.seat_id));
+        const census = EstateOccupancyCensusSchema.safeParse({
+          schema_version: AGENT_SCHEMA_VERSION,
+          machine,
+          configuration: this.physicalRegistration!.configuration,
+          occupied,
+          taken_at: takenAt,
+        });
+        const subject = { entity_type: 'estate' as const, entity_id: machine, seat_id: null };
+        if (!census.success) {
+          await this.recordDroppedPublication(
+            'agent.estate_occupancy_census',
+            subject,
+            'contract_refused',
+            census.error.issues.map((issue) => `${issue.path.join('.')}:${issue.code}`).join(','),
+          );
+          continue;
+        }
+        try {
+          await this.physicalRegistration!.publish(
+            'agent.estate_occupancy_census',
+            census.data,
+            census.data.taken_at,
+          );
+        } catch (error) {
+          await this.recordDroppedPublication(
+            'agent.estate_occupancy_census',
+            subject,
+            'transport_refused',
+            String(error),
+          );
+        }
       }
     });
   }
