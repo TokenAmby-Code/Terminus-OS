@@ -1,7 +1,8 @@
 // The boot-time occupancy census: the symmetric partner of the vacancy sweep.
 // The sweep says which declared seats the estate wants filled; the census says
 // who is seated. Both are assertions txd makes at boot fold completion from
-// truth it already holds, once — no timer, no repeating sweep.
+// truth it already holds, once at boot or on the explicit typed reconcile
+// command — no timer, no repeating sweep.
 //
 // The census exists because `agent.retired` is published after the close is
 // already committed and a dropped publication is never revisited: a consumer
@@ -20,6 +21,7 @@ import { Daemon } from '../src/core.ts';
 import { bindOverseerSource, closeRequest, retirementClear } from './close-fixture.ts';
 import type { TxdPublishedEventType } from '../src/events.ts';
 import { AGENT_TICKET_ID, DRIVING_FACT_OCCURRED_AT } from './agent-fixture.ts';
+import { resolveSshSeatTargets } from '../src/config.ts';
 
 const AGENT_ID = '708f52b6-5d8d-49cb-abab-caa3312244f9';
 const BIRTH_GENERATION = 'd78bdf2f-661b-471f-a561-a25c2230a0b7';
@@ -27,7 +29,7 @@ const OTHER_AGENT_ID = '3f0c1a94-6d2b-4f7a-8e51-9c4b2d6a7f13';
 const OTHER_BIRTH_GENERATION = 'c6dd56ca-1f0a-4f2c-9c22-8b7f4a91a2c4';
 const CONFIGURATION = { generation: 'estate-1', digest: 'c'.repeat(64) };
 
-function setup(options: { failPublish?: boolean } = {}) {
+function setup(options: { failPublish?: boolean; remoteTargets?: boolean } = {}) {
   const store = new MemoryEventStore();
   const tmux = new FakeTmux();
   const published: Array<{ type: string; payload: Record<string, unknown> }> = [];
@@ -36,7 +38,16 @@ function setup(options: { failPublish?: boolean } = {}) {
     configuration: CONFIGURATION,
     agentWrapper: '/fleet/agent-wrapper',
     perpetual: {},
-    sshSeatTargets: { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
+    sshSeatTargets: options.remoteTargets
+      ? resolveSshSeatTargets({
+          pages: { somnium: 'k12-work', somnium_fleet: 'k12-work' },
+          seats: {
+            'council:pax': 'k12-work',
+            'council:orchestrator': 'k12-work',
+            'palace:S': 'wsl',
+          },
+        })
+      : { pages: {}, seats: {}, targets: [], targetFor: () => undefined },
     publish: async (type: TxdPublishedEventType, payload: Record<string, unknown>) => {
       if (options.failPublish && type === 'agent.estate_occupancy_census') {
         throw new Error('bus_publish_refused:503');
@@ -144,6 +155,59 @@ test('a seated agent is asserted with the seat it sits in', async () => {
   }]);
 });
 
+test('boot publishes complete machine partitions, including an empty k12-work roster', async () => {
+  const { published, d } = setup({ remoteTargets: true });
+
+  await d.constructEstate();
+
+  const asserted = censuses(published);
+  expect(asserted.map((census) => census.machine)).toEqual(['k12-personal', 'k12-work', 'wsl']);
+  expect(asserted.map((census) => census.occupied)).toEqual([[], [], []]);
+  expect(new Set(asserted.map((census) => census.taken_at)).size).toBe(1);
+});
+
+test('somnium and remote council bindings belong only to the k12-work census', async () => {
+  const { published, d } = setup({ remoteTargets: true });
+  await d.constructEstate();
+  expect((await d.launch({
+    seat_id: 'somnium:N',
+    schema_version: SCHEMA_VERSION,
+    identity: AGENT_ID,
+    persona: 'sons-of-horus',
+    tint: '#1b3a2f',
+  })).ok).toBe(true);
+  expect((await d.launch({
+    seat_id: 'council:pax',
+    schema_version: SCHEMA_VERSION,
+    identity: OTHER_AGENT_ID,
+    persona: 'pax',
+    tint: '#ffffff',
+  })).ok).toBe(true);
+  published.length = 0;
+
+  await d.constructEstate();
+
+  const byMachine = new Map(censuses(published).map((census) => [census.machine, census]));
+  expect(byMachine.get('k12-personal')?.occupied).toEqual([]);
+  expect(byMachine.get('k12-work')?.occupied).toEqual([
+    {
+      seat_id: 'council:pax',
+      agent_id: OTHER_AGENT_ID,
+      birth_generation: null,
+      pane_generation: expect.any(String),
+      registered: false,
+    },
+    {
+      seat_id: 'somnium:N',
+      agent_id: AGENT_ID,
+      birth_generation: null,
+      pane_generation: expect.any(String),
+      registered: false,
+    },
+  ]);
+  expect(byMachine.get('wsl')?.occupied).toEqual([]);
+});
+
 test('an agent that left is absent from the roster — the departure a lost publication swallowed', async () => {
   const { store, tmux, published, d } = setup();
   await d.constructEstate();
@@ -197,6 +261,20 @@ test('the census is a boot fold, not a sweep: nothing else asserts one', async (
   expect((await d.close(closeRequest([AGENT_ID]))).ok).toBe(true);
 
   expect(censuses(published)).toHaveLength(0);
+});
+
+test('the typed estate reconcile surface reasserts current machine partitions on demand', async () => {
+  const { published, d } = setup({ remoteTargets: true });
+  await d.constructEstate();
+  published.length = 0;
+
+  await d.reconcile();
+
+  expect(censuses(published).map((census) => census.machine)).toEqual([
+    'k12-personal',
+    'k12-work',
+    'wsl',
+  ]);
 });
 
 test('a census the bus refuses leaves the boot standing and the estate built', async () => {
