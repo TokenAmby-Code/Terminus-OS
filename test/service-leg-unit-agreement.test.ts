@@ -58,8 +58,8 @@ describe("apply leg and installed unit agree", () => {
     expect(source).toContain(`"$terminus/bin/terminus-install-generation" "$terminus" ${service} src/daemon.ts`);
     expect(source).not.toContain("terminus-package-fingerprint");
     expect(read(unit)).not.toMatch(/^WorkingDirectory=/m);
-    // An installed tree cannot answer `git rev-parse`; the checkout SHA reaches
-    // the daemon as a drop-in the restart key does not fold.
+    // The selected release directory's provider SHA reaches the daemon as a
+    // drop-in the restart key does not fold.
     expect(source).toContain(`printf '[Service]\\nEnvironment=GIT_SHA=%s\\nWorkingDirectory=%s\\n' "$sha"`);
     if (proves === "function-probe") {
       // Promotion is the function rung, and the stamp is written only after it.
@@ -74,6 +74,12 @@ describe("apply leg and installed unit agree", () => {
 
   test("txd: the tx CLI is its own generation, linked through the current pointer", () => {
     const source = read("bin/apply-txd");
+    expect(source).toContain('selector="${TERMINUS_RELEASE_ROOT:-/usr/local/lib/terminus-os/current}"');
+    expect(source).toContain('releases="${TERMINUS_RELEASES_ROOT:-/usr/local/lib/terminus-os/releases}"');
+    expect(source).toContain('sha="$(basename "$terminus")"');
+    expect(source).toContain('^[0-9a-f]{40}$');
+    expect(source).not.toContain("runtimes/Terminus-OS/live");
+    expect(source).not.toContain("git -C");
     expect(source).toContain('"$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts --launcher tx src/main.ts');
     expect(source).toContain('tx_launcher="$install_root/tx/bin/tx"');
     expect(source).toContain('ln -sfn "$tx_launcher" "$user_bin_dir/tx"');

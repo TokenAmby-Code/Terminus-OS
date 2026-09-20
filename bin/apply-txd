@@ -9,7 +9,8 @@
 #
 # Every machine that is not k12-personal is a loud no-op.
 #
-# The leg is one idempotent host pass over a githubd-realized Terminus target:
+# The leg is one idempotent host pass over the selected root-owned Terminus
+# release:
 #   1. Secrets contract: ensure ~/secrets/txd exists, mode 700. Contents are
 #      provisioning-time material and never touched here.
 #   2. Generations: txd and tx each execute from an installed generation, never
@@ -26,15 +27,21 @@ if [[ "$machine" != "k12-personal" ]]; then
   exit 0
 fi
 
-fleet="${FLEET_CHECKOUT:-$HOME/runtimes/Token-Fleet/live}"
+fleet="${FLEET_CHECKOUT:-/usr/local/lib/token-fleet/current}"
 "$fleet/shared/bin/validate-service-placement" txd "$machine"
 "$fleet/shared/bin/validate-service-placement" tx-estate "$machine"
-terminus="${TERMINUS_CHECKOUT:-$HOME/runtimes/Terminus-OS/live}"
-
-if ! git -C "$terminus" rev-parse --git-dir >/dev/null 2>&1; then
-  echo "apply($machine): txd leg PARKED — no Terminus-OS runtime checkout at $terminus (clone it over the deploy key first)"
-  exit 0
-fi
+selector="${TERMINUS_RELEASE_ROOT:-/usr/local/lib/terminus-os/current}"
+releases="${TERMINUS_RELEASES_ROOT:-/usr/local/lib/terminus-os/releases}"
+terminus="$(realpath -e "$selector")" || {
+  echo "apply($machine): Terminus-OS release selector does not resolve: $selector" >&2
+  exit 1
+}
+releases="$(realpath -m "$releases")"
+sha="$(basename "$terminus")"
+[[ "$sha" =~ ^[0-9a-f]{40}$ && "$(dirname "$terminus")" == "$releases" ]] || {
+  echo "apply($machine): Terminus-OS release must resolve beneath $releases at its exact provider SHA" >&2
+  exit 1
+}
 
 # Cross-repo gate: the txd extraction (Terminus-OS PR) delivers this package.
 unit_dir="$terminus/packages/txd/systemd"
@@ -128,7 +135,6 @@ generation_dropin="$user_unit_dir/txd.service.d/generation.conf"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/token-fleet"
 stamp="$state_dir/txd.applied.sha256"
 registration_env="$HOME/.config/token-fleet/txd-registration.env"
-sha="$(git -C "$terminus" rev-parse HEAD)"
 [[ -f "$registration_env" ]] || {
   echo "apply($machine): txd registration environment is absent at $registration_env" >&2
   exit 1
@@ -141,9 +147,8 @@ sha="$(git -C "$terminus" rev-parse HEAD)"
 # EnvironmentFile — omitting that installed configuration once left txd
 # serving a stale allocation digest after registrationd restarted into a new
 # one. The checkout SHA reaches the daemon as its build stamp through a drop-in
-# the key does not fold: an installed tree is not a git checkout and cannot
-# answer rev-parse, so without the stamp /ctl/health git_sha would read
-# unknown after every deploy.
+# the key does not fold: the selected release directory names the exact
+# provider SHA, so the drop-in carries that immutable identity into health.
 txd_generation="$("$terminus/bin/terminus-install-generation" "$terminus" txd src/daemon.ts)"
 tx_generation="$("$terminus/bin/terminus-install-generation" "$terminus" tx src/main.ts --launcher tx src/main.ts)"
 tx_launcher="$install_root/tx/bin/tx"
