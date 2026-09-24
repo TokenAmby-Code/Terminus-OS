@@ -14,7 +14,6 @@
     "./ephemeral": "./src/ephemeral.ts",
     "./notification": "./src/notification.ts",
     "./hooks": "./src/hooks.ts",
-    "./desktop-telemetry": "./src/desktop-telemetry.ts",
     "./replay": "./src/replay.ts"
   },
   "dependencies": {
