@@ -37,6 +37,4 @@ describe("vendor hook-type enumeration", () => {
     expect(new Set(HOOK_TYPES).size).toBe(HOOK_TYPES.length);
     for (const t of HOOK_TYPES) expect(t).toMatch(/^[a-z][a-z0-9_]*$/);
   });
-
-
 });

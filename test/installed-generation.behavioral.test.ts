@@ -83,10 +83,7 @@ describe("an installed generation", () => {
     for (const file of ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json"]) {
       expect(existsSync(join(tree, file))).toBe(true);
     }
-
   });
-
-
 
   test("carries its declared launcher but no tests or apply leg", () => {
     const files = walk(join(generations(), digest));
@@ -153,8 +150,6 @@ describe("an installed generation", () => {
       rmSync(isolated, { recursive: true, force: true });
     }
   };
-
-
 
   test("a change inside the closure moves the digest", () => {
     const changed = realizeCopy((checkout) => {

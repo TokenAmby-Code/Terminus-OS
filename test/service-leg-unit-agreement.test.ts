@@ -59,8 +59,6 @@ describe("apply leg and installed unit agree", () => {
     expect(source.indexOf('echo "$new_hash" > "$stamp"')).toBeGreaterThan(source.indexOf("prove-service-function-ready"));
   });
 
-
-
   test("telemetryd: tm links to its baked generation launcher", () => {
     const source = read("bin/apply-telemetryd");
     expect(source).toContain('src/daemon.ts --launcher tm src/cli.ts');
@@ -131,6 +129,4 @@ describe("leg invariants that travelled with the legs", () => {
       expect(read(leg)).not.toContain('ln -sfn "$HOME/.bun/bin/bun"');
     }
   });
-
-
 });

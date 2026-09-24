@@ -8,7 +8,7 @@
 # unrelated package change restarted adjacent daemons and burned a converge.
 #
 # The stamps cannot simply drop HEAD. Services import workspace contracts and
-# telemetryd load the repository-owned PostgreSQL migration home outside
+# telemetryd loads the repository-owned PostgreSQL migration home outside
 # each daemon's own package directory.
 # HEAD was an over-broad but genuinely load-bearing proxy for "a package I
 # import changed". Deleting it outright would have traded spurious restarts for
