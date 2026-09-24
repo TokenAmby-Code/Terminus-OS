@@ -12,7 +12,6 @@ test('@terminus-os/systemd stays absent', async () => {
 
   const manifests = [
     'package.json',
-    'packages/telemetryd/package.json',
   ];
   for (const manifest of manifests) {
     expect(await Bun.file(join(root, manifest)).text()).not.toContain('@terminus-os/systemd');

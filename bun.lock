@@ -19,23 +19,9 @@
         "zod": "^4.4.3",
       },
     },
-    "packages/telemetryd": {
-      "name": "@terminus-os/telemetryd",
-      "version": "0.1.0",
-      "bin": {
-        "telemetryd": "src/daemon.ts",
-        "tm": "src/cli.ts",
-      },
-      "dependencies": {
-        "@terminus-os/contracts": "workspace:*",
-        "@tokenamby-code/stc-contract": "1.7.1",
-      },
-    },
   },
   "packages": {
     "@terminus-os/contracts": ["@terminus-os/contracts@workspace:packages/contracts"],
-
-    "@terminus-os/telemetryd": ["@terminus-os/telemetryd@workspace:packages/telemetryd"],
 
     "@tokenamby-code/agent-contract": ["@tokenamby-code/agent-contract@1.1.0", "https://npm.pkg.github.com/download/@tokenamby-code/agent-contract/1.1.0/cf921feffd9dd44afdf7244fdab930293f341135", { "dependencies": { "zod": "^4.4.3" } }, "sha512-Q1EAnjcHd6N4BlHC7VP0aWIDRikxqGmrchDXoC0euLmgWTJDEK6017d5D+cJiRzvLIA9udchqiibxQX9hneOoQ=="],
 
