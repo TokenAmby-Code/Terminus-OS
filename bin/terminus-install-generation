@@ -128,7 +128,7 @@ for manifest in "$terminus"/packages/*/package.json; do
     cp "$manifest" "$candidate/packages/$member/package.json"
   fi
 done
-if [[ -n "${closure[txd]:-}" || -n "${closure[telemetryd]:-}" ]]; then
+if [[ -n "${closure[telemetryd]:-}" ]]; then
   install -d "$candidate/migrations"
   cp "$terminus"/migrations/*.sql "$candidate/migrations/"
 fi
@@ -185,7 +185,7 @@ fi
 
 digest_members=(tsconfig.json bunfig.toml)
 for member in "${!closure[@]}"; do digest_members+=("packages/$member"); done
-if [[ -n "${closure[txd]:-}" || -n "${closure[telemetryd]:-}" ]]; then
+if [[ -n "${closure[telemetryd]:-}" ]]; then
   digest_members+=(migrations)
 fi
 if ((${#launchers[@]} > 0)); then digest_members+=(bin); fi

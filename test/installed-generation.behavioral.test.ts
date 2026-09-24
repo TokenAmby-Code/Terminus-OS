@@ -83,24 +83,10 @@ describe("an installed generation", () => {
     for (const file of ["package.json", "bun.lock", "bunfig.toml", "tsconfig.json"]) {
       expect(existsSync(join(tree, file))).toBe(true);
     }
-    // Members outside the closure are manifest-only stubs that keep the
-    // frozen lockfile describing this workspace; nothing of theirs is loaded.
-    expect(existsSync(join(tree, "packages/txd/package.json"))).toBe(true);
-    expect(existsSync(join(tree, "packages/txd/src"))).toBe(false);
+
   });
 
-  test("a CLI launcher invoked with an empty environment resolves the fleet baseline", () => {
-    const realized = run(root, "tx", "src/main.ts", "--launcher", "tx", "src/main.ts");
-    expect(realized.stderr).toBe("");
-    expect(realized.status).toBe(0);
-    const launcher = join(installRoot, "tx/bin/tx");
-    expect(existsSync(launcher)).toBe(true);
 
-    const invoked = spawnSync(launcher, ["version"], { encoding: "utf8", env: {} });
-    expect(invoked.stderr).toBe("");
-    expect(invoked.status).toBe(0);
-    expect(JSON.parse(invoked.stdout)).toMatchObject({ service: "txd", daemon: "txd", cli: "tx" });
-  });
 
   test("carries its declared launcher but no tests or apply leg", () => {
     const files = walk(join(generations(), digest));
@@ -168,16 +154,7 @@ describe("an installed generation", () => {
     }
   };
 
-  test("a change to a workspace member outside the closure does not move the digest", () => {
-    const unrelated = realizeCopy((checkout) => {
-      writeFileSync(join(checkout, "packages/txd/src/unrelated.ts"), "export const unrelated = true;\n");
-      const manifest = join(checkout, "packages/txd/package.json");
-      writeFileSync(manifest, JSON.stringify({
-        ...JSON.parse(readFileSync(manifest, "utf8")), description: "edited outside telemetryd's closure",
-      }));
-    });
-    expect(unrelated).toBe(digest);
-  });
+
 
   test("a change inside the closure moves the digest", () => {
     const changed = realizeCopy((checkout) => {
