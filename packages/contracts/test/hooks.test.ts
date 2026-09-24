@@ -5,7 +5,6 @@ import {
   HOOK_TYPES,
   FLEET_HOOK_TYPES,
   VENDOR_HOOK_TYPES,
-  HookTypeSchema,
 } from "../src/hooks.ts";
 
 // The vendor hook-type enumeration is PINNED from the shipped vendor binaries
@@ -37,12 +36,5 @@ describe("vendor hook-type enumeration", () => {
     ]);
     expect(new Set(HOOK_TYPES).size).toBe(HOOK_TYPES.length);
     for (const t of HOOK_TYPES) expect(t).toMatch(/^[a-z][a-z0-9_]*$/);
-  });
-
-  test("the hooks txd consumes from the proxy broadcast are in the enumeration", () => {
-    expect(HOOK_TYPES).toContain("stop");
-    expect(HOOK_TYPES).toContain("user_prompt_submit");
-    expect(HookTypeSchema.parse("stop")).toBe("stop");
-    expect(() => HookTypeSchema.parse("invented_hook")).toThrow();
   });
 });

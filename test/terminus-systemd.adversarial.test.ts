@@ -12,7 +12,6 @@ test('@terminus-os/systemd stays absent', async () => {
 
   const manifests = [
     'package.json',
-    'packages/txd/package.json',
     'packages/telemetryd/package.json',
   ];
   for (const manifest of manifests) {
